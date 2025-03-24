@@ -187,7 +187,12 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     dataloader_len = len(dataloader)
     metric_log = MetricLog()
     epoch_start_timestamp = time.time()
+    
+    data_start_timestamp = time.time()
+
     for i, batch in enumerate(dataloader):
+        img_metas = batch["img_metas"][0][0]
+
         iter_start_timestamp = time.time()
         tracks = TrackInstances.init_tracks(batch=batch,
                                             hidden_dim=get_model(model).hidden_dim,
@@ -208,7 +213,8 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                     model_outputs=res,
                     tracked_instances=tracks,
-                    frame_idx=frame_idx
+                    frame_idx=frame_idx,
+                    img_metas=img_metas
                 )
                 if frame_idx < len(batch["imgs"][0]) - 1:
                     tracks = get_model(model).postprocess_single_frame(
@@ -249,15 +255,19 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
         for log_k in log_dict:
             metric_log.update(name=log_k, value=log_dict[log_k][0])
         iter_end_timestamp = time.time()
-        metric_log.update(name="time per iter", value=iter_end_timestamp-iter_start_timestamp)
+        metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
+        metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
+        data_start_timestamp = time.time()
         # Outputs logs
-        if i % 100 == 0:
+        if i % 1 == 0:
             metric_log.sync()
             max_memory = max([torch.cuda.max_memory_allocated(torch.device('cuda', i))
                               for i in range(distributed_world_size())]) // (1024**2)
             second_per_iter = metric_log.metrics["time per iter"].avg
+            second_per_data = metric_log.metrics["time per data"].avg
             logger.show(head=f"[Epoch={epoch}, Iter={i}, "
                              f"{second_per_iter:.2f}s/iter, "
+                             f"{second_per_data:.2f}s/data, "
                              f"{i}/{dataloader_len} iters, "
                              f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
                              f"Max Memory={max_memory}MB]",
@@ -267,7 +277,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
 
         if multi_checkpoint:
-            if i % 100 == 0 and is_main_process():
+            if i % 1 == 0 and is_main_process():
                 save_checkpoint(
                     model=model,
                     path=os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
@@ -310,9 +320,12 @@ def get_param_groups(config: dict, model: nn.Module) -> Tuple[List[Dict], List[s
     backbone_keywords = ["backbone.backbone"]
     points_keywords = ["reference_points", "sampling_offsets"]  # 在 transformer 中用于选取参考点和采样点的网络参数关键字
     query_updater_keywords = ["query_updater"]
+    dictionary_names = [] if "LR_DICTIONARY_NAMES" not in config else config["LR_DICTIONARY_NAMES"]
+    _dictionary_scale = 1.0 if "LR_DICTIONARY_SCALE" not in config else config["LR_DICTIONARY_SCALE"]
+
     param_groups = [
         {   # backbone 学习率设置
-            "params": [p for n, p in model.named_parameters() if match_keywords(n, backbone_keywords) and p.requires_grad],
+            "params": [p for n, p in model.named_parameters() if match_keywords(n, backbone_keywords) and p.requires_grad and not match_keywords(n, dictionary_names)],
             "lr": config["LR_BACKBONE"]
         },
         {
@@ -326,11 +339,23 @@ def get_param_groups(config: dict, model: nn.Module) -> Tuple[List[Dict], List[s
             "lr": config["LR"]
         },
         {
+            "params": [p for n, p in model.named_parameters() if match_keywords(n, dictionary_names) and p.requires_grad],
+            "lr": config["LR"] * _dictionary_scale
+        },
+        {
             "params": [p for n, p in model.named_parameters() if not match_keywords(n, backbone_keywords)
                        and not match_keywords(n, points_keywords)
                        and not match_keywords(n, query_updater_keywords)
+                       and not match_keywords(n, dictionary_names)
                        and p.requires_grad],
             "lr": config["LR"]
         }
     ]
-    return param_groups, ["lr_backbone", "lr_points", "lr_query_updater", "lr"]
+        # 打印 param_groups的所有lr
+    for param_group in param_groups:
+        if "lr" in param_group:
+            print(f'there are {len(param_group["params"])} params with lr {param_group["lr"]}')
+        else :
+            print(f'there are {len(param_group["params"])} params with no lr settings')
+
+    return param_groups, ["lr_backbone", "lr_points", "lr_query_updater", "lr", "lr_dictionary"]

@@ -100,11 +100,12 @@ class QueryUpdater(nn.Module):
             else:
                 tracks[b].ref_pts[is_pos] = inverse_sigmoid(tracks[b][is_pos].boxes.detach().clone())
 
-            query_pos = pos_to_pos_embed(tracks[b].ref_pts.sigmoid(), num_pos_feats=self.hidden_dim//2)
+
             output_embed = tracks[b].output_embed
             last_output_embed = tracks[b].last_output
             long_memory = tracks[b].long_memory.detach()
-
+            query_pos = pos_to_pos_embed(tracks[b].ref_pts.sigmoid(), num_pos_feats=self.hidden_dim//2, dst_dim=512)#! #TODO 硬编码
+            
             # Confidence Weight
             confidence_weight = self.confidence_weight_net(output_embed)
 
@@ -227,13 +228,13 @@ class QueryUpdater(nn.Module):
                         fake_tracks.query_embed = torch.randn((1, 2 * self.hidden_dim), dtype=torch.float, device=device)
                     fake_tracks.output_embed = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
                     if self.use_dab:
-                        fake_tracks.ref_pts = torch.randn((1, 4), dtype=torch.float, device=device)
+                        fake_tracks.ref_pts = torch.randn((1, 5), dtype=torch.float, device=device)
                     else:
                         # fake_tracks.ref_pts = torch.randn((1, 2), dtype=torch.float, device=device)
                         fake_tracks.ref_pts = torch.randn((1, 4), dtype=torch.float, device=device)
                     fake_tracks.ids = torch.as_tensor([-2], dtype=torch.long, device=device)
                     fake_tracks.matched_idx = torch.as_tensor([-2], dtype=torch.long, device=device)
-                    fake_tracks.boxes = torch.randn((1, 4), dtype=torch.float, device=device)
+                    fake_tracks.boxes = torch.randn((1, 5), dtype=torch.float, device=device)
                     fake_tracks.logits = torch.randn((1, active_tracks.logits.shape[1]), dtype=torch.float, device=device)
                     fake_tracks.iou = torch.zeros((1,), dtype=torch.float, device=device)
                     fake_tracks.last_output = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)

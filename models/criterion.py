@@ -22,6 +22,9 @@ from structures.track_instances import TrackInstances
 from utils.box_ops import generalized_box_iou, box_cxcywh_to_xyxy, box_iou_union
 from utils.utils import is_distributed, distributed_world_size
 
+from hsmot.loss.loss import l1_loss_rotate, loss_rotated_iou_norm_bboxes1
+from hsmot.util.dist import box_iou_rotated_norm_bboxes1
+
 
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
@@ -77,9 +80,10 @@ class ClipCriterion:
             gt_trackinstances = TrackInstances.init_tracks(batch, hidden_dim=hidden_dim,
                                                            num_classes=num_classes, device=self.device)
             for b in range(batch_size):
-                gt_trackinstances[b].ids = batch["infos"][b][c]["ids"]
+                gt_trackinstances[b].ids = batch["infos"][b][c]["obj_ids"]
                 gt_trackinstances[b].labels = batch["infos"][b][c]["labels"]
                 gt_trackinstances[b].boxes = batch["infos"][b][c]["boxes"]
+                gt_trackinstances[b].norm_boxes = batch["infos"][b][c]["norm_boxes"]
                 gt_trackinstances[b] = gt_trackinstances[b].to(self.device)
             self.gt_trackinstances_list.append(gt_trackinstances)
 
@@ -135,7 +139,7 @@ class ClipCriterion:
                     break
         return loss, log
 
-    def process_single_frame(self, model_outputs: dict, tracked_instances: List[TrackInstances], frame_idx: int):
+    def process_single_frame(self, model_outputs: dict, tracked_instances: List[TrackInstances], frame_idx: int, img_metas):
         """
         Process this criterion for a single frame.
 
@@ -194,7 +198,7 @@ class ClipCriterion:
             untracked_gt_trackinstances.append(gt_trackinstances[b][idx_bool])
 
         # 5. Use Hungarian algorithm to matching.
-        matcher_res = self.matcher(outputs=detection_res, targets=untracked_gt_trackinstances, use_focal=True)
+        matcher_res = self.matcher(outputs=detection_res, targets=untracked_gt_trackinstances, use_focal=True, img_metas=img_metas)
         matcher_res = [list(mr) for mr in matcher_res]
 
         def matcher_res_for_gt_idx(res):
@@ -261,7 +265,7 @@ class ClipCriterion:
         # 9. Compute the bounding box loss.
         loss_l1, loss_giou = self.get_loss_box(outputs=model_outputs,
                                                gt_trackinstances=gt_trackinstances,
-                                               idx_to_gts_idx=outputs_idx_to_gts_idx)
+                                               idx_to_gts_idx=outputs_idx_to_gts_idx, img_metas=img_metas)
 
         # 10. Count how many GTs.
         n_gts = sum([len(gts) for gts in gt_trackinstances])
@@ -285,11 +289,11 @@ class ClipCriterion:
                 # Same to 5.
                 if i < self.merge_det_track_layer:
                     aux_matcher_res = self.matcher(outputs=aux_det_res, targets=gt_trackinstances,
-                                                   use_focal=True)
+                                                   use_focal=True, img_metas=img_metas)
                     aux_matcher_res = [list(mr) for mr in aux_matcher_res]
                 else:
                     aux_matcher_res = self.matcher(outputs=aux_det_res, targets=untracked_gt_trackinstances,
-                                                   use_focal=True)
+                                                   use_focal=True, img_metas=img_metas)
                     aux_matcher_res = [list(mr) for mr in aux_matcher_res]
                     aux_matcher_res = matcher_res_for_gt_idx(aux_matcher_res)
                 # Same to some part in 7.
@@ -308,7 +312,7 @@ class ClipCriterion:
                                                      idx_to_gts_idx=aux_idx_to_gts_idx)
                 aux_loss_l1, aux_loss_giou = self.get_loss_box(outputs=model_outputs["aux_outputs"][i],
                                                                gt_trackinstances=gt_trackinstances,
-                                                               idx_to_gts_idx=aux_idx_to_gts_idx)
+                                                               idx_to_gts_idx=aux_idx_to_gts_idx, img_metas=img_metas)
 
                 self.loss["aux_box_l1_loss"] += aux_loss_l1 * self.frame_weights[frame_idx] * self.aux_weights[i]
                 self.loss["aux_box_giou_loss"] += aux_loss_giou * self.frame_weights[frame_idx] * self.aux_weights[i]
@@ -353,18 +357,17 @@ class ClipCriterion:
 
         # Compute IoU.
         for b in range(len(tracked_instances)):
-            new_trackinstances[b].iou[new_trackinstances[b].matched_idx >= 0] = torch.diag(box_iou_union(
-                box_cxcywh_to_xyxy(new_trackinstances[b][new_trackinstances[b].matched_idx >= 0].boxes),
-                box_cxcywh_to_xyxy(gt_trackinstances[b]
-                                   [new_trackinstances[b][new_trackinstances[b].matched_idx >= 0]
-                                   .matched_idx].boxes)
-            )[0])
-            tracked_instances[b].iou[tracked_instances[b].matched_idx >= 0] = torch.diag(box_iou_union(
-                box_cxcywh_to_xyxy(tracked_instances[b][tracked_instances[b].matched_idx >= 0].boxes),
-                box_cxcywh_to_xyxy(gt_trackinstances[b]
-                                   [tracked_instances[b][tracked_instances[b].matched_idx >= 0]
-                                   .matched_idx].boxes)
-            )[0])
+            new_trackinstances[b].iou[new_trackinstances[b].matched_idx >= 0] =  box_iou_rotated_norm_bboxes1(
+                new_trackinstances[b][new_trackinstances[b].matched_idx >= 0].boxes,
+                gt_trackinstances[b][new_trackinstances[b][new_trackinstances[b].matched_idx >= 0].matched_idx].boxes,
+                img_shape=img_metas['img_shape'], version=img_metas['version'], aligned=True
+            )
+
+            tracked_instances[b].iou[tracked_instances[b].matched_idx >= 0] = box_iou_rotated_norm_bboxes1(
+                tracked_instances[b][tracked_instances[b].matched_idx >= 0].boxes,
+                gt_trackinstances[b][tracked_instances[b][tracked_instances[b].matched_idx >= 0].matched_idx].boxes,
+                img_shape=img_metas['img_shape'], version=img_metas['version'], aligned=True
+            )
             pass
 
         return tracked_instances, new_trackinstances, unmatched_detections
@@ -414,7 +417,7 @@ class ClipCriterion:
         return loss
 
     @staticmethod
-    def get_loss_box(outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx):
+    def get_loss_box(outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx, img_metas):
         """
         Computer the bounding box loss, l1 and giou.
         """
@@ -426,16 +429,20 @@ class ClipCriterion:
             gt_trackinstances[b].boxes[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
             for b in range(len(gt_trackinstances))
         ]
+        norm_gt_boxes = [
+            gt_trackinstances[b].norm_boxes[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
+            for b in range(len(gt_trackinstances))
+        ]
         matched_pred_boxes = torch.cat(matched_pred_boxes)
         gt_boxes = torch.cat(gt_boxes).to(matched_pred_boxes.device)
+        norm_gt_boxes = torch.cat(norm_gt_boxes).to(matched_pred_boxes.device)
 
-        loss_l1 = F.l1_loss(input=matched_pred_boxes, target=gt_boxes, reduction="none").sum()
-        loss_giou = (1 - torch.diag(
-            input=generalized_box_iou(
-                box_cxcywh_to_xyxy(matched_pred_boxes),
-                box_cxcywh_to_xyxy(gt_boxes)
-            )
-        )).sum()
+        loss_l1 = l1_loss_rotate(matched_pred_boxes, norm_gt_boxes).sum()
+        if(matched_pred_boxes.size(0) == 0):
+            loss_giou = torch.zeros_like(loss_l1)
+        else:
+            loss_giou = (1-loss_rotated_iou_norm_bboxes1(matched_pred_boxes,  gt_boxes, img_metas['img_shape'], img_metas['version'])).sum()
+
         return loss_l1, loss_giou
 
 
@@ -474,6 +481,7 @@ def build(config: dict):
         "MOT17": 1,
         "MOT17_SPLIT": 1,
         "BDD100K": 8,
+        "hsmot_8ch": 8,
     }
     return ClipCriterion(
         num_classes=dataset_num_classes[config["DATASET"]],

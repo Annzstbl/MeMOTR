@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchvision.models import resnet50, ResNet50_Weights
+from torchvision.models import resnet50
 from torchvision.models._utils import IntermediateLayerGetter
 from typing import Dict, List
 from utils.nested_tensor import NestedTensor
@@ -56,7 +56,7 @@ class Backbone(nn.Module):
     """
     ResNet with frozen BatchNorm as backbone.
     """
-    def __init__(self, backbone_name: str, train_backbone: bool, return_interm_layers: bool):
+    def __init__(self, backbone_name: str, train_backbone: bool, return_interm_layers: bool, input_channel: int):
         """
         初始化一个 Backbone
 
@@ -67,7 +67,20 @@ class Backbone(nn.Module):
         """
         super(Backbone, self).__init__()
         assert backbone_name == "resnet50", f"Backbone do not support '{backbone_name}'."
-        backbone = resnet50(weights=ResNet50_Weights.DEFAULT, norm_layer=FrozenBatchNorm2d)
+        backbone = resnet50(pretrained=True, norm_layer=FrozenBatchNorm2d)
+        if input_channel != 3:
+            conv1_3ch = backbone.conv1
+            new_conv = nn.Conv2d(
+            in_channels=input_channel,
+            out_channels=conv1_3ch.out_channels,
+            kernel_size=conv1_3ch.kernel_size,
+            stride=conv1_3ch.stride,
+            padding=conv1_3ch.padding,
+            dilation=conv1_3ch.dilation,
+            groups=conv1_3ch.groups,
+            bias=(conv1_3ch.bias is not None)
+        )
+            backbone.conv1 = new_conv
 
         for name, parameter in backbone.named_parameters():
             if not train_backbone or ("layer2" not in name and "layer3" not in name and "layer4" not in name):
@@ -133,5 +146,5 @@ class BackboneWithPE(nn.Module):
 
 def build(config: dict) -> BackboneWithPE:
     position_embedding = build_position_embedding(config=config)
-    backbone = Backbone(backbone_name=config["BACKBONE"], train_backbone=True, return_interm_layers=True)
+    backbone = Backbone(backbone_name=config["BACKBONE"], train_backbone=True, return_interm_layers=True, input_channel=config["INPUT_CHANNELS"])
     return BackboneWithPE(backbone=backbone, position_embedding=position_embedding)

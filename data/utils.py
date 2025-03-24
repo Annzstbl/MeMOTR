@@ -7,6 +7,7 @@ from collections import defaultdict
 def collate_fn(batch):
     collated_batch = defaultdict(list)
     for data in batch:
-        collated_batch["imgs"].append(data["imgs"])
-        collated_batch["infos"].append(data["infos"])
+        collated_batch["imgs"].append(data["images"])
+        collated_batch["infos"].append(data["targets"])
+        collated_batch["img_metas"].append(data['img_metas'])
     return collated_batch

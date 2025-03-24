@@ -54,9 +54,9 @@ class MeMOTR(nn.Module):
         self.transformer = transformer
         self.query_updater = query_updater
         self.class_embed = nn.Linear(in_features=self.hidden_dim, out_features=num_classes)
-        self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=4, num_layers=3)
+        self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=5, num_layers=3)
         if self.use_dab:
-            self.det_anchor = nn.Parameter(torch.randn(self.n_det_queries, 4))  # (N_det, 4)
+            self.det_anchor = nn.Parameter(torch.randn(self.n_det_queries, 5))  # (N_det, 4) #旋转框改成5
             self.det_query_embed = nn.Parameter(torch.randn(self.n_det_queries, self.hidden_dim))       # (N_det, C)
         else:
             self.det_query_embed = nn.Parameter(torch.randn(self.n_det_queries, self.hidden_dim * 2))   # (N_det, 2C)
@@ -152,7 +152,7 @@ class MeMOTR(nn.Module):
             reference = inverse_sigmoid(reference)
             output_class = self.class_embed[level](outputs[level])
             bbox_tmp = self.bbox_embed[level](outputs[level])
-            if reference.shape[-1] == 4:
+            if reference.shape[-1] == 5:
                 bbox_tmp += reference
             else:
                 assert reference.shape[-1] == 2, f"Reference should have only 2 coord, but get {reference.shape[-1]}."
@@ -221,7 +221,7 @@ class MeMOTR(nn.Module):
         """
         max_len = max([len(t.ref_pts) for t in tracks])
         if self.use_dab:
-            references = torch.zeros((len(tracks), max_len, 4))
+            references = torch.zeros((len(tracks), max_len, 5)) #for rotate
         else:
             # references = torch.zeros((len(tracks), max_len, 2))
             references = torch.zeros((len(tracks), max_len, 4))
@@ -294,6 +294,7 @@ def build(config: dict):
         "MOT17": 1,
         "MOT17_SPLIT": 1,
         "BDD100K": 8,
+        "hsmot_8ch": 8,
     }
     assert config["DATASET"] in dataset_num_classes, f"Do not know the class num of {config['DATASET']} dataset."
     num_classes = dataset_num_classes[config["DATASET"]]

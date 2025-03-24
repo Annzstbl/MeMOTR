@@ -33,7 +33,7 @@ class DeformableDecoder(nn.Module):
         self.n_det_queries = n_det_queries
         self.d_model = d_model
         # hack implementation for iterative bounding box refinement and two-stage Deformable DETR
-        self.bbox_embed = None
+        self.bbox_embed = None # 在memotr模型中通过set_refine_bbox_embed函数赋值
         self.class_embed = None
         self.use_checkpoint = use_checkpoint
         self.use_dab = use_dab
@@ -79,12 +79,17 @@ class DeformableDecoder(nn.Module):
                 ref_pts_backup = reference_points.clone()
                 reference_points = reference_points[:, :, :2]
                 pass
-            if reference_points.shape[-1] == 4:
-                reference_points_input = reference_points[:, :, None] \
+            if reference_points.shape[-1] == 5:
+                reference_points_input = reference_points[:, :, :4]
+                reference_points_input = reference_points_input[:, :, None] \
                                          * torch.cat([src_valid_ratios, src_valid_ratios], -1)[:, None]
+            # elif reference_points.shape[-1] == 4:
+            #     reference_points_input = reference_points[:, :, None] \
+            #                              * torch.cat([src_valid_ratios, src_valid_ratios], -1)[:, None]
             else:
                 assert reference_points.shape[-1] == 2
                 reference_points_input = reference_points[:, :, None] * src_valid_ratios[:, None]
+
             if self.use_dab:
                 anchor_embed = pos_to_pos_embed(
                     pos=reference_points_input[:, :, 0, :],
@@ -138,7 +143,7 @@ class DeformableDecoder(nn.Module):
             # hack implementation for iterative bounding box refinement.
             if self.bbox_embed is not None:
                 tmp = self.bbox_embed[lid](output)
-                if reference_points.shape[-1] == 4:
+                if reference_points.shape[-1] == 5:
                     new_reference_points = tmp + inverse_sigmoid(reference_points)
                     new_reference_points = new_reference_points.sigmoid()
                 else:

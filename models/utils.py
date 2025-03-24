@@ -75,13 +75,23 @@ def query_masks_to_attn_mask(query_mask: torch.Tensor, n_heads: int, src_len: in
     return attn_mask
 
 
-def pos_to_pos_embed(pos, num_pos_feats: int = 64, temperature: int = 10000, scale: float = 2 * math.pi):
+def pos_to_pos_embed(pos, num_pos_feats: int = 64, temperature: int = 10000, scale: float = 2 * math.pi, dst_dim=None):
+    if dst_dim:
+        num_pos_feats = dst_dim//pos.shape[-1]
+        num_pos_feats = num_pos_feats if num_pos_feats%2==0 else num_pos_feats-1
+
     pos = pos * scale
     dim_i = torch.arange(num_pos_feats, dtype=torch.float32, device=pos.device)
     dim_i = temperature ** (2 * (torch.div(dim_i, 2, rounding_mode="trunc")) / num_pos_feats)
     pos_embed = pos[..., None] / dim_i      # (N, M, n_feats) or (B, N, M, n_feats)
     pos_embed = torch.stack((pos_embed[..., 0::2].sin(), pos_embed[..., 1::2].cos()), dim=-1)
     pos_embed = torch.flatten(pos_embed, start_dim=-3)
+    
+    if dst_dim:
+        assert pos_embed.shape[-1] < dst_dim
+        posemb_shape = pos_embed.shape
+        pos_embed = torch.cat((pos_embed, torch.zeros(*posemb_shape[:-1], dst_dim-posemb_shape[-1],device=pos_embed.device)), dim=-1)
+
     return pos_embed
 
 
@@ -108,6 +118,20 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
                         # We directly do not use the pretrained class embed for BDD100K
                     else:
                         raise NotImplementedError('invalid shape: {}'.format(model_state_dict[k].shape))
+                    
+                # for bbox_embed:
+                elif "bbox_embed" in k:
+                    if len(pretrained_state_dict[k]) != len(model_state_dict[k]):
+                        # missmatch for model need 5 out_ch
+                        if 'weight' in k:
+                            model_state_dict[k][:4, :] = pretrained_state_dict[k]
+                            pretrained_state_dict[k] = model_state_dict[k]
+                        elif 'bias' in k:
+                            model_state_dict[k][:4] = pretrained_state_dict[k]
+                            pretrained_state_dict[k] = model_state_dict[k]
+                        else:
+                            raise NotImplementedError(f"some thing wrong with the bbox_embed.")
+                        
                 else:
                     print(f"Parameter {k} has shape{pretrained_state_dict[k].shape} in pretrained model, "
                           f"but get shape{model_state_dict[k].shape} in current model.")
@@ -125,8 +149,11 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
                 pretrained_state_dict["det_query_embed"] = model_state_dict["det_query_embed"]
             del pretrained_state_dict[k]
         elif "refpoint_embed" in k:
-            if pretrained_state_dict[k].shape == model_state_dict["det_anchor"].shape:
-                pretrained_state_dict["det_anchor"] = pretrained_state_dict[k].clone()
+            pre_shape =  pretrained_state_dict[k].shape
+            model_shape = model_state_dict["det_anchor"].shape
+            if pre_shape[0] == model_shape[0]:
+                model_state_dict["det_anchor"][:,:4] = pretrained_state_dict[k].clone()
+                pretrained_state_dict[k] = model_state_dict["det_anchor"]
             else:
                 pretrained_state_dict["det_anchor"] = model_state_dict["det_anchor"]
                 print(f"Pretrain model's query num is {pretrained_state_dict[k].shape[0]}, "
@@ -143,6 +170,7 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
             new_k = "feature_projs" + new_k
             pretrained_state_dict[new_k] = pretrained_state_dict[k].clone()
             del pretrained_state_dict[k]
+
         else:
             pass
 
@@ -160,6 +188,12 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
             not_in_pretrained += 1
             if show_details:
                 print(f"There is a new parameter {k} in the current model, but not in the pretrained model.")
+
+    # 检查所有不匹配的参数 
+    for k, v in pretrained_state_dict.items():
+        if v.shape != model_state_dict[k].shape:
+            print(f"Skip loading parameter {k}, required shape {model_state_dict[k].shape}, loaded shape {v.shape}.")
+
 
     model.load_state_dict(state_dict=pretrained_state_dict, strict=False)
     print(f"Pretrained model is loaded, there are {not_in_model} parameters droped "

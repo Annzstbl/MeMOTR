@@ -45,8 +45,10 @@ class Logger:
             self.logdir = logdir
             os.makedirs(self.logdir, exist_ok=True)
             # os.makedirs(os.path.join(self.logdir, "tb_log"), exist_ok=True)
-            self.tb_iters_logger: tb.SummaryWriter = tb.SummaryWriter(log_dir=os.path.join(self.logdir, "tb_iters_log"))
-            self.tb_epochs_logger: tb.SummaryWriter = tb.SummaryWriter(log_dir=os.path.join(self.logdir, "tb_epochs_log"))
+            # self.tb_iters_logger: tb.SummaryWriter = tb.SummaryWriter(log_dir=os.path.join(self.logdir, "tb_iters_log"))
+            # self.tb_epochs_logger: tb.SummaryWriter = tb.SummaryWriter(log_dir=os.path.join(self.logdir, "tb_epochs_log"))
+            self.tb_iters_logger: tb.SummaryWriter | None = None
+            self.tb_epochs_logger: tb.SummaryWriter | None = None
         else:
             self.logdir = None
             self.tb_iters_logger: tb.SummaryWriter | None = None
@@ -122,6 +124,8 @@ class Logger:
         return
 
     def tb_add_scalar(self, tag: str, scalar_value: float, global_step: int, mode: str):
+        if self.tb_iters_logger is None:
+            return 
         if (self.only_main and is_main_process()) or (self.only_main is False):
             if mode == "iters":
                 writer: tb.SummaryWriter = self.tb_iters_logger
@@ -135,6 +139,8 @@ class Logger:
         return
 
     def tb_add_metric_log(self, log: MetricLog, steps: int, mode: str):
+        if self.tb_iters_logger is None:
+            return 
         if (self.only_main and is_main_process()) or (self.only_main is False):
             log_keys = log.metrics.keys()
             box_l1_loss_keys, box_giou_loss_keys, label_focal_loss_keys = [], [], []
@@ -182,6 +188,8 @@ class Logger:
         return
 
     def tb_add_git_version(self, git_version: str):
+        if self.tb_iters_logger is None:
+            return 
         if (self.only_main and is_main_process()) or (self.only_main is False):
             git_version = "null" if git_version is None else git_version
             self.tb_iters_logger.add_text(tag="git_version", text_string=git_version)

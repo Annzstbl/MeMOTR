@@ -16,14 +16,14 @@ class TrackInstances:
         self.hidden_dim = hidden_dim
         self.num_classes = num_classes
         if self.use_dab:
-            self.ref_pts = torch.zeros((0, 4))
+            self.ref_pts = torch.zeros((0, 5))
             self.query_embed = torch.zeros((0, hidden_dim))
         else:
             # self.ref_pts = torch.zeros((0, 2))
             self.ref_pts = torch.zeros((0, 4))
             self.query_embed = torch.zeros((0, 2 * hidden_dim))
         self.ids = torch.zeros((0,), dtype=torch.long)
-        self.boxes = torch.zeros((0, 4))
+        self.boxes = torch.zeros((0, 5))
         self.labels = torch.zeros((0,), dtype=torch.long)
         self.logits = torch.zeros((0, self.num_classes))
         self.matched_idx = torch.zeros((0, ), dtype=torch.long)

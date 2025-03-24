@@ -1,3 +1,9 @@
 .idea
 *.pth
 *.mp4
+
+
+*.pyc
+*.log
+/models/ops/
+/outputs/

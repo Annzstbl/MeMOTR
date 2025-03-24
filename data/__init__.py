@@ -22,6 +22,7 @@ from .bdd100k import build as build_bbd100k
 from .mot import MOTDataset
 from .utils import collate_fn
 from utils.utils import is_distributed
+from .hsmot_8ch import build as build_hsmot_8ch
 
 
 def build_dataset(config: dict, split: str) -> MOTDataset:
@@ -35,6 +36,8 @@ def build_dataset(config: dict, split: str) -> MOTDataset:
         return build_mot17(config=config, split=split)
     elif config["DATASET"] == "BDD100K":
         return build_bbd100k(config=config, split=split)
+    elif config["DATASET"] == "hsmot_8ch":
+        return build_hsmot_8ch(config=config, split=split)
     else:
         raise ValueError(f"Dataset {config['DATASET']} is not supported!")
 
