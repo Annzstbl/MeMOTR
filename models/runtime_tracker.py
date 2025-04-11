@@ -86,12 +86,14 @@ class RuntimeTracker:
             self.max_obj_id += 1
         new_tracks.ids = torch.as_tensor(ids, dtype=torch.long)
         new_tracks = new_tracks.to(new_tracks.logits.device)
-        for _ in range(len(new_tracks)):
-            self.motions[new_tracks.ids[_].item()] = Motion(
-                min_record_length=self.motion_min_length,
-                max_record_length=self.motion_max_length
-            )
-            self.motions[new_tracks.ids[_].item()].add_box(new_tracks.boxes[_].cpu())
+
+        if self.use_motion:
+            for _ in range(len(new_tracks)):
+                self.motions[new_tracks.ids[_].item()] = Motion(
+                    min_record_length=self.motion_min_length,
+                    max_record_length=self.motion_max_length
+                )
+                self.motions[new_tracks.ids[_].item()].add_box(new_tracks.boxes[_].cpu())
 
         if self.visualize:
             visualize_ids += ids

@@ -19,8 +19,8 @@ from utils.box_ops import box_cxcywh_to_xyxy
 from log.logger import Logger
 from data.seq_dataset import SeqDataset
 from structures.track_instances import TrackInstances
-
-
+from hsmot.datasets.pipelines.channel import rotate_norm_boxes_to_boxes
+from hsmot.mmlab.hs_mmrotate import obb2poly
 class Submitter:
     def __init__(self, dataset_name: str, split_dir: str, seq_name: str, outputs_dir: str, model: nn.Module,
                  det_score_thresh: float = 0.7, track_score_thresh: float = 0.6, result_score_thresh: float = 0.7,
@@ -60,7 +60,9 @@ class Submitter:
         tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
                                  num_classes=get_model(self.model).num_classes,
                                  use_dab=self.use_dab).to(self.device)]
-        bdd100k_results = []    # for bdd100k, will be converted into json file, different from other datasets.
+        # bdd100k_results = []    # for bdd100k, will be converted into json file, different from other datasets.
+
+        txt_lines = []
         for i, ((image, ori_image), info) in enumerate(tqdm(self.dataloader, desc=f"Submit seq: {self.seq_name}")):
             # image: (1, C, H, W); ori_image: (1, H, W, C)
             frame = tensor_list_to_nested_tensor([image[0]]).to(self.device)
@@ -94,28 +96,41 @@ class Submitter:
             tracks_result = self.filter_by_score(tracks_result, thresh=self.result_score_thresh)
             tracks_result = self.filter_by_area(tracks_result)
             # to xyxy:
-            tracks_result.boxes = box_cxcywh_to_xyxy(tracks_result.boxes)
-            tracks_result.boxes = (tracks_result.boxes * torch.as_tensor([ori_w, ori_h, ori_w, ori_h], dtype=torch.float))
-            if self.dataset_name == "BDD100K":
-                self.update_results(tracks_result=tracks_result, frame_idx=i, results=bdd100k_results, img_path=info[0])
-            else:
-                self.write_results(tracks_result=tracks_result, frame_idx=i)
+            # tracks_result.boxes = box_cxcywh_to_xyxy(tracks_result.boxes)
+            # tracks_result.boxes = (tracks_result.boxes * torch.as_tensor([ori_w, ori_h, ori_w, ori_h], dtype=torch.float))
 
-            if self.visualize:
-                os.makedirs(f"./outputs/visualize_tmp/frame_{i+1}/", exist_ok=False)
-                os.system(f"mv ./outputs/visualize_tmp/query_updater/ ./outputs/visualize_tmp/frame_{i+1}/")
-                os.system(f"mv ./outputs/visualize_tmp/decoder/ ./outputs/visualize_tmp/frame_{i+1}/")
-                os.system(f"mv ./outputs/visualize_tmp/memotr/ ./outputs/visualize_tmp/frame_{i+1}/")
-                os.system(f"mv ./outputs/visualize_tmp/runtime_tracker/ ./outputs/visualize_tmp/frame_{i+1}/")
+            # if self.dataset_name == "BDD100K":
+            #     self.update_results(tracks_result=tracks_result, frame_idx=i, results=bdd100k_results, img_path=info[0])
+            # else:
+            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (image.shape[2], image.shape[3]), version='le135')
+            boxes_xyxyxyxy = obb2poly(boxes_xyxyxyxy)
 
-        if self.visualize:
-            visualize_save_dir = os.path.join("./outputs/visualize/", self.seq_name)
-            os.makedirs(visualize_save_dir, exist_ok=True)
-            os.system(f"mv ./outputs/visualize_tmp/* {visualize_save_dir}")
+            for _tracks, xyxyxyxy in zip(tracks_result, boxes_xyxyxyxy):
+                save_format = '{frame:6d},{id:6d},{x1:.3f},{y1:.3f},{x2:.3f},{y2:.3f},{x3:.3f},{y3:.3f},{x4:.3f},{y4:.3f},{conf:.3f},{label:2d},-1\n'
+                x1, y1, x2, y2, x3, y3, x4, y4 = xyxyxyxy.tolist()
+                obj_id = _tracks.ids.item()
+                conf = torch.max(_tracks.scores, dim=-1).values.item()
+                label = _tracks.labels.item()
+                line = save_format.format(frame=i + 1, id=obj_id, x1=x1, y1=y1, x2=x2, y2=y2, x3=x3, y3=y3, x4=x4, y4=y4, conf=conf, label=label)
+                txt_lines.append(line)
 
-        if self.dataset_name == "BDD100K":
-            with open(os.path.join(self.predict_dir, '{}.json'.format(self.seq_name)), 'w', encoding='utf-8') as f:
-                json.dump(bdd100k_results, f)
+        with open(os.path.join(self.predict_dir, f"{self.seq_name}.txt"), "w") as file:
+            file.writelines(txt_lines)
+            # if self.visualize:
+            #     os.makedirs(f"./outputs/visualize_tmp/frame_{i+1}/", exist_ok=False)
+            #     os.system(f"mv ./outputs/visualize_tmp/query_updater/ ./outputs/visualize_tmp/frame_{i+1}/")
+            #     os.system(f"mv ./outputs/visualize_tmp/decoder/ ./outputs/visualize_tmp/frame_{i+1}/")
+            #     os.system(f"mv ./outputs/visualize_tmp/memotr/ ./outputs/visualize_tmp/frame_{i+1}/")
+            #     os.system(f"mv ./outputs/visualize_tmp/runtime_tracker/ ./outputs/visualize_tmp/frame_{i+1}/")
+
+        # if self.visualize:
+        #     visualize_save_dir = os.path.join("./outputs/visualize/", self.seq_name)
+        #     os.makedirs(visualize_save_dir, exist_ok=True)
+        #     os.system(f"mv ./outputs/visualize_tmp/* {visualize_save_dir}")
+
+        # if self.dataset_name == "BDD100K":
+        #     with open(os.path.join(self.predict_dir, '{}.json'.format(self.seq_name)), 'w', encoding='utf-8') as f:
+        #         json.dump(bdd100k_results, f)
 
         return
 
@@ -125,7 +140,7 @@ class Submitter:
         return tracks[keep]
 
     @staticmethod
-    def filter_by_area(tracks: TrackInstances, thresh: int = 100):
+    def filter_by_area(tracks: TrackInstances, thresh: int = 10):
         assert len(tracks.area) == len(tracks.ids), f"Tracks' 'area' should have the same dim with 'ids'"
         keep = tracks.area > thresh
         return tracks[keep]
@@ -171,6 +186,8 @@ class Submitter:
     def write_results(self, tracks_result: TrackInstances, frame_idx: int):
         with open(os.path.join(self.predict_dir, f"{self.seq_name}.txt"), "a") as file:
             for i in range(len(tracks_result)):
+                if "hsmot" in self.dataset_name:
+                    x1
                 if self.dataset_name == "DanceTrack" or self.dataset_name == "SportsMOT" \
                         or self.dataset_name == "MOT17" or self.dataset_name == "MOT17_SPLIT":
                     x1, y1, x2, y2 = tracks_result.boxes[i].tolist()
@@ -214,12 +231,14 @@ def submit(config: dict):
         model=model,
         path=path.join(config["SUBMIT_DIR"], config["SUBMIT_MODEL"])
     )
-    if dataset_name == "DanceTrack" or dataset_name == "SportsMOT":
-        data_split_dir = path.join(data_root, dataset_name, dataset_split)
-    elif dataset_name == "BDD100K":
-        data_split_dir = path.join(data_root, dataset_name, "images/track/", dataset_split)
-    else:
-        data_split_dir = path.join(data_root, dataset_name, "images", dataset_split)
+    if "hsmot" in dataset_name:
+        data_split_dir = path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'npy')
+    # if dataset_name == "DanceTrack" or dataset_name == "SportsMOT":
+    #     data_split_dir = path.join(data_root, dataset_name, dataset_split)
+    # elif dataset_name == "BDD100K":
+    #     data_split_dir = path.join(data_root, dataset_name, "images/track/", dataset_split)
+    # else:
+    #     data_split_dir = path.join(data_root, dataset_name, "images", dataset_split)
     seq_names = os.listdir(data_split_dir)
 
     if is_distributed():
