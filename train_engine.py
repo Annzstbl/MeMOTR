@@ -37,7 +37,7 @@ def train(config: dict):
 
     # Load Pretrained Model
     if config["PRETRAINED_MODEL"] is not None:
-        model = load_pretrained_model(model, config["PRETRAINED_MODEL"], show_details=False)
+        model = load_pretrained_model(model, config["PRETRAINED_MODEL"], show_details=True)
 
     # Data process
     dataset_train = build_dataset(config=config, split="train")

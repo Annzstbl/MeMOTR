@@ -219,7 +219,7 @@ class DeformableDecoderLayer(nn.Module):
             n_heads=n_heads,
             n_points=n_points,
             sigmoid_attn=sigmoid_attn,
-            visualize=visualize
+            # visualize=visualize
         )
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)

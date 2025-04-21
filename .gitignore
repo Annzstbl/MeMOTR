@@ -5,5 +5,12 @@
 
 *.pyc
 *.log
-/models/ops/
 /outputs/
+
+__pycache__/
+*.pth
+*.train
+exps/
+build/
+*.egg
+*.egg-info

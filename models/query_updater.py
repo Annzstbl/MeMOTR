@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from typing import List
-from .utils import pos_to_pos_embed, logits_to_scores
+from .utils import pos_to_pos_embed_rotated, logits_to_scores
 from torch.utils.checkpoint import checkpoint
 
 from .ffn import FFN
@@ -50,7 +50,7 @@ class QueryUpdater(nn.Module):
         self.query_feat_norm = nn.LayerNorm(self.hidden_dim)
         self.query_feat_ffn = FFN(d_model=self.hidden_dim, d_ffn=self.ffn_dim, dropout=self.dropout)
         self.query_pos_head = MLP(
-            input_dim=self.hidden_dim*2,
+            input_dim=self.hidden_dim*2 + 2,
             hidden_dim=self.hidden_dim,
             output_dim=self.hidden_dim,
             num_layers=2
@@ -104,7 +104,7 @@ class QueryUpdater(nn.Module):
             output_embed = tracks[b].output_embed
             last_output_embed = tracks[b].last_output
             long_memory = tracks[b].long_memory.detach()
-            query_pos = pos_to_pos_embed(tracks[b].ref_pts.sigmoid(), num_pos_feats=self.hidden_dim//2, dst_dim=512)#! #TODO 硬编码
+            query_pos = pos_to_pos_embed_rotated(tracks[b].ref_pts.sigmoid(), num_pos_feats=self.hidden_dim//2)
             
             # Confidence Weight
             confidence_weight = self.confidence_weight_net(output_embed)

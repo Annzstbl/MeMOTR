@@ -164,7 +164,10 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
                             pretrained_state_dict[k] = model_state_dict[k]
                         else:
                             raise NotImplementedError(f"some thing wrong with the bbox_embed.")
-                        
+                elif "ref_point_head" in k or "query_pos_head" in k:
+                    model_state_dict[k][:,:512] = pretrained_state_dict[k]
+                    pretrained_state_dict[k] = model_state_dict[k]
+                    print(f'load the first 512 dim of {k} from pretrained model')
                 else:
                     print(f"Parameter {k} has shape{pretrained_state_dict[k].shape} in pretrained model, "
                           f"but get shape{model_state_dict[k].shape} in current model.")
