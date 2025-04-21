@@ -13,8 +13,9 @@ import os
 import torch
 import torch.nn as nn
 
-from .ops.modules import MSDeformAttn
-from .utils import get_activation_layer, get_clones, pos_to_pos_embed
+# from .ops.modules import MSDeformAttn
+from .ops.modules import MSDeformAttn_Rotate as MSDeformAttn
+from .utils import get_activation_layer, get_clones, pos_to_pos_embed, pos_to_pos_embed_rotated
 from utils.utils import inverse_sigmoid
 from .mlp import MLP
 
@@ -34,6 +35,7 @@ class DeformableDecoder(nn.Module):
         self.d_model = d_model
         # hack implementation for iterative bounding box refinement and two-stage Deformable DETR
         self.bbox_embed = None # 在memotr模型中通过set_refine_bbox_embed函数赋值
+        self.angle_embed = None #角度分量
         self.class_embed = None
         self.use_checkpoint = use_checkpoint
         self.use_dab = use_dab
@@ -47,7 +49,7 @@ class DeformableDecoder(nn.Module):
                 num_layers=2
             )
             self.ref_point_head = MLP(
-                input_dim=self.d_model*2,
+                input_dim=self.d_model*2 + 2, # 2 for cos and sin of angle
                 hidden_dim=self.d_model,
                 output_dim=self.d_model,
                 num_layers=2
@@ -80,21 +82,17 @@ class DeformableDecoder(nn.Module):
                 reference_points = reference_points[:, :, :2]
                 pass
             if reference_points.shape[-1] == 5:
-                reference_points_input = reference_points[:, :, :4]
-                reference_points_input = reference_points_input[:, :, None] \
-                                         * torch.cat([src_valid_ratios, src_valid_ratios], -1)[:, None]
-            # elif reference_points.shape[-1] == 4:
-            #     reference_points_input = reference_points[:, :, None] \
-            #                              * torch.cat([src_valid_ratios, src_valid_ratios], -1)[:, None]
+                reference_points_input = reference_points[:, :, None] \
+                    * torch.cat([src_valid_ratios, src_valid_ratios,torch.ones((*src_valid_ratios.shape[:-1], 1), device=src_valid_ratios.device)], -1)[:, None]
             else:
                 assert reference_points.shape[-1] == 2
                 reference_points_input = reference_points[:, :, None] * src_valid_ratios[:, None]
 
             if self.use_dab:
-                anchor_embed = pos_to_pos_embed(
+                anchor_embed = pos_to_pos_embed_rotated(
                     pos=reference_points_input[:, :, 0, :],
                     num_pos_feats=self.d_model//2
-                )
+                )# (..., d_model*2+2)
                 raw_query_pos = self.ref_point_head(anchor_embed)
                 pos_scale = self.query_scale(output) if lid != 0 else 1
                 query_pos = pos_scale * raw_query_pos
@@ -142,7 +140,10 @@ class DeformableDecoder(nn.Module):
 
             # hack implementation for iterative bounding box refinement.
             if self.bbox_embed is not None:
+                assert self.angle_embed is not None
                 tmp = self.bbox_embed[lid](output)
+                angle = self.angle_embed[lid](output)
+                tmp = torch.cat((tmp, angle), dim=-1)  # (B, Nq, 5)
                 if reference_points.shape[-1] == 5:
                     new_reference_points = tmp + inverse_sigmoid(reference_points)
                     new_reference_points = new_reference_points.sigmoid()

@@ -75,11 +75,7 @@ def query_masks_to_attn_mask(query_mask: torch.Tensor, n_heads: int, src_len: in
     return attn_mask
 
 
-def pos_to_pos_embed(pos, num_pos_feats: int = 64, temperature: int = 10000, scale: float = 2 * math.pi, dst_dim=None):
-    if dst_dim:
-        num_pos_feats = dst_dim//pos.shape[-1]
-        num_pos_feats = num_pos_feats if num_pos_feats%2==0 else num_pos_feats-1
-
+def pos_to_pos_embed(pos, num_pos_feats: int = 64, temperature: int = 10000, scale: float = 2 * math.pi):
     pos = pos * scale
     dim_i = torch.arange(num_pos_feats, dtype=torch.float32, device=pos.device)
     dim_i = temperature ** (2 * (torch.div(dim_i, 2, rounding_mode="trunc")) / num_pos_feats)
@@ -87,13 +83,50 @@ def pos_to_pos_embed(pos, num_pos_feats: int = 64, temperature: int = 10000, sca
     pos_embed = torch.stack((pos_embed[..., 0::2].sin(), pos_embed[..., 1::2].cos()), dim=-1)
     pos_embed = torch.flatten(pos_embed, start_dim=-3)
     
-    if dst_dim:
-        assert pos_embed.shape[-1] < dst_dim
-        posemb_shape = pos_embed.shape
-        pos_embed = torch.cat((pos_embed, torch.zeros(*posemb_shape[:-1], dst_dim-posemb_shape[-1],device=pos_embed.device)), dim=-1)
-
     return pos_embed
 
+def pos_to_pos_embed_rotated(pos, num_pos_feats: int = 64, temperature: int = 10000, scale: float = 2 * math.pi, version='le135'):
+    """
+    Args:
+        pos: Tensor[..., 5], 最后维度依次是 (x, y, w, h, theta)
+        num_pos_feats: 每个空间维度的 sin‑cos 特征数
+        temperature: 频率控制因子
+        scale: 原始坐标乘上 scale 再做三角编码，通常 = 2π
+        version: 角度标准化方式，可选 'le135' 或其它（默认为 2π 归一）
+
+    Returns:
+        Tensor[..., 4 * num_pos_feats + 2]
+    """
+    # --- 多频 sin‑cos 编码 for x,y,w,h ---
+    # (1) 缩放空间坐标
+    pos4 = pos[..., :4] * scale               # [...,4]
+    # (2) 生成频率因子
+    dim_i = torch.arange(num_pos_feats, device=pos.device, dtype=torch.float32)
+    dim_i = temperature ** (2 * (dim_i // 2) / num_pos_feats)  # [num_pos_feats]
+    # (3) 广播相除，得到 [...,4, num_pos_feats]
+    embed4 = pos4[..., None] / dim_i
+    # (4) 偶数维度 sin，奇数维度 cos，再 stack
+    sin4 = embed4[..., 0::2].sin()            # [...,4, num_pos_feats//2]
+    cos4 = embed4[..., 1::2].cos()            # [...,4, num_pos_feats//2]
+    embed4 = torch.stack((sin4, cos4), dim=-1) # [...,4, num_pos_feats//2, 2]
+    # (5) flatten 成 [..., 4 * num_pos_feats]
+    embed4 = torch.flatten(embed4, start_dim=-3, end_dim=-1)
+
+    # --- 单频 sin‑cos 编码 for theta ---
+    theta = pos[..., 4]  # [...], 旋转角，假设单位为弧度
+    if version == 'le135':
+        theta_scaled = theta * math.pi - math.pi / 4
+    else:
+        raise NotImplementedError(f"Unsupported version: {version}")
+    
+    # 单频 做 sin/cos → [..., 2]
+    sin_t = theta_scaled.sin()
+    cos_t = theta_scaled.cos()
+    embed_theta = torch.stack((sin_t, cos_t), dim=-1)
+
+    # --- 拼接并返回 ---
+    # [..., 4*num_pos_feats] + [...,2] → [..., 4*num_pos_feats+2]
+    return torch.cat((embed4, embed_theta), dim=-1)
 
 def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: bool = False):
     if not is_main_process():

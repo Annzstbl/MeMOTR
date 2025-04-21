@@ -272,6 +272,10 @@ class DeformableTransformer(nn.Module):
     def set_refine_bbox_embed(self, bbox_embed: nn.Module):
         self.decoder.bbox_embed = bbox_embed
         return
+    
+    def set_refine_angle_embed(self, angle_embed: nn.Module):
+        self.decoder.angle_embed = angle_embed
+        return
 
 
 def build(config: dict):

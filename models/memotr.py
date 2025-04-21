@@ -54,7 +54,9 @@ class MeMOTR(nn.Module):
         self.transformer = transformer
         self.query_updater = query_updater
         self.class_embed = nn.Linear(in_features=self.hidden_dim, out_features=num_classes)
-        self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=5, num_layers=3)
+        self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=4, num_layers=3)
+        self.angle_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=1, num_layers=3)#添加角度分支
+
         if self.use_dab:
             self.det_anchor = nn.Parameter(torch.randn(self.n_det_queries, 5))  # (N_det, 4) #旋转框改成5
             self.det_query_embed = nn.Parameter(torch.randn(self.n_det_queries, self.hidden_dim))       # (N_det, C)
@@ -81,15 +83,22 @@ class MeMOTR(nn.Module):
         self.class_embed.bias.data = torch.ones(num_classes) * bias_value
         nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
+        nn.init.constant_(self.angle_embed.layers[-1].weight.data, 0)
+        nn.init.constant_(self.angle_embed.layers[-1].bias.data, 0)
         for proj in self.feature_projs:
             nn.init.xavier_uniform_(proj[0].weight, gain=1)
             nn.init.constant_(proj[0].bias, 0)
         if self.with_box_refine:
             self.class_embed = get_clones(self.class_embed, self.transformer.get_n_dec_layers())
             self.bbox_embed = get_clones(self.bbox_embed, self.transformer.get_n_dec_layers())
+            self.angle_embed = get_clones(self.angle_embed, self.transformer.get_n_dec_layers())
+
             nn.init.constant_(self.bbox_embed[0].layers[-1].bias.data[2:], -2.0)
+            nn.init.constant_(self.angle_embed[0].layers[-1].bias.data, -math.log(3)) # le135下以水平框开始
             self.transformer.set_refine_bbox_embed(self.bbox_embed)
+            self.transformer.set_refine_angle_embed(self.angle_embed)
         else:
+            raise NotImplementedError("Box refine is not implemented yet.")
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(self.transformer.get_n_dec_layers())])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(self.transformer.get_n_dec_layers())])
@@ -125,7 +134,7 @@ class MeMOTR(nn.Module):
         # masks is n_feature_levels * [(B, H, W)]
         # pos is n_features_levels * [(B, C, H, W)]
 
-        reference_points = self.get_reference_points(tracks=tracks).to(srcs[0].device)      # (B, Nd+Nq, 2/4)
+        reference_points = self.get_reference_points(tracks=tracks).to(srcs[0].device)      # (B, Nd+Nq, 2/5)
         query_embed = self.get_query_embed(tracks=tracks).to(srcs[0].device)
         query_mask = self.get_query_mask(tracks=tracks).to(srcs[0].device)                  # (B, Nd+Nq)
 
@@ -152,6 +161,10 @@ class MeMOTR(nn.Module):
             reference = inverse_sigmoid(reference)
             output_class = self.class_embed[level](outputs[level])
             bbox_tmp = self.bbox_embed[level](outputs[level])
+            angle_tmp = self.angle_embed[level](outputs[level])
+
+            bbox_tmp = torch.cat((bbox_tmp, angle_tmp), dim=-1)  # (..., 5)
+
             if reference.shape[-1] == 5:
                 bbox_tmp += reference
             else:
