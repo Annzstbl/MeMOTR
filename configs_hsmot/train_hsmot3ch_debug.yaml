@@ -76,7 +76,7 @@ UPDATE_THRESH: 0.5
 LONG_MEMORY_LAMBDA: 0.01
 # Pretrain model 
 # PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr_8ch_interpolate.pth
-PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr_convhsi.pth
+PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr.pth
 
 # Sampling setting
 SAMPLE_STEPS: [6, 10, 14]
@@ -118,7 +118,8 @@ AUX_LOSS_WEIGHT: [1.0, 1.0, 1.0, 1.0, 1.0]
 
 
 # multispectral image
-INPUT_CHANNELS: 8
+INPUT_CHANNELS: 3
 
 # debug
 VID_WHITE_LIST: ['data46-5']
+NPY2RGB: True

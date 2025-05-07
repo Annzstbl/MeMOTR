@@ -47,6 +47,8 @@ class hsmot_8ch(MOTDataset):
         self.sample_interval = None
         self.sample_vid_tmax = None
 
+        self.npy2rgb = config["NPY2RGB"]
+
         self.gts = defaultdict(lambda: defaultdict(list))
         self.vid_idx = dict()
         self.idx_vid = dict()
@@ -105,8 +107,12 @@ class hsmot_8ch(MOTDataset):
         data_info = self.get_multi_frames(vid=vid, idxs=frame_idxs)
         assert self.transform is not None
         results = self.transform(data_info)
+        if self.npy2rgb:
+            images = [img[[1,2,4],...] for img in results[0]]
+        else:
+            images = results[0]
         return{
-            "images": results[0],
+            "images": images,
             "targets": results[1],
             "img_metas": results[2]
         }

@@ -101,7 +101,7 @@ class Backbone(nn.Module):
                 final_act = False
             )
             backbone.conv1 = new_conv
-        else:
+        elif input_channel != 3:
             conv1_3ch = backbone.conv1
             new_conv = nn.Conv2d(
             in_channels=input_channel,

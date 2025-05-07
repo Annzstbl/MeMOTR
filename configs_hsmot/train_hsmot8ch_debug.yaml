@@ -7,12 +7,13 @@ GIT_VERSION:
 MODE: train
 CONFIG_PATH:
 VISUALIZE: False
-AVAILABLE_GPUS: 4,5
+AVAILABLE_GPUS: 0,1,2,3,4,5,6,7
 DEVICE: cuda
-OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir/memotr/firstConv10lr_2gpu
+OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir/memotr/debug
 USE_DISTRIBUTED: False
 USE_CHECKPOINT: False
-CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
+# 这里好像可以到4，但是为了防止训练出问题，设为3
+CHECKPOINT_LEVEL: 4               # gradient checkpoint level.
                                   # As the number increases (from 1 to 4), the memory cost increases.
                                   # We have deleted many comments in this official code simplicity,
                                   # if you have any questions, feel free to contact with the author.
@@ -48,7 +49,7 @@ USE_CROWDHUMAN:
 MOTSYNTH_RATE:
 DATA_ROOT: /data/users/litianhao/data
 DATA_PATH:
-NUM_WORKERS: 2
+NUM_WORKERS: 4
 BATCH_SIZE: 1
 ACCUMULATION_STEPS: 1
 COCO_SIZE: False
@@ -74,11 +75,12 @@ USE_DAB: True
 UPDATE_THRESH: 0.5
 LONG_MEMORY_LAMBDA: 0.01
 # Pretrain model 
-PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr_8ch_interpolate.pth
+# PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr_8ch_interpolate.pth
+PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr_convhsi.pth
 
 # Sampling setting
 SAMPLE_STEPS: [6, 10, 14]
-SAMPLE_LENGTHS: [2, 3, 4, 5]
+SAMPLE_LENGTHS: [5, 3, 4, 5]
 SAMPLE_MODES: [random_interval]
 SAMPLE_INTERVALS: [3]
 
@@ -101,6 +103,7 @@ LR_DROP_RATE: 0.1
 LR_DROP_MILESTONES: [12]
 
 LR_DICTIONARY_NAMES: [backbone.conv1]
+# LR_DICTIONARY_NAMES: [backbone.conv1]
 LR_DICTIONARY_SCALE: 1
 # DETR matcher
 MATCH_COST_CLASS: 2
@@ -116,3 +119,7 @@ AUX_LOSS_WEIGHT: [1.0, 1.0, 1.0, 1.0, 1.0]
 
 # multispectral image
 INPUT_CHANNELS: 8
+
+# debug
+VID_WHITE_LIST: ['data46-5']
+NPY2RGB: False
