@@ -351,6 +351,38 @@ def get_param_groups(config: dict, model: nn.Module) -> Tuple[List[Dict], List[s
             "lr": config["LR"]
         }
     ]
+
+    param_name = [
+        {   # backbone 学习率设置
+            "params": [n for n, p in model.named_parameters() if match_keywords(n, backbone_keywords) and p.requires_grad and not match_keywords(n, dictionary_names)],
+            "lr": config["LR_BACKBONE"]
+        },
+        {
+            "params": [n for n, p in model.named_parameters() if match_keywords(n, points_keywords)
+                       and p.requires_grad],
+            "lr": config["LR_POINTS"]
+        },
+        {
+            "params": [n for n, p in model.named_parameters() if match_keywords(n, query_updater_keywords)
+                       and p.requires_grad],
+            "lr": config["LR"]
+        },
+        {
+            "params": [n for n, p in model.named_parameters() if match_keywords(n, dictionary_names) and p.requires_grad],
+            "lr": config["LR"] * _dictionary_scale
+        },
+        {
+            "params": [n for n, p in model.named_parameters() if not match_keywords(n, backbone_keywords)
+                       and not match_keywords(n, points_keywords)
+                       and not match_keywords(n, query_updater_keywords)
+                       and not match_keywords(n, dictionary_names)
+                       and p.requires_grad],
+            "lr": config["LR"]
+        }
+    ]
+    
+    print(f"lr_dict param:, {param_name[3]['params']}")
+
         # 打印 param_groups的所有lr
     for param_group in param_groups:
         if "lr" in param_group:

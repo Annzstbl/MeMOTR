@@ -75,7 +75,8 @@ USE_DAB: True
 UPDATE_THRESH: 0.5
 LONG_MEMORY_LAMBDA: 0.01
 # Pretrain model 
-PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr_8ch_interpolate.pth
+# PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr_8ch_interpolate.pth
+PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr_convhsi.pth
 
 # Sampling setting
 SAMPLE_STEPS: [6, 10, 14]
@@ -101,7 +102,8 @@ LR_SCHEDULER: MultiStep
 LR_DROP_RATE: 0.1
 LR_DROP_MILESTONES: [12]
 
-LR_DICTIONARY_NAMES: [backbone.0.body.conv1.weight]
+LR_DICTIONARY_NAMES: [backbone.conv1]
+# LR_DICTIONARY_NAMES: [backbone.conv1]
 LR_DICTIONARY_SCALE: 1
 # DETR matcher
 MATCH_COST_CLASS: 2

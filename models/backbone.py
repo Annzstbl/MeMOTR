@@ -11,6 +11,7 @@ from typing import Dict, List
 from utils.nested_tensor import NestedTensor
 
 from .position_embedding import build as build_position_embedding
+from hsmot.modules.conv import ConvMSI
 
 
 class FrozenBatchNorm2d(nn.Module):
@@ -56,7 +57,7 @@ class Backbone(nn.Module):
     """
     ResNet with frozen BatchNorm as backbone.
     """
-    def __init__(self, backbone_name: str, train_backbone: bool, return_interm_layers: bool, input_channel: int):
+    def __init__(self, backbone_name: str, train_backbone: bool, return_interm_layers: bool, input_channel: int, conv3d=True):
         """
         初始化一个 Backbone
 
@@ -68,20 +69,6 @@ class Backbone(nn.Module):
         super(Backbone, self).__init__()
         assert backbone_name == "resnet50", f"Backbone do not support '{backbone_name}'."
         backbone = resnet50(pretrained=True, norm_layer=FrozenBatchNorm2d)
-        if input_channel != 3:
-            conv1_3ch = backbone.conv1
-            new_conv = nn.Conv2d(
-            in_channels=input_channel,
-            out_channels=conv1_3ch.out_channels,
-            kernel_size=conv1_3ch.kernel_size,
-            stride=conv1_3ch.stride,
-            padding=conv1_3ch.padding,
-            dilation=conv1_3ch.dilation,
-            groups=conv1_3ch.groups,
-            bias=(conv1_3ch.bias is not None)
-        )
-            backbone.conv1 = new_conv
-
         for name, parameter in backbone.named_parameters():
             if not train_backbone or ("layer2" not in name and "layer3" not in name and "layer4" not in name):
                 parameter.requires_grad_(False)
@@ -98,6 +85,36 @@ class Backbone(nn.Module):
             return_layers = {"layer4", "0"}
             self.strides = [32]
             self.num_channels = [2048]
+
+
+        if input_channel != 3 and conv3d:
+            conv1_3ch = backbone.conv1
+            new_conv = ConvMSI(
+                c1=1,
+                c2=conv1_3ch.out_channels,
+                c3=input_channel,
+                k=(3, *conv1_3ch.kernel_size),
+                s=(1, *conv1_3ch.stride),
+                p=(1, *conv1_3ch.padding),
+                groups=conv1_3ch.out_channels,
+                final_bn = False,
+                final_act = False
+            )
+            backbone.conv1 = new_conv
+        else:
+            conv1_3ch = backbone.conv1
+            new_conv = nn.Conv2d(
+            in_channels=input_channel,
+            out_channels=conv1_3ch.out_channels,
+            kernel_size=conv1_3ch.kernel_size,
+            stride=conv1_3ch.stride,
+            padding=conv1_3ch.padding,
+            dilation=conv1_3ch.dilation,
+            groups=conv1_3ch.groups,
+            bias=(conv1_3ch.bias is not None)
+        )
+            backbone.conv1 = new_conv
+
         self.backbone = IntermediateLayerGetter(backbone, return_layers=return_layers)
 
     def forward(self, ntensor: NestedTensor):
