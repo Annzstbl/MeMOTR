@@ -87,7 +87,12 @@ def train(config: dict):
     start_epoch = train_states["start_epoch"]
 
     if is_distributed():
-        model = DDP(module=model, device_ids=[distributed_rank()], find_unused_parameters=False)
+        # bn3d转为sync
+        # bn3d_in_conv1 = model.backbone.backbone.backbone.conv1.bn3d
+        # sync_bn3d_in_conv1 = nn.SyncBatchNorm.convert_sync_batchnorm(bn3d_in_conv1)
+        # model.backbone.backbone.backbone.conv1.bn3d = sync_bn3d_in_conv1
+
+        model = DDP(module=model, device_ids=[distributed_rank()],)
 
     multi_checkpoint = "MULTI_CHECKPOINT" in config and config["MULTI_CHECKPOINT"]
 

@@ -98,7 +98,8 @@ class Backbone(nn.Module):
                 p=(1, *conv1_3ch.padding),
                 groups=conv1_3ch.out_channels,
                 final_bn = False,
-                final_act = False
+                final_act = False,
+                use_bn_3d= False
             )
             backbone.conv1 = new_conv
         elif input_channel != 3:
