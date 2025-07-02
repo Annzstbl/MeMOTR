@@ -227,7 +227,9 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
 
     # 检查所有不匹配的参数 
     for k, v in pretrained_state_dict.items():
-        if v.shape != model_state_dict[k].shape:
+        if v not in model_state_dict:
+            print(f"Skip loading parameter {k}, not in model, loaded shape {v.shape}.")
+        elif v.shape != model_state_dict[k].shape:
             print(f"Skip loading parameter {k}, required shape {model_state_dict[k].shape}, loaded shape {v.shape}.")
 
 
