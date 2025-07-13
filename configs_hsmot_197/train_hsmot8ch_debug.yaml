@@ -7,7 +7,7 @@ GIT_VERSION:
 MODE: train
 CONFIG_PATH:
 VISUALIZE: False
-AVAILABLE_GPUS: 2,3
+AVAILABLE_GPUS: 4,5
 DEVICE: cuda
 OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir/memotr/debug
 USE_DISTRIBUTED: False
@@ -22,7 +22,7 @@ RESUME_SCHEDULER: True
 MULTI_CHECKPOINT: False
 
 # About submit
-SUBMIT_DIR:
+SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir/memotr/debug
 SUBMIT_MODEL:
 SUBMIT_DATA_SPLIT: test
 DET_SCORE_THRESH: 0.5
@@ -123,4 +123,5 @@ INPUT_CHANNELS: 8
 # debug
 VID_WHITE_LIST: ['data46-5']
 NPY2RGB: False
-CONV3D: False
+STEM: "conv3d_se"
+EVALUATE_PER_EPOCH: 1

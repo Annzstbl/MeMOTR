@@ -8,10 +8,14 @@ import torch.nn.functional as F
 from torchvision.models import resnet50
 from torchvision.models._utils import IntermediateLayerGetter
 from typing import Dict, List
+
+from torchvision.models.efficientnet import Union
 from utils.nested_tensor import NestedTensor
 
 from .position_embedding import build as build_position_embedding
-from hsmot.modules.conv import ConvMSI
+from hsmot.modules.conv import ConvMSI, ConvMSI_SE
+
+
 
 
 class FrozenBatchNorm2d(nn.Module):
@@ -57,7 +61,7 @@ class Backbone(nn.Module):
     """
     ResNet with frozen BatchNorm as backbone.
     """
-    def __init__(self, backbone_name: str, train_backbone: bool, return_interm_layers: bool, input_channel: int, conv3d=True):
+    def __init__(self, backbone_name: str, train_backbone: bool, return_interm_layers: bool, input_channel: int, stem=None):
         """
         初始化一个 Backbone
 
@@ -70,7 +74,7 @@ class Backbone(nn.Module):
         assert backbone_name == "resnet50", f"Backbone do not support '{backbone_name}'."
         backbone = resnet50(pretrained=True, norm_layer=FrozenBatchNorm2d)
         for name, parameter in backbone.named_parameters():
-            if not train_backbone or ("layer2" not in name and "layer3" not in name and "layer4" not in name):
+            if not train_backbone or ("layer2" not in name and "layer3" not in name and "layer4" not in name): #如果训练backbone, 只训练layer2 layer3 layer4
                 parameter.requires_grad_(False)
 
         if return_interm_layers:
@@ -86,47 +90,71 @@ class Backbone(nn.Module):
             self.strides = [32]
             self.num_channels = [2048]
 
+        def _build_stem(backbone):
+            """
+            Build the stem of the backbone.
+            """
+            if input_channel !=3:
+                conv1_3ch = backbone.conv1
+                if stem:
+                    if stem == "conv3d":
+                        # conv3d stem
+                        return ConvMSI(
+                            c1=1,
+                            c2=conv1_3ch.out_channels,
+                            c3=input_channel,
+                            k=(3, *conv1_3ch.kernel_size),
+                            s=(1, *conv1_3ch.stride),
+                            p=(1, *conv1_3ch.padding),
+                            groups=conv1_3ch.out_channels,
+                            final_bn=False,
+                            final_act=False,
+                            use_bn_3d=False
+                        )
+                    elif stem == "conv3d_se":
+                        return ConvMSI_SE(
+                            c1=1,
+                            c2=conv1_3ch.out_channels,
+                            c3=input_channel,
+                            k=(3, *conv1_3ch.kernel_size),
+                            s=(1, *conv1_3ch.stride),
+                            p=(1, *conv1_3ch.padding),
+                            final_bn=False,
+                            final_act=False,
+                            use_bn_3d=False,
+                            reduction=2
+                        )
+                else:
+                    # conv2d stem
+                    return nn.Conv2d(
+                        in_channels=input_channel,
+                        out_channels=conv1_3ch.out_channels,
+                        kernel_size=conv1_3ch.kernel_size,
+                        stride=conv1_3ch.stride,
+                        padding=conv1_3ch.padding,
+                        dilation=conv1_3ch.dilation,
+                        groups=conv1_3ch.groups,
+                        bias=(conv1_3ch.bias is not None)
+                    )
+            else:
+                return backbone.conv1
 
-        if input_channel != 3 and conv3d:
-            conv1_3ch = backbone.conv1
-            new_conv = ConvMSI(
-                c1=1,
-                c2=conv1_3ch.out_channels,
-                c3=input_channel,
-                k=(3, *conv1_3ch.kernel_size),
-                s=(1, *conv1_3ch.stride),
-                p=(1, *conv1_3ch.padding),
-                groups=conv1_3ch.out_channels,
-                final_bn = False,
-                final_act = False,
-                use_bn_3d= False
-            )
-            backbone.conv1 = new_conv
-        elif input_channel != 3:
-            conv1_3ch = backbone.conv1
-            new_conv = nn.Conv2d(
-            in_channels=input_channel,
-            out_channels=conv1_3ch.out_channels,
-            kernel_size=conv1_3ch.kernel_size,
-            stride=conv1_3ch.stride,
-            padding=conv1_3ch.padding,
-            dilation=conv1_3ch.dilation,
-            groups=conv1_3ch.groups,
-            bias=(conv1_3ch.bias is not None)
-        )
-            backbone.conv1 = new_conv
+        self.stem_conv = _build_stem(backbone)
+        del backbone.conv1
 
         self.backbone = IntermediateLayerGetter(backbone, return_layers=return_layers)
 
     def forward(self, ntensor: NestedTensor):
-        outputs = self.backbone(ntensor.tensors)
+        x, se_weights = self.stem_conv(ntensor.tensors)
+        outputs = self.backbone(x)
+
         res: Dict[str, NestedTensor] = dict()
         for name, output in outputs.items():
             masks = ntensor.masks
             assert masks is not None, "Masks should be NOT NONE."
             masks = F.interpolate(masks[None].float(), mode="nearest", size=output.shape[-2:]).to(masks.dtype)[0]
             res[name] = NestedTensor(output, masks)
-        return res
+        return res, se_weights
 
 
 class BackboneWithPE(nn.Module):
@@ -162,7 +190,90 @@ class BackboneWithPE(nn.Module):
         return self.num_channels
 
 
-def build(config: dict) -> BackboneWithPE:
+class Backbone_PE_SpectralWeights(nn.Module):
+    """
+    Backbone with Position Embedding and Spectral Weights.
+    输出: 多尺度特征、位置编码、每个尺度的spectral_weights（如SE权重）。
+    """
+    def __init__(self, backbone: nn.Module, position_embedding: nn.Module, spectral_embedding: nn.Module):
+        super().__init__()
+        self.backbone = backbone
+        self.position_embedding = position_embedding
+        self.strides = backbone.strides
+        self.num_channels = backbone.num_channels
+        self.spectral_embedding = spectral_embedding
+
+    def n_inter_layers(self):
+        return len(self.strides)
+
+    def n_inter_channels(self):
+        return self.num_channels
+
+
+    def forward(self, ntensor: NestedTensor):
+        backbone_outputs, se_weights = self.backbone(ntensor)
+        features: List[NestedTensor] = []
+        pos_embeds: List[torch.Tensor] = []
+        spectral_embeds: List[torch.Tensor] = []
+        # 取特征
+        for _, output in sorted(backbone_outputs.items()):
+            features.append(output)
+        # 位置编码
+        for feature in features:
+            pos_embeds.append(self.position_embedding(feature))
+        # 构建spectral_weights_list
+        for feature in features:
+            spectral_embeds.append(self.spectral_embedding(se_weights, feature))
+
+        return features, pos_embeds, spectral_embeds
+
+
+class SpectralEmbedding(nn.Module):
+    def __init__(self):
+        super(SpectralEmbedding, self).__init__()
+
+    def forward(self, spectral_weights: torch.Tensor, ntensor: NestedTensor, mode: str = "avg") -> torch.Tensor:
+        return self.spectral_embedding(spectral_weights, ntensor, mode)
+
+    def spectral_embedding(self, spectral_weights: torch.Tensor, ntensor:NestedTensor, mode: str = "avg") -> torch.Tensor:
+        """
+        将stride=2的权重降采样到特征图分辨率，输出与特征图空间一致的权重。
+        Args:
+            spectral_weights: [B, 8, H/2, W/2]
+            feature: [B, Feature_C, H/stride, W/stride]
+            mask: [B, H, W] 或 [B, H/stride, W/stride]
+            mode: 'avg' 或 'max'，降采样方式
+        Returns:
+            out_weights: [B, 8, H/stride, W/stride]
+        """
+
+        mask = ntensor.masks
+        feature = ntensor.tensors
+
+        B, C, H_feat, W_feat = feature.shape[0], spectral_weights.shape[1], feature.shape[2], feature.shape[3]
+        # 1. 降采样权重
+        if mode == "avg":
+            out_weights = F.adaptive_avg_pool2d(spectral_weights, (H_feat, W_feat))
+        elif mode == "max":
+            out_weights = F.adaptive_max_pool2d(spectral_weights, (H_feat, W_feat))
+        else:
+            raise ValueError("mode should be 'avg' or 'max'")
+
+
+        # 将padding区域权重置为0
+        out_weights = out_weights.masked_fill(mask.unsqueeze(1), 0)
+        return out_weights
+
+
+def build(config: dict) -> Union[BackboneWithPE, Backbone_PE_SpectralWeights]:
+    CONFIG_STEM=config["STEM"]
     position_embedding = build_position_embedding(config=config)
-    backbone = Backbone(backbone_name=config["BACKBONE"], train_backbone=True, return_interm_layers=True, input_channel=config["INPUT_CHANNELS"], conv3d=config["CONV3D"])
-    return BackboneWithPE(backbone=backbone, position_embedding=position_embedding)
+    backbone = Backbone(backbone_name=config["BACKBONE"], train_backbone=True, return_interm_layers=True, input_channel=config["INPUT_CHANNELS"], stem=CONFIG_STEM)
+    if CONFIG_STEM=="conv3d_se":
+        spectral_embedding = SpectralEmbedding()
+        return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding)
+    else:
+        return BackboneWithPE(backbone=backbone, position_embedding=position_embedding)
+
+
+

@@ -128,12 +128,20 @@ def pos_to_pos_embed_rotated(pos, num_pos_feats: int = 64, temperature: int = 10
     # [..., 4*num_pos_feats] + [...,2] → [..., 4*num_pos_feats+2]
     return torch.cat((embed4, embed_theta), dim=-1)
 
-def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: bool = False):
+def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: bool = False, logger = None):
     if not is_main_process():
         return model
     pretrained_checkpoint = torch.load(pretrained_path, map_location=lambda storage, loc: storage)
     pretrained_state_dict = pretrained_checkpoint["model"]
     model_state_dict = model.state_dict()
+
+    # 判断是否有stem_conv在model_state_dict中
+    has_stem_conv = False
+    for k in model_state_dict:
+        if "stem_conv" in k:
+            has_stem_conv = True
+            break
+
 
     pretrained_keys = list(pretrained_state_dict.keys())
     for k in pretrained_keys:
@@ -197,10 +205,15 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
                       f"do not load these parameters.")
             del pretrained_state_dict[k]
         elif "backbone" in k:
-            new_k = k[15:]
-            new_k = "backbone.backbone.backbone" + new_k
-            pretrained_state_dict[new_k] = pretrained_state_dict[k].clone()
-            del pretrained_state_dict[k]
+            if 'backbone.0.body.conv1' in k and has_stem_conv:
+                new_k = k.replace('backbone.0.body.conv1', 'backbone.backbone.stem_conv')
+                pretrained_state_dict[new_k] = pretrained_state_dict[k].clone()
+                del pretrained_state_dict[k]
+            else:
+                new_k = k[15:]
+                new_k = "backbone.backbone.backbone" + new_k
+                pretrained_state_dict[new_k] = pretrained_state_dict[k].clone()
+                del pretrained_state_dict[k]
         elif "input_proj" in k:
             new_k = k[10:]
             new_k = "feature_projs" + new_k
@@ -215,7 +228,10 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
         if k not in model_state_dict:
             not_in_model += 1
             if show_details:
-                print(f"Parameter {k} in the pretrained model but not in the current model.")
+                if logger is not None:
+                    logger.write(head=f"❌ Parameter '{k}' in pretrained model but not in current model", filename="log.txt", mode="a")
+                else:
+                    print(f"❌ Parameter '{k}' in pretrained model but not in current model")
 
     not_in_pretrained = 0
     for k in model_state_dict:
@@ -223,19 +239,40 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
             pretrained_state_dict[k] = model_state_dict[k]
             not_in_pretrained += 1
             if show_details:
-                print(f"There is a new parameter {k} in the current model, but not in the pretrained model.")
+                if logger is not None:
+                    logger.write(head=f"🆕 New parameter '{k}' in current model, not in pretrained model", filename="log.txt", mode="a")
+                else:
+                    print(f"🆕 New parameter '{k}' in current model, not in pretrained model")
 
     # 检查所有不匹配的参数 
+    shape_mismatch_count = 0
     for k, v in pretrained_state_dict.items():
-        if v not in model_state_dict:
-            print(f"Skip loading parameter {k}, not in model, loaded shape {v.shape}.")
+        if k not in model_state_dict:
+            if logger is not None:
+                logger.write(head=f"⚠️  Skip loading '{k}' - not in model (shape: {v.shape})", filename="log.txt", mode="a")
+            else:
+                print(f"⚠️  Skip loading '{k}' - not in model (shape: {v.shape})")
         elif v.shape != model_state_dict[k].shape:
-            print(f"Skip loading parameter {k}, required shape {model_state_dict[k].shape}, loaded shape {v.shape}.")
-
+            shape_mismatch_count += 1
+            if logger is not None:
+                logger.write(head=f"⚠️  Skip loading '{k}' - shape mismatch: required {model_state_dict[k].shape}, loaded {v.shape}", filename="log.txt", mode="a")
+            else:
+                print(f"⚠️  Skip loading '{k}' - shape mismatch: required {model_state_dict[k].shape}, loaded {v.shape}")
 
     model.load_state_dict(state_dict=pretrained_state_dict, strict=False)
-    print(f"Pretrained model is loaded, there are {not_in_model} parameters droped "
-          f"and {not_in_pretrained} parameters unloaded, set 'show details' True to see more details.")
+    
+    if logger is not None:
+        logger.write(head="\n" + "="*60, filename="log.txt", mode="a")
+        logger.write(head="📊 PRETRAINED MODEL LOADING SUMMARY", filename="log.txt", mode="a")
+        logger.write(head="="*60, filename="log.txt", mode="a")
+        logger.write(head=f"✅ Successfully loaded with strict=False", filename="log.txt", mode="a")
+        logger.write(head=f"📉 Dropped parameters: {not_in_model}", filename="log.txt", mode="a")
+        logger.write(head=f"📈 New parameters: {not_in_pretrained}", filename="log.txt", mode="a")
+    if shape_mismatch_count > 0:
+        if logger is not None:
+            logger.write(head=f"⚠️  Shape mismatches: {shape_mismatch_count}", filename="log.txt", mode="a")
+    if logger is not None:
+        logger.write(head="="*60, filename="log.txt", mode="a")
 
     return model
 

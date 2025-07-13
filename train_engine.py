@@ -3,6 +3,7 @@
 import os
 import time
 import torch
+from torch._C import NoneType
 import torch.nn as nn
 import torch.distributed
 
@@ -37,7 +38,7 @@ def train(config: dict):
 
     # Load Pretrained Model
     if config["PRETRAINED_MODEL"] is not None:
-        model = load_pretrained_model(model, config["PRETRAINED_MODEL"], show_details=True)
+        model = load_pretrained_model(model, config["PRETRAINED_MODEL"], show_details=True, logger=train_logger)
 
     # Data process
     dataset_train = build_dataset(config=config, split="train")
@@ -50,7 +51,7 @@ def train(config: dict):
     criterion.set_device(torch.device("cuda", distributed_rank()))
 
     # Optimizer
-    param_groups, lr_names = get_param_groups(config=config, model=model)
+    param_groups, lr_names = get_param_groups(config=config, model=model, logger=train_logger)
     optimizer = AdamW(params=param_groups, lr=config["LR"], weight_decay=config["WEIGHT_DECAY"])
     # Scheduler
     if config["LR_SCHEDULER"] == "MultiStep":
@@ -148,14 +149,21 @@ def train(config: dict):
         if multi_checkpoint is True:
             pass
         else:
-            if config["DATASET"] == "DanceTrack" or config["EPOCHS"] < 100 or (epoch + 1) % 5 == 0:
-                save_checkpoint(
-                    model=model,
-                    path=os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth"),
-                    states=train_states,
-                    optimizer=optimizer,
-                    scheduler=scheduler
-                )
+            pass
+            # if config["DATASET"] == "DanceTrack" or config["EPOCHS"] < 100 or (epoch + 1) % 5 == 0:
+            #     save_checkpoint(
+            #         model=model,
+            #         path=os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth"),
+            #         states=train_states,
+            #         optimizer=optimizer,
+            #         scheduler=scheduler
+            #     )
+
+        # 添加evaluate_one_epoch
+        # 在每个epoch结束后进行一次验证（如果配置中包含验证集）
+        if "EVALUATE_PER_EPOCH" in config and config["EVALUATE_PER_EPOCH"] > 0 and epoch % config["EVALUATE_PER_EPOCH"] == 0:
+            from submit_engine import submit_during_train
+            submit_during_train(config=config, epoch=epoch, model=model)
 
     return
 
@@ -303,7 +311,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     return
 
 
-def get_param_groups(config: dict, model: nn.Module) -> Tuple[List[Dict], List[str]]:
+def get_param_groups(config: dict, model: nn.Module, logger: Logger = None) -> Tuple[List[Dict], List[str]]:
     """
     用于针对不同部分的参数使用不同的 lr 等设置
     Args:
@@ -357,7 +365,7 @@ def get_param_groups(config: dict, model: nn.Module) -> Tuple[List[Dict], List[s
         }
     ]
 
-    param_name = [
+    param_names = [
         {   # backbone 学习率设置
             "params": [n for n, p in model.named_parameters() if match_keywords(n, backbone_keywords) and p.requires_grad and not match_keywords(n, dictionary_names)],
             "lr": config["LR_BACKBONE"]
@@ -386,13 +394,15 @@ def get_param_groups(config: dict, model: nn.Module) -> Tuple[List[Dict], List[s
         }
     ]
     
-    print(f"lr_dict param:, {param_name[3]['params']}")
+    if logger is not None:
+        logger.write(head=f"lr_dict param:, {param_names[3]['params']}", filename="log.txt", mode="a")
 
-        # 打印 param_groups的所有lr
-    for param_group in param_groups:
-        if "lr" in param_group:
-            print(f'there are {len(param_group["params"])} params with lr {param_group["lr"]}')
-        else :
-            print(f'there are {len(param_group["params"])} params with no lr settings')
+    # 打印 param_groups的所有lr和参数名
+    for i, param_group in enumerate(param_names):
+        lr = param_group.get("lr", "Not set")
+        logger.write(head=f'=== Group {i+1} (lr={lr}) ===', filename="log.txt", mode="a")
+        logger.write(head=f'Parameters ({len(param_group["params"])}):', filename="log.txt", mode="a")
+        for j, param in enumerate(param_group["params"]):
+            logger.write(head=f'  {j+1:3d}. {param}', filename="log.txt", mode="a")
 
     return param_groups, ["lr_backbone", "lr_points", "lr_query_updater", "lr", "lr_dictionary"]

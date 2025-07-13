@@ -18,7 +18,10 @@ from typing import List
 
 from .deformable_encoder import DeformableEncoderLayer, DeformableEncoder
 from .deformable_decoder import DeformableDecoderLayer, DeformableDecoder
+
+from .deformable_encoder_spectral import DeformableEncoderLayerSpectral, DeformableEncoderSpectral
 from .ops.modules import MSDeformAttn
+from .mlp import MLP
 
 
 class DeformableTransformer(nn.Module):
@@ -35,7 +38,8 @@ class DeformableTransformer(nn.Module):
                  use_checkpoint: bool = False,
                  checkpoint_level: int = 2,
                  use_dab: bool = False,
-                 visualize: bool = False):
+                 visualize: bool = False,
+                 spectral_encoder: bool = True):
         """
         Args:
             d_model:
@@ -66,12 +70,27 @@ class DeformableTransformer(nn.Module):
         self.use_dab = use_dab
         self.visualize = visualize
 
-        encoder_layer = DeformableEncoderLayer(
+
+        if spectral_encoder:
+            encoder_layer = DeformableEncoderLayerSpectral(
+                d_model=d_model, d_ffn=d_ffn,
+                dropout=dropout, activation=activation,
+                n_levels=n_feature_levels, n_heads=n_heads,
+                n_points=n_enc_points, sigmoid_attn=False
+            )
+            self.encoder: DeformableEncoderSpectral = DeformableEncoderSpectral(encoder_layer=encoder_layer, num_layers=n_enc_layers,
+                                                                                use_checkpoint=(self.use_checkpoint and
+                                                                                self.checkpoint_level == 1))
+        else:
+            encoder_layer = DeformableEncoderLayer(
             d_model=d_model, d_ffn=d_ffn,
             dropout=dropout, activation=activation,
             n_levels=n_feature_levels, n_heads=n_heads,
             n_points=n_enc_points, sigmoid_attn=False
-        )
+            )
+            self.encoder: DeformableEncoder = DeformableEncoder(encoder_layer=encoder_layer, num_layers=n_enc_layers,
+                                                                use_checkpoint=(self.use_checkpoint and
+                                                                self.checkpoint_level == 1))
         decoder_layer = DeformableDecoderLayer(
             d_model=d_model, d_ffn=d_ffn,
             dropout=dropout, activation=activation,
@@ -80,10 +99,8 @@ class DeformableTransformer(nn.Module):
             extra_track_attn=extra_track_attn, n_det_queries=n_det_queries,
             visualize=self.visualize
         )
+    
 
-        self.encoder: DeformableEncoder = DeformableEncoder(encoder_layer=encoder_layer, num_layers=n_enc_layers,
-                                                            use_checkpoint=(self.use_checkpoint and
-                                                                            self.checkpoint_level == 1))
         self.decoder: DeformableDecoder = DeformableDecoder(decoder_layer=decoder_layer, num_layers=n_dec_layers,
                                                             return_intermediate=return_intermediate_dec,
                                                             merge_det_track_layer=merge_det_track_layer,
@@ -94,6 +111,12 @@ class DeformableTransformer(nn.Module):
                                                             visualize=self.visualize)
 
         self.level_embed = nn.Parameter(torch.Tensor(n_feature_levels, d_model))
+        self.spectral_embed = MLP(
+                input_dim=8,
+                hidden_dim=self.d_model,
+                output_dim=self.d_model,
+                num_layers=2
+            )
 
         if two_stage:
             # 目前不关心 two stage 的情况
@@ -190,14 +213,16 @@ class DeformableTransformer(nn.Module):
         return valid_ratio                          # (B, 2)
 
     def forward(self, srcs: List[torch.Tensor], masks: List[torch.Tensor],
-                pos_embeds: List[torch.Tensor], query_embed, ref_pts, query_mask):
+                pos_embeds: List[torch.Tensor], query_embed, ref_pts, query_mask,
+                spectral_weights: List[torch.Tensor]):
         assert self.two_stage or query_embed is not None
 
         src_flatten = []
         mask_flatten = []
         lvl_pos_embed_flatten = []
         spatial_shapes = []
-        for lvl, (src, mask, pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
+        spectral_embeds_flatten = []
+        for lvl, (src, mask, pos_embed, spectral_weight) in enumerate(zip(srcs, masks, pos_embeds, spectral_weights)):
             # src.shape = (B, C, H, W) in lvl level.
             # mask.shape = (B, H, W) in lvl level.
             # pos_embed.shape = (B, C, H, W) in lvl level.
@@ -206,13 +231,18 @@ class DeformableTransformer(nn.Module):
             src = src.flatten(2).transpose(1, 2)                # (B, H*W, C)
             mask = mask.flatten(1)                              # (B, H*W)
             pos_embed = pos_embed.flatten(2).transpose(1, 2)    # (B, H*W, C), same as src.
+
+            spectral_embed = self.spectral_embed(spectral_weight.flatten(2).transpose(1, 2)) # (B, H*W, C)
+            # spectral_embed = spectral_embed.flatten(2).transpose(1, 2)    # (B, H*W, C=8)
             lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)    # (B, H*W, C)
             spatial_shapes.append(spatial_shape)
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
+            spectral_embeds_flatten.append(spectral_embed) 
         src_flatten = torch.cat(src_flatten, 1)
         mask_flatten = torch.cat(mask_flatten, 1)
+        spectral_embeds_flatten = torch.cat(spectral_embeds_flatten, 1)
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)   # (n_levels, 2)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1,)),
@@ -223,14 +253,18 @@ class DeformableTransformer(nn.Module):
         if self.use_checkpoint and (self.checkpoint_level == 2 or self.checkpoint_level == 3):
             from torch.utils.checkpoint import checkpoint
             memory = checkpoint(self.encoder, src_flatten, spatial_shapes, level_start_index,
-                                valid_ratios, lvl_pos_embed_flatten, mask_flatten, use_reentrant=False)
+                                valid_ratios, lvl_pos_embed_flatten, mask_flatten, spectral_embeds_flatten, use_reentrant=False)
         else:
             memory = self.encoder(
                 src=src_flatten, spatial_shapes=spatial_shapes,
                 level_start_index=level_start_index, valid_ratios=valid_ratios,
-                pos=lvl_pos_embed_flatten, padding_mask=mask_flatten
+                pos=lvl_pos_embed_flatten, padding_mask=mask_flatten, 
+                spectral=spectral_embeds_flatten
             )   # (B, sum(W_l * H_l), C) = (B, N, C)
         bs, _, c = memory.shape
+
+
+        # decoder
         if self.two_stage:
             raise RuntimeError(f"Do not support two stage model for Deformable Transformer.")
         else:

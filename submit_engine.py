@@ -3,6 +3,7 @@ import os
 import json
 import torch
 import torch.nn as nn
+import sys
 
 from tqdm import tqdm
 from os import path
@@ -276,4 +277,91 @@ def submit(config: dict):
             npy2rgb = config["NPY2RGB"]
         )
         submitter.run()
+    return
+
+def submit_during_train(config: dict, epoch: int, model: nn.Module):
+
+    model.eval()
+
+    assert config["SUBMIT_DIR"] is not None, f"'--submit-dir' must not be None for submit process."
+    assert config["SUBMIT_DATA_SPLIT"] is not None, f"'--submit-data-split' must not be None for submit process."
+
+
+    submit_dir = os.path.join(config["SUBMIT_DIR"], f"epoch_{epoch}")
+    submit_logger = Logger(logdir=os.path.join(submit_dir, config["SUBMIT_DATA_SPLIT"]), only_main=True)
+    submit_logger.show(head="Configs:", log=config)
+    submit_logger.write(log=config, filename="config.yaml", mode="w")
+
+    data_root = config["DATA_ROOT"]
+    dataset_name = config["DATASET"]
+    dataset_split = config["SUBMIT_DATA_SPLIT"]
+    outputs_dir = path.join(submit_dir, dataset_split)
+    use_dab = config["USE_DAB"]
+    det_score_thresh = config["DET_SCORE_THRESH"]
+    track_score_thresh = config["TRACK_SCORE_THRESH"]
+    result_score_thresh = config["RESULT_SCORE_THRESH"]
+    use_motion = config["USE_MOTION"]
+    motion_min_length = config["MOTION_MIN_LENGTH"]
+    motion_max_length = config["MOTION_MAX_LENGTH"]
+    motion_lambda = config["MOTION_LAMBDA"]
+    miss_tolerance = config["MISS_TOLERANCE"]
+
+    if "hsmot" in dataset_name:
+        data_split_dir = path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'npy')
+    seq_names = os.listdir(data_split_dir)
+
+    if is_distributed():
+        total_seq_names = seq_names
+        seq_names = []
+        for i in range(len(total_seq_names)):
+            if i % distributed_world_size() == distributed_rank():
+                seq_names.append(total_seq_names[i])
+
+    for seq_name in seq_names:
+        seq_name = str(seq_name)
+        submitter = Submitter(
+            dataset_name=dataset_name,
+            split_dir=data_split_dir,
+            seq_name=seq_name,
+            outputs_dir=outputs_dir,
+            model=model,
+            use_dab=use_dab,
+            det_score_thresh=det_score_thresh,
+            track_score_thresh=track_score_thresh,
+            result_score_thresh=result_score_thresh,
+            use_motion=use_motion,
+            motion_min_length=motion_min_length,
+            motion_max_length=motion_max_length,
+            motion_lambda=motion_lambda,
+            miss_tolerance=miss_tolerance,
+            npy2rgb = config["NPY2RGB"]
+        )
+        submitter.run()
+
+
+    if is_distributed():
+        torch.distributed.barrier()
+
+    if distributed_rank() == 0:
+        gt_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'mot')
+        # 把outputs_dir分为parent和folderName 分给tracker_dir和trackers_name
+        tracker_dir = submit_dir
+        trackers_name = outputs_dir.split('/')[-1]
+        trackers_subfolder = 'tracker'
+        img_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'npy')
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        os_flag = os.system(
+            f"{sys.executable} {current_file_dir}/../TrackEval/scripts/run_hsmot_8ch.py " 
+            f"--USE_PARALLEL False "
+            f"--METRICS HOTA CLEAR Identity " 
+            f"--GT_FOLDER {gt_dir} "
+            f"--TRACKERS_FOLDER {tracker_dir} "
+            f"--TRACKERS_TO_EVAL {trackers_name} "
+            f"--TRACKER_SUB_FOLDER {trackers_subfolder} "
+            f"--IMG_FOLDER {img_dir} "
+        )
+        assert os_flag == 0, "TrackEval failed to run."
+
+    if is_distributed():
+        torch.distributed.barrier()
     return

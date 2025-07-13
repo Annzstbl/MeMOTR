@@ -109,9 +109,17 @@ class MeMOTR(nn.Module):
 
         # 图像经过 backbone
         if self.use_checkpoint and self.checkpoint_level != 3:
-            features, pos = checkpoint(self.backbone, frame, use_reentrant=False)
+            feature_tuple = checkpoint(self.backbone, frame, use_reentrant=False)
         else:
-            features, pos = self.backbone(frame)
+            feature_tuple = self.backbone(frame)
+
+        if isinstance(feature_tuple, (tuple, list)) and len(feature_tuple) == 3:
+            features, pos, spectral_weights = feature_tuple
+        elif isinstance(feature_tuple, (tuple, list)) and len(feature_tuple) == 2:
+            features, pos = feature_tuple
+            spectral_weights = None
+        else:
+            raise ValueError("outputs 必须是长度为2或3的tuple或list")
 
         srcs, masks = [], []
         for layer, feat in enumerate(features):
@@ -128,11 +136,14 @@ class MeMOTR(nn.Module):
                 mask = frame.masks
                 mask = F.interpolate(mask[None, ...].float(), size=src.shape[-2:])[0].to(torch.bool)
                 pos.append(self.backbone.position_embedding(NestedTensor(src, mask)).to(src.device))
+                if spectral_weights is not None:
+                    spectral_weights.append(self.backbone.spectral_embedding(spectral_weights[0], NestedTensor(src, mask)).to(src.device))
                 srcs.append(src)
                 masks.append(mask)
         # srcs is n_feature_levels * [(B, C, H, W)]
         # masks is n_feature_levels * [(B, H, W)]
         # pos is n_features_levels * [(B, C, H, W)]
+        # spectral_weights is n_features_levels * [(B, C=8, H, W)]
 
         reference_points = self.get_reference_points(tracks=tracks).to(srcs[0].device)      # (B, Nd+Nq, 2/5)
         query_embed = self.get_query_embed(tracks=tracks).to(srcs[0].device)
@@ -143,6 +154,7 @@ class MeMOTR(nn.Module):
             srcs=srcs,
             masks=masks,
             pos_embeds=pos,
+            spectral_weights=spectral_weights,
             query_embed=query_embed,
             ref_pts=reference_points,
             query_mask=query_mask
