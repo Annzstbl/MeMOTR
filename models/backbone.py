@@ -111,7 +111,7 @@ class Backbone(nn.Module):
                             final_act=False,
                             use_bn_3d=False
                         )
-                    elif stem == "conv3d_se":
+                    elif stem == "conv3d_se" or stem == "conv3d_se_v2" or stem == "conv3d_se_v3":
                         return ConvMSI_SE(
                             c1=1,
                             c2=conv1_3ch.out_channels,
@@ -124,6 +124,7 @@ class Backbone(nn.Module):
                             use_bn_3d=False,
                             reduction=2
                         )
+
                 else:
                     # conv2d stem
                     return nn.Conv2d(
@@ -227,6 +228,71 @@ class Backbone_PE_SpectralWeights(nn.Module):
 
         return features, pos_embeds, spectral_embeds
 
+class Backbone_PE_SpectralWeights(nn.Module):
+    """
+    Backbone with Position Embedding and Spectral Weights.
+    输出: 多尺度特征、位置编码、每个尺度的spectral_weights（如SE权重）。
+    """
+    def __init__(self, backbone: nn.Module, position_embedding: nn.Module, spectral_embedding: nn.Module, weights_version="v1"):
+        super().__init__()
+        self.backbone = backbone
+        self.position_embedding = position_embedding
+        self.strides = backbone.strides
+        self.num_channels = backbone.num_channels
+        self.spectral_embedding = spectral_embedding
+        self.weights_version = weights_version
+
+    def n_inter_layers(self):
+        return len(self.strides)
+
+    def n_inter_channels(self):
+        return self.num_channels
+
+    def forward_v1(self, ntensor: NestedTensor):
+        backbone_outputs, se_weights = self.backbone(ntensor)
+        features: List[NestedTensor] = []
+        pos_embeds: List[torch.Tensor] = []
+        spectral_embeds: List[torch.Tensor] = []
+        # 取特征
+        for _, output in sorted(backbone_outputs.items()):
+            features.append(output)
+        # 位置编码
+        for feature in features:
+            pos_embeds.append(self.position_embedding(feature))
+        # 构建spectral_weights_list
+        for feature in features:
+            spectral_embeds.append(self.spectral_embedding(se_weights, feature))
+
+        return features, pos_embeds, spectral_embeds
+
+    def forward_v2(self, ntensor: NestedTensor):
+        layers=["layer2", "layer3", "layer4"]
+        backbone_outputs, se_weights = self.backbone(ntensor)
+        features: List[NestedTensor] = []
+        pos_embeds: List[torch.Tensor] = []
+        spectral_embeds: List[torch.Tensor] = []
+        # 取特征
+        for _, output in sorted(backbone_outputs.items()):
+            features.append(output)
+        # 位置编码
+        for feature in features:
+            pos_embeds.append(self.position_embedding(feature))
+        # 构建spectral_weights_list
+        for feature, layer in zip(features, layers):
+            spectral_embeds.append(self.spectral_embedding(se_weights, feature, layer=layer))
+
+        return features, pos_embeds, spectral_embeds
+    
+    def forward(self, ntensor: NestedTensor):
+        if self.weights_version == "v1":
+            return self.forward_v1(ntensor)
+        elif self.weights_version == "v2":
+            return self.forward_v2(ntensor)
+        elif self.weights_version == "v3":
+            return self.forward_v2(ntensor)#复用
+        else:
+            raise ValueError(f"Unsupported weights_version: {self.weights_version}")
+
 
 class SpectralEmbedding(nn.Module):
     def __init__(self):
@@ -264,6 +330,108 @@ class SpectralEmbedding(nn.Module):
         out_weights = out_weights.masked_fill(mask.unsqueeze(1), 0)
         return out_weights
 
+class SpectralEmbeddingConv(nn.Module):
+    def __init__(self, resnet_output_layer: list[str]):
+        super(SpectralEmbeddingConv, self).__init__()
+
+        self.resnet_output_layer = resnet_output_layer
+
+        def _build_spectral_weights_module(layer: str):
+            if layer == "layer2":
+                # 由512+8->64->8
+                return nn.Sequential(
+                    nn.Conv2d(in_channels=512+8, out_channels=64, kernel_size=3, stride=1, padding=1),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(in_channels=64, out_channels=8, kernel_size=3, stride=1, padding=1),
+                    nn.Sigmoid()
+                )
+            elif layer == "layer3":
+                return nn.Sequential(
+                    nn.Conv2d(in_channels=1024+8, out_channels=64, kernel_size=3, stride=1, padding=1),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(in_channels=64, out_channels=8, kernel_size=3, stride=1, padding=1),
+                    nn.Sigmoid()
+                )
+            elif layer == "layer4":
+                return nn.Sequential(
+                    nn.Conv2d(in_channels=2048+8, out_channels=64, kernel_size=3, stride=1, padding=1),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(in_channels=64, out_channels=8, kernel_size=3, stride=1, padding=1),
+                    nn.Sigmoid()
+                )
+            elif layer == "layer_extra":
+                return nn.Sequential(
+                    nn.Conv2d(in_channels=256+8, out_channels=64, kernel_size=3, stride=1, padding=1),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(in_channels=64, out_channels=8, kernel_size=3, stride=1, padding=1),
+                    nn.Sigmoid()
+                )
+            else:
+                raise ValueError(f"Unsupported layer: {layer}")
+
+        self.conv_list = nn.ModuleList([_build_spectral_weights_module(layer) for layer in self.resnet_output_layer])
+
+
+    def forward(self, spectral_weights: torch.Tensor, ntensor: NestedTensor, mode: str = "avg", layer='layer_extra') -> torch.Tensor:
+        return self.spectral_embedding(spectral_weights, ntensor, mode, layer)
+
+    def spectral_embedding(self, spectral_weights: torch.Tensor, ntensor: NestedTensor, mode: str = "avg", layer='layer_extra') -> torch.Tensor:
+        '''
+            extra_layer: 用于处理最后一层特征
+        '''
+        mask = ntensor.masks
+        feature = ntensor.tensors
+        B, C, H_feat, W_feat = feature.shape[0], spectral_weights.shape[1], feature.shape[2], feature.shape[3]
+        out_weights = F.adaptive_avg_pool2d(spectral_weights, (H_feat, W_feat))
+        out_weights = out_weights.masked_fill(mask.unsqueeze(1), 0)
+        out_weights = self.conv_list[self.resnet_output_layer.index(layer)](torch.cat([feature, out_weights], dim=1))
+        return out_weights
+
+
+class SpectralEmbeddingV3(nn.Module):
+    def __init__(self, resnet_output_layer: list[str]):
+        super(SpectralEmbeddingV3, self).__init__()
+
+        self.resnet_output_layer = resnet_output_layer
+        self.layer2channel = {"layer2": 512, "layer3": 1024, "layer4": 2048, "layer_extra": 256}
+
+        def _build_spectral_weights_module(layer: str):
+            return nn.Sequential(
+                nn.Conv2d(in_channels=self.layer2channel[layer], out_channels=64, kernel_size=3, stride=1, padding=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(in_channels=64, out_channels=8, kernel_size=3, stride=1, padding=1),
+                nn.Sigmoid()
+            )       
+
+        def _build_film_module(layer: str):
+            return nn.Conv2d(in_channels=8, out_channels=self.layer2channel[layer]*2, kernel_size=3, stride=1, padding=1)
+
+        self.conv_list = nn.ModuleList([_build_spectral_weights_module(layer) for layer in self.resnet_output_layer])
+        self.film_list = nn.ModuleList([_build_film_module(layer) for layer in self.resnet_output_layer])
+
+
+    def forward(self, spectral_weights: torch.Tensor, ntensor: NestedTensor, mode: str = "avg", layer='layer_extra') -> torch.Tensor:
+        return self.spectral_embedding(spectral_weights, ntensor, mode, layer)
+
+    def spectral_embedding(self, spectral_weights: torch.Tensor, ntensor: NestedTensor, mode: str = "avg", layer='layer_extra') -> torch.Tensor:
+        '''
+            extra_layer: 用于处理最后一层特征
+        '''
+        mask = ntensor.masks
+        feature = ntensor.tensors
+        B, C, H_feat, W_feat = feature.shape[0], spectral_weights.shape[1], feature.shape[2], feature.shape[3]
+        out_weights = F.adaptive_avg_pool2d(spectral_weights, (H_feat, W_feat))
+        out_weights = out_weights.masked_fill(mask.unsqueeze(1), 0)
+
+        film_weights = self.film_list[self.resnet_output_layer.index(layer)](out_weights)# [B, C*2, H, W]
+        gamma, beta = torch.chunk(film_weights, 2, dim=1)
+        stage_feature = (1+gamma) * feature + beta
+        out_weights = self.conv_list[self.resnet_output_layer.index(layer)](stage_feature)
+        return out_weights
+
+
+
+
 
 def build(config: dict) -> Union[BackboneWithPE, Backbone_PE_SpectralWeights]:
     CONFIG_STEM=config["STEM"]
@@ -271,7 +439,13 @@ def build(config: dict) -> Union[BackboneWithPE, Backbone_PE_SpectralWeights]:
     backbone = Backbone(backbone_name=config["BACKBONE"], train_backbone=True, return_interm_layers=True, input_channel=config["INPUT_CHANNELS"], stem=CONFIG_STEM)
     if CONFIG_STEM=="conv3d_se":
         spectral_embedding = SpectralEmbedding()
-        return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding)
+        return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding, weights_version="v1")
+    elif CONFIG_STEM=="conv3d_se_v2":
+        spectral_embedding = SpectralEmbeddingConv(resnet_output_layer=["layer2", "layer3", "layer4", "layer_extra"])
+        return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding, weights_version="v2")
+    elif CONFIG_STEM=="conv3d_se_v3":
+        spectral_embedding = SpectralEmbeddingV3(resnet_output_layer=["layer2", "layer3", "layer4", "layer_extra"])
+        return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding, weights_version="v3")
     else:
         return BackboneWithPE(backbone=backbone, position_embedding=position_embedding)
 
