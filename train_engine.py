@@ -161,7 +161,7 @@ def train(config: dict):
 
         # 添加evaluate_one_epoch
         # 在每个epoch结束后进行一次验证（如果配置中包含验证集）
-        if "EVALUATE_PER_EPOCH" in config and config["EVALUATE_PER_EPOCH"] > 0 and epoch % config["EVALUATE_PER_EPOCH"] == 0:
+        if ("EVALUATE_PER_EPOCH" in config and config["EVALUATE_PER_EPOCH"] > 0 and (epoch+1) % config["EVALUATE_PER_EPOCH"] == 0) or (epoch == config["EPOCHS"] - 1):
             from submit_engine import submit_during_train
             submit_during_train(config=config, epoch=epoch, model=model)
 
@@ -202,6 +202,8 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     epoch_start_timestamp = time.time()
     
     data_start_timestamp = time.time()
+
+    criterion.set_epoch(epoch)
 
     for i, batch in enumerate(dataloader):
         img_metas = batch["img_metas"][0][0]

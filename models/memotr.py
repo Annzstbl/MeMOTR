@@ -217,6 +217,7 @@ class MeMOTR(nn.Module):
                                                    query_mask=query_mask,
                                                    queries=inter_queries)
         res["outputs"] = outputs[-1]     # (B, Nd+Nq, C)
+        res["spectral_weights"] = spectral_weights # List[B, C=8, H, W]
         return res
 
     @torch.jit.unused

@@ -11,6 +11,7 @@
 # ------------------------------------------------------------------------
 import torch
 import copy
+import math
 
 import torch.nn.functional as F
 import torch.distributed
@@ -29,7 +30,7 @@ from hsmot.util.dist import box_iou_rotated_norm_bboxes1
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
                  max_frame_length: int, n_aux: int, merge_det_track_layer: int = 0, aux_weights: List = None,
-                 hidden_dim: int = 256, use_dab: bool = True):
+                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0):
         """
         Init a criterion function.
 
@@ -58,6 +59,18 @@ class ClipCriterion:
         self.loss = {}
         self.log = {}
         self.n_gts = []
+        self.epoch = 0
+        self.kl_cos_scheduler_epoch = kl_cos_scheduler_epoch
+        self.kl_weight_eta = kl_weight_eta
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+        if self.epoch >= self.kl_cos_scheduler_epoch:
+            self.weight["spectral_kl_loss"] = self.kl_weight_eta
+        else:
+            coeff = math.cos(math.pi * self.epoch / self.kl_cos_scheduler_epoch)
+            self.weight["spectral_kl_loss"] = self.weight["spectral_kl_loss"] * coeff
+        print(f"spectral_kl_loss weight: {self.weight['spectral_kl_loss']}")
 
     def set_device(self, device: torch.device):
         self.device = device
@@ -95,13 +108,15 @@ class ClipCriterion:
                 "label_focal_loss": torch.zeros(()).to(self.device),
                 "aux_box_l1_loss": torch.zeros(()).to(self.device),
                 "aux_box_giou_loss": torch.zeros(()).to(self.device),
-                "aux_label_focal_loss": torch.zeros(()).to(self.device)
+                "aux_label_focal_loss": torch.zeros(()).to(self.device),
+                "spectral_kl_loss": torch.zeros(()).to(self.device)
             }
         else:
             self.loss = {
                 "box_l1_loss": torch.zeros(()).to(self.device),
                 "box_giou_loss": torch.zeros(()).to(self.device),
-                "label_focal_loss": torch.zeros(()).to(self.device)
+                "label_focal_loss": torch.zeros(()).to(self.device),
+                "spectral_kl_loss": torch.zeros(()).to(self.device)
             }
         return
 
@@ -113,6 +128,8 @@ class ClipCriterion:
                 return self.weight["box_giou_loss"]
             elif "label_focal_loss" in loss_name:
                 return self.weight["label_focal_loss"]
+            elif "spectral_kl_loss" in loss_name:
+                return self.weight["spectral_kl_loss"]
 
         loss = sum([
             get_weight(k) * v for k, v in loss_dict.items()
@@ -370,6 +387,18 @@ class ClipCriterion:
             )
             pass
 
+        # 12 calculate spectral kl loss
+        spectral_weights_list = model_outputs["spectral_weights"]
+        target_weights = spectral_weights_list[0]
+        kl_loss = torch.zeros(()).to(self.device)
+        for b in range(1, len(spectral_weights_list)):
+            source_weights = spectral_weights_list[b]
+            _target_weights = F.adaptive_avg_pool2d(target_weights, (source_weights.shape[2], source_weights.shape[3]))
+            kl_loss += F.kl_div(F.log_softmax(_target_weights, dim=1), F.softmax(source_weights, dim=1), reduction="batchmean")
+
+        self.loss["spectral_kl_loss"] += kl_loss * self.frame_weights[frame_idx]
+        self.log[f"frame{frame_idx}_spectral_kl_loss"] = kl_loss.item()
+
         return tracked_instances, new_trackinstances, unmatched_detections
 
     def update_tracked_instances(self, model_outputs: dict, tracked_instances: List[TrackInstances])\
@@ -491,7 +520,8 @@ def build(config: dict):
         weight={
             "box_l1_loss": config["LOSS_WEIGHT_L1"],
             "box_giou_loss": config["LOSS_WEIGHT_GIOU"],
-            "label_focal_loss": config["LOSS_WEIGHT_FOCAL"]
+            "label_focal_loss": config["LOSS_WEIGHT_FOCAL"],
+            "spectral_kl_loss": config["LOSS_SPECTRAL_KL"]
         },
         max_frame_length=max(config["SAMPLE_LENGTHS"]),
         n_aux=config["NUM_DEC_LAYERS"]-1,
