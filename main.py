@@ -93,6 +93,12 @@ def parse_option():
 def main(config: dict):
     os.environ["CUDA_VISIBLE_DEVICES"] = config["AVAILABLE_GPUS"]
 
+    # NCCL 优化配置
+    os.environ["NCCL_BLOCKING_WAIT"] = "1"  # 启用阻塞等待以避免超时
+    os.environ["NCCL_DEBUG"] = "INFO"       # 启用调试信息（可选）
+    os.environ["NCCL_TREE_THRESHOLD"] = "0" # 强制使用tree算法
+    os.environ["NCCL_IB_DISABLE"] = "1"     # 如果没有InfiniBand，禁用IB
+    
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
 

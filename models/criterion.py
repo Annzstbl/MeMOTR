@@ -250,11 +250,12 @@ class ClipCriterion:
                     ),
                     dim=-1
                 )
-            trackinstances.ref_pts = model_outputs["last_ref_pts"][b][output_idx]
+            trackinstances.ref_pts = model_outputs["last_ref_pts"][b][output_idx]#TODO 这里是最后一层layer的输入
             trackinstances.output_embed = model_outputs["outputs"][b][output_idx]
             trackinstances.boxes = model_outputs["pred_bboxes"][b][output_idx]
             trackinstances.logits = model_outputs["pred_logits"][b][output_idx]
             trackinstances.iou = torch.zeros((len(gt_idx),), dtype=torch.float)
+            # trackinstances.spectral_weights = model_outputs["last_query_spectral_weights"][b][output_idx]
             trackinstances = trackinstances.to(self.device)
             new_trackinstances.append(trackinstances)
 
@@ -350,6 +351,7 @@ class ClipCriterion:
             detections.output_embed = model_outputs["outputs"][b][unmatched_indexes]
             detections.logits = model_outputs["pred_logits"][b][unmatched_indexes]
             detections.boxes = model_outputs["pred_bboxes"][b][unmatched_indexes]
+            # detections.spectral_weights = model_outputs["init_query_spectral_weights"][b][unmatched_indexes]
             # detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
             if self.use_dab:
                 detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
@@ -415,6 +417,7 @@ class ClipCriterion:
                 tracked_instances[b].output_embed = model_outputs["outputs"][b][self.n_det_queries:][~track_mask]
                 tracked_instances[b].matched_idx = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
                 tracked_instances[b].labels = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
+                # tracked_instances[b].spectral_weights = model_outputs["last_query_spectral_weights"][b][self.n_det_queries:][~track_mask]
         return tracked_instances
 
     def get_loss_label(self, outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx):

@@ -20,6 +20,7 @@ from .deformable_encoder import DeformableEncoderLayer, DeformableEncoder
 from .deformable_decoder import DeformableDecoderLayer, DeformableDecoder
 
 from .deformable_encoder_spectral import DeformableEncoderLayerSpectral, DeformableEncoderSpectral
+from .deformable_decoder_spectral import DeformableDecoderLayerSpectral, DeformableDecoderSpectral
 from .ops.modules import MSDeformAttn
 from .mlp import MLP
 
@@ -39,7 +40,8 @@ class DeformableTransformer(nn.Module):
                  checkpoint_level: int = 2,
                  use_dab: bool = False,
                  visualize: bool = False,
-                 spectral_encoder: bool = True):
+                 spectral_encoder: bool = True,
+                 spectral_decoder: bool = True):
         """
         Args:
             d_model:
@@ -69,6 +71,8 @@ class DeformableTransformer(nn.Module):
         self.checkpoint_level = checkpoint_level
         self.use_dab = use_dab
         self.visualize = visualize
+        self.encoder_spectral = spectral_encoder
+        self.decoder_spectral = spectral_decoder
 
 
         if spectral_encoder:
@@ -91,24 +95,42 @@ class DeformableTransformer(nn.Module):
             self.encoder: DeformableEncoder = DeformableEncoder(encoder_layer=encoder_layer, num_layers=n_enc_layers,
                                                                 use_checkpoint=(self.use_checkpoint and
                                                                 self.checkpoint_level == 1))
-        decoder_layer = DeformableDecoderLayer(
-            d_model=d_model, d_ffn=d_ffn,
-            dropout=dropout, activation=activation,
-            n_levels=n_feature_levels, n_heads=n_heads,
-            n_points=n_dec_points, sigmoid_attn=False,
-            extra_track_attn=extra_track_attn, n_det_queries=n_det_queries,
-            visualize=self.visualize
-        )
-    
 
-        self.decoder: DeformableDecoder = DeformableDecoder(decoder_layer=decoder_layer, num_layers=n_dec_layers,
-                                                            return_intermediate=return_intermediate_dec,
-                                                            merge_det_track_layer=merge_det_track_layer,
-                                                            n_det_queries=n_det_queries,
-                                                            d_model=self.d_model,
-                                                            use_checkpoint=self.use_checkpoint,
-                                                            use_dab=self.use_dab,
-                                                            visualize=self.visualize)
+
+        if spectral_decoder:
+            decoder_layer = DeformableDecoderLayerSpectral(
+                d_model=d_model, d_ffn=d_ffn,
+                dropout=dropout, activation=activation,
+                n_levels=n_feature_levels, n_heads=n_heads,
+                n_points=n_dec_points, sigmoid_attn=False,
+                extra_track_attn=extra_track_attn, n_det_queries=n_det_queries,
+                visualize=self.visualize
+            )
+            self.decoder: DeformableDecoderSpectral = DeformableDecoderSpectral(decoder_layer=decoder_layer, num_layers=n_dec_layers,
+                                                                                return_intermediate=return_intermediate_dec,
+                                                                                merge_det_track_layer=merge_det_track_layer,
+                                                                                n_det_queries=n_det_queries,
+                                                                                d_model=self.d_model,
+                                                                                use_checkpoint=self.use_checkpoint,
+                                                                                use_dab=self.use_dab,
+                                                                                visualize=self.visualize)
+        else:
+            decoder_layer = DeformableDecoderLayer(
+                d_model=d_model, d_ffn=d_ffn,
+                dropout=dropout, activation=activation,
+                n_levels=n_feature_levels, n_heads=n_heads,
+                n_points=n_dec_points, sigmoid_attn=False,
+                extra_track_attn=extra_track_attn, n_det_queries=n_det_queries,
+                visualize=self.visualize
+            )
+            self.decoder: DeformableDecoder = DeformableDecoder(decoder_layer=decoder_layer, num_layers=n_dec_layers,
+                                                                return_intermediate=return_intermediate_dec,
+                                                                merge_det_track_layer=merge_det_track_layer,
+                                                                n_det_queries=n_det_queries,
+                                                                d_model=self.d_model,
+                                                                use_checkpoint=self.use_checkpoint,
+                                                                use_dab=self.use_dab,
+                                                                visualize=self.visualize)
 
         self.level_embed = nn.Parameter(torch.Tensor(n_feature_levels, d_model))
         self.spectral_embed = MLP(
@@ -214,7 +236,7 @@ class DeformableTransformer(nn.Module):
 
     def forward(self, srcs: List[torch.Tensor], masks: List[torch.Tensor],
                 pos_embeds: List[torch.Tensor], query_embed, ref_pts, query_mask,
-                spectral_weights: List[torch.Tensor]):
+                spectral_weights: List[torch.Tensor], query_spectral_weights: torch.Tensor = None):
         assert self.two_stage or query_embed is not None
 
         src_flatten = []
@@ -277,25 +299,42 @@ class DeformableTransformer(nn.Module):
             reference_points = ref_pts.sigmoid()
             init_reference_points = reference_points
 
-        output, res_reference_points, inter_queries = self.decoder(
-            tgt=tgt,
-            reference_points=init_reference_points,
-            src=memory,
-            src_spatial_shapes=spatial_shapes,
-            src_level_start_index=level_start_index,
-            src_valid_ratios=valid_ratios,
-            query_pos=query_embed,
-            query_mask=query_mask,
-            src_padding_mask=mask_flatten
-        )
+        if self.decoder_spectral:
+            init_query_spectral_weights = query_spectral_weights.sigmoid() #取值范围0-1
+            output, res_reference_points, inter_queries, inter_query_spectral_weights = self.decoder(
+                tgt=tgt,
+                reference_points=init_reference_points,
+                src=memory,
+                src_spatial_shapes=spatial_shapes,
+                src_level_start_index=level_start_index,
+                src_valid_ratios=valid_ratios,
+                query_pos=query_embed,
+                query_mask=query_mask,
+                src_padding_mask=mask_flatten,
+                query_spectral_weights=init_query_spectral_weights
+            )
+        else:
+            output, res_reference_points, inter_queries = self.decoder(
+                tgt=tgt,
+                reference_points=init_reference_points,
+                src=memory,
+                src_spatial_shapes=spatial_shapes,
+                src_level_start_index=level_start_index,
+                src_valid_ratios=valid_ratios,
+                query_pos=query_embed,
+                query_mask=query_mask,
+                src_padding_mask=mask_flatten
+            )
         # if inter is Ture, shape = (n_layers, B, Nq, C), (n_layers, B, Nq, 4), (n_layer, B, Nq, 2C)
         # else, shape = (B, Nq, C), (B, Nq, 4)
-        return output, init_reference_points, res_reference_points, inter_queries
+        return output, init_reference_points, res_reference_points, inter_queries, init_query_spectral_weights, inter_query_spectral_weights
         # output:   if inter is Ture, (n_layers, B, Nq, C)
         #           else,             (B, Nq, C)
         # init_reference_points, (B, Nq, 2/4)
         # res_reference_points: if inter is True, (n_layers, B, Nq, 4)
         #                       else,             (B, Nq, 4)
+        # inter_query_spectral_weights: if inter is True, (n_layers, B, Nq, 8)
+        #                                else,             (B, Nq, 8)
 
     def get_d_model(self):
         return self.d_model
@@ -311,6 +350,9 @@ class DeformableTransformer(nn.Module):
         self.decoder.angle_embed = angle_embed
         return
 
+    def set_refine_spectral_embed(self, spectral_embed: nn.Module):
+        self.decoder.spectral_embed = spectral_embed
+        return
 
 def build(config: dict):
     return DeformableTransformer(
@@ -332,6 +374,8 @@ def build(config: dict):
         use_checkpoint=config["USE_CHECKPOINT"],
         checkpoint_level=config["CHECKPOINT_LEVEL"],
         use_dab=config["USE_DAB"],
-        visualize=config["VISUALIZE"]
+        visualize=config["VISUALIZE"],
+        spectral_encoder=config["USE_SPECTRAL_ENCODER"],
+        spectral_decoder=config["USE_SPECTRAL_DECODER"],
     )
 

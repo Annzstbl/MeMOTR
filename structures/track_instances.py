@@ -9,8 +9,9 @@ class TrackInstances:
     Tracked Instances.
     """
     def __init__(self, frame_height: float = 1.0, frame_width: float = 1.0,
-                 hidden_dim: int = 256, num_classes: int = 1, use_dab: bool = False):
+                 hidden_dim: int = 256, num_classes: int = 1, use_dab: bool = False, use_spectral_decoder: bool = False):
         self.use_dab = use_dab
+        self.use_spectral_decoder = use_spectral_decoder
         self.frame_height = frame_height
         self.frame_width = frame_width
         self.hidden_dim = hidden_dim
@@ -35,6 +36,7 @@ class TrackInstances:
         self.last_output = torch.zeros((0, self.hidden_dim), dtype=torch.float)
         self.long_memory = torch.zeros((0, self.hidden_dim), dtype=torch.float)
         self.last_appear_boxes = torch.zeros((0, 4))
+        self.spectral_weights = torch.zeros((0, 8), dtype=torch.float)
 
     def to(self, device):
         res = TrackInstances(frame_height=self.frame_height, frame_width=self.frame_width,

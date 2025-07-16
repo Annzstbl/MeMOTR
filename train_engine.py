@@ -149,15 +149,14 @@ def train(config: dict):
         if multi_checkpoint is True:
             pass
         else:
-            pass
-            # if config["DATASET"] == "DanceTrack" or config["EPOCHS"] < 100 or (epoch + 1) % 5 == 0:
-            #     save_checkpoint(
-            #         model=model,
-            #         path=os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth"),
-            #         states=train_states,
-            #         optimizer=optimizer,
-            #         scheduler=scheduler
-            #     )
+            if config["DATASET"] == "DanceTrack" or config["EPOCHS"] < 100 or (epoch + 1) % 5 == 0:
+                save_checkpoint(
+                    model=model,
+                    path=os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth"),
+                    states=train_states,
+                    optimizer=optimizer,
+                    scheduler=scheduler
+                )
 
         # 添加evaluate_one_epoch
         # 在每个epoch结束后进行一次验证（如果配置中包含验证集）
@@ -273,11 +272,11 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
         metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
         metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
         data_start_timestamp = time.time()
-        # Outputs logs
-        if i % 1 == 0:
+        # Outputs logs - 减少同步频率以避免NCCL超时
+        if i % 10 == 0:  # 改为每10个iteration同步一次，而不是每次
             metric_log.sync()
-            max_memory = max([torch.cuda.max_memory_allocated(torch.device('cuda', i))
-                              for i in range(distributed_world_size())]) // (1024**2)
+            # 修复：只获取当前GPU的内存使用情况，避免跨进程访问
+            max_memory = torch.cuda.max_memory_allocated() // (1024**2)
             second_per_iter = metric_log.metrics["time per iter"].avg
             second_per_data = metric_log.metrics["time per data"].avg
             logger.show(head=f"[Epoch={epoch}, Iter={i}, "

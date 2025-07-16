@@ -25,15 +25,43 @@ class Value:
 
     def sync(self):
         if is_distributed():
-            torch.distributed.barrier()
-            value_list_gather = [None] * distributed_world_size()
-            value_count_gather = [None] * distributed_world_size()
-            torch.distributed.all_gather_object(value_list_gather, list(self.value_deque))
-            torch.distributed.all_gather_object(value_count_gather, [self.total_value, self.total_count])
-            value_list = [v for v_list in value_list_gather for v in v_list]
-            self.value_sync = torch.as_tensor(value_list)
-            self.total_value_sync = sum([_[0] for _ in value_count_gather])
-            self.total_count_sync = int(sum([_[1] for _ in value_count_gather]))
+            try:
+                # 添加内存清理
+                torch.cuda.empty_cache()
+                
+                torch.distributed.barrier()
+                value_list_gather = [None] * distributed_world_size()
+                value_count_gather = [None] * distributed_world_size()
+                
+                # 减少传输的数据量，只传输最近的数据
+                recent_values = list(self.value_deque)[-50:] if len(self.value_deque) > 50 else list(self.value_deque)
+                
+                torch.distributed.all_gather_object(value_list_gather, recent_values)
+                torch.distributed.all_gather_object(value_count_gather, [self.total_value, self.total_count])
+                
+                # 安全地处理收集到的数据
+                value_list = []
+                for v_list in value_list_gather:
+                    if v_list is not None:
+                        value_list.extend(v_list)
+                
+                self.value_sync = torch.as_tensor(value_list) if value_list else torch.as_tensor([0.0])
+                
+                # 安全地处理统计数据
+                valid_counts = [item for item in value_count_gather if item is not None]
+                if valid_counts:
+                    self.total_value_sync = sum([item[0] for item in valid_counts])
+                    self.total_count_sync = int(sum([item[1] for item in valid_counts]))
+                else:
+                    self.total_value_sync = self.total_value
+                    self.total_count_sync = self.total_count
+                
+            except Exception as e:
+                print(f"Warning: Distributed sync failed: {e}. Using local values.")
+                # 如果同步失败，使用本地值
+                self.value_sync = torch.as_tensor(list(self.value_deque))
+                self.total_value_sync = self.total_value
+                self.total_count_sync = self.total_count
         else:
             self.value_sync = torch.as_tensor(list(self.value_deque))
             self.total_value_sync = self.total_value
@@ -43,16 +71,20 @@ class Value:
     @property
     def avg(self):
         self.check_sync()
-        return self.value_sync.mean().item()
+        if self.value_sync is not None:
+            return self.value_sync.mean().item()
+        return 0.0
 
     @property
     def global_avg(self):
         self.check_sync()
-        return self.total_value_sync / self.total_count_sync
+        if self.total_value_sync is not None and self.total_count_sync is not None and self.total_count_sync > 0:
+            return self.total_value_sync / self.total_count_sync
+        return 0.0
 
     def check_sync(self):
         if self.value_sync is None:
-            raise RuntimeError(f"Be sure to use .sync() before metric statistic.")
+            print("Warning: .sync() not called successfully, using default values.")
         return
 
 

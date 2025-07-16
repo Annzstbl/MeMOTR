@@ -33,7 +33,8 @@ class MeMOTR(nn.Module):
                  aux_loss: bool = True, with_box_refine: bool = True,
                  use_checkpoint: bool = False, checkpoint_level: int = 2,
                  use_dab: bool = False,
-                 visualize: bool = False):
+                 visualize: bool = False,
+                 use_spectral_decoder: bool = False):
         super(MeMOTR, self).__init__()
 
         self.num_classes = num_classes
@@ -48,6 +49,7 @@ class MeMOTR(nn.Module):
         self.checkpoint_level = checkpoint_level
         self.use_dab = use_dab
         self.visualize = visualize
+        self.use_spectral_decoder = use_spectral_decoder
 
         # Net:
         self.backbone = backbone
@@ -56,12 +58,17 @@ class MeMOTR(nn.Module):
         self.class_embed = nn.Linear(in_features=self.hidden_dim, out_features=num_classes)
         self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=4, num_layers=3)
         self.angle_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=1, num_layers=3)#添加角度分支
+        # self.spectral_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=8, num_layers=3)
 
         if self.use_dab:
             self.det_anchor = nn.Parameter(torch.randn(self.n_det_queries, 5))  # (N_det, 4) #旋转框改成5
             self.det_query_embed = nn.Parameter(torch.randn(self.n_det_queries, self.hidden_dim))       # (N_det, C)
         else:
             self.det_query_embed = nn.Parameter(torch.randn(self.n_det_queries, self.hidden_dim * 2))   # (N_det, 2C)
+        
+        if self.use_spectral_decoder:
+            self.det_spectral_anchor = nn.Parameter(torch.randn(self.n_det_queries, 8))  # (N_det, 8) # 8光谱              
+        
         assert self.n_feature_levels > 1
         n_backbone_inter_layers = backbone.n_inter_layers()
         n_backbone_inter_channels = backbone.n_inter_channels()
@@ -85,6 +92,9 @@ class MeMOTR(nn.Module):
         nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
         nn.init.constant_(self.angle_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.angle_embed.layers[-1].bias.data, 0)
+        # nn.init.constant_(self.spectral_embed.layers[-1].weight.data, 0)
+        # nn.init.constant_(self.spectral_embed.layers[-1].bias.data, 0)
+
         for proj in self.feature_projs:
             nn.init.xavier_uniform_(proj[0].weight, gain=1)
             nn.init.constant_(proj[0].bias, 0)
@@ -102,6 +112,10 @@ class MeMOTR(nn.Module):
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(self.transformer.get_n_dec_layers())])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(self.transformer.get_n_dec_layers())])
+        if self.use_spectral_decoder:
+            pass
+            # self.spectral_embed = get_clones(self.spectral_embed, self.transformer.get_n_dec_layers())
+            # self.transformer.set_refine_spectral_embed(self.spectral_embed)
 
     def forward(self, frame: NestedTensor, tracks: list[TrackInstances]):
         if self.visualize:
@@ -145,20 +159,31 @@ class MeMOTR(nn.Module):
         # pos is n_features_levels * [(B, C, H, W)]
         # spectral_weights is n_features_levels * [(B, C=8, H, W)]
 
+        # decoder的query部分
         reference_points = self.get_reference_points(tracks=tracks).to(srcs[0].device)      # (B, Nd+Nq, 2/5)
         query_embed = self.get_query_embed(tracks=tracks).to(srcs[0].device)
         query_mask = self.get_query_mask(tracks=tracks).to(srcs[0].device)                  # (B, Nd+Nq)
+        if self.use_spectral_decoder:
+            query_spectral_weights = self.get_query_spectral_weights(tracks=tracks).to(srcs[0].device)
 
         # DETR:
-        outputs, init_reference, inter_references, inter_queries = self.transformer(
-            srcs=srcs,
-            masks=masks,
-            pos_embeds=pos,
-            spectral_weights=spectral_weights,
-            query_embed=query_embed,
-            ref_pts=reference_points,
-            query_mask=query_mask
-        )
+        transformer_kwargs = {
+            "srcs": srcs,
+            "masks": masks,
+            "pos_embeds": pos,
+            "spectral_weights": spectral_weights,
+            "query_embed": query_embed,
+            "ref_pts": reference_points,
+            "query_mask": query_mask,
+        }
+        if self.use_spectral_decoder:
+            transformer_kwargs["query_spectral_weights"] = query_spectral_weights
+            outputs, init_reference, inter_references, inter_queries, init_query_spectral_weights, inter_query_spectral_weights = self.transformer(**transformer_kwargs)
+        else:
+            outputs, init_reference, inter_references, inter_queries = self.transformer(**transformer_kwargs)
+
+
+
         # outputs: (n_dec_layers, B, Nd+Nq, C)
         # init_reference: (B, Nd+Nq, 2)
         # inter_references: (n_dec_layers, B, Nd+Nq, 4)
@@ -209,13 +234,17 @@ class MeMOTR(nn.Module):
             else inverse_sigmoid(inter_references[-2, :, :, :]),                                 # (B, Nd+Nq, 2)
             "query_mask": query_mask,                   # (B, Nd+Nq)
             "det_query_embed": query_embed[0][:self.n_det_queries],
-            "init_ref_pts": inverse_sigmoid(init_reference)
+            "init_ref_pts": inverse_sigmoid(init_reference),
         }
         if self.aux_loss:
             res["aux_outputs"] = self.set_aux_loss(output_classes=output_classes,
                                                    output_bboxes=output_bboxes,
                                                    query_mask=query_mask,
                                                    queries=inter_queries)
+        if self.use_spectral_decoder:
+            pass
+            # res["last_query_spectral_weights"] = inverse_sigmoid(inter_query_spectral_weights[-1])
+            # res["init_query_spectral_weights"] = inverse_sigmoid(init_query_spectral_weights)
         res["outputs"] = outputs[-1]     # (B, Nd+Nq, C)
         res["spectral_weights"] = spectral_weights # List[B, C=8, H, W]
         return res
@@ -277,6 +306,31 @@ class MeMOTR(nn.Module):
             )
         track_references = self.get_track_reference_points(tracks=tracks).to(det_references.device)     # (B, Nq, 2)
         return torch.cat((det_references, track_references), dim=1)
+
+
+    def get_det_spectral_weights(self):
+        return self.det_spectral_anchor
+    
+    def get_track_spectral_weights(self, tracks: list[TrackInstances]):
+        """
+        Returns: (B, max_len, 8)
+        获得所有batch中track的最长长度, 实际Batch = 1
+        """
+        max_len = max([len(t.spectral_weights) for t in tracks])
+        spectral_weights = torch.zeros((len(tracks), max_len, 8))
+        for i in range(len(tracks)):
+            spectral_weights[i, :len(tracks[i].spectral_weights), :] = tracks[i].spectral_weights
+        return spectral_weights
+    
+    def get_query_spectral_weights(self, tracks: list[TrackInstances]):
+        """
+        Returns: (B, Nq, 8)
+        """
+        det_spectral_weights = self.get_det_spectral_weights().repeat(len(tracks), 1, 1)
+        track_references = self.get_track_spectral_weights(tracks=tracks).to(det_spectral_weights.device)
+        return torch.cat((det_spectral_weights, track_references), dim=1)
+
+
 
     def get_query_embed(self, tracks: list[TrackInstances]):
         """
@@ -344,5 +398,6 @@ def build(config: dict):
         use_checkpoint=config["USE_CHECKPOINT"],
         checkpoint_level=config["CHECKPOINT_LEVEL"],
         use_dab=config["USE_DAB"],
-        visualize=config["VISUALIZE"]
+        visualize=config["VISUALIZE"],
+        use_spectral_decoder=config["USE_SPECTRAL_DECODER"]
     )

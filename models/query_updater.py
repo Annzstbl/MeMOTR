@@ -55,6 +55,12 @@ class QueryUpdater(nn.Module):
             output_dim=self.hidden_dim,
             num_layers=2
         )
+        # self.query_spectral_head = MLP(
+        #     input_dim=8,
+        #     hidden_dim=self.hidden_dim,
+        #     output_dim=self.hidden_dim,
+        #     num_layers=2
+        # )
 
         if self.use_dab is False:   # D-DETR, use this module to update the
             self.linear_pos1 = nn.Linear(256, 256)
@@ -105,6 +111,7 @@ class QueryUpdater(nn.Module):
             last_output_embed = tracks[b].last_output
             long_memory = tracks[b].long_memory.detach()
             query_pos = pos_to_pos_embed_rotated(tracks[b].ref_pts.sigmoid(), num_pos_feats=self.hidden_dim//2)
+            # query_spectral = self.query_spectral_head(tracks[b].spectral_weights.sigmoid())
             
             # Confidence Weight
             confidence_weight = self.confidence_weight_net(output_embed)
@@ -119,6 +126,8 @@ class QueryUpdater(nn.Module):
 
             # Query Feature Generate
             query_pos = self.query_pos_head(query_pos)
+            # q = short_memory + query_pos + query_spectral
+            # k = long_memory + query_pos + query_spectral
             q = short_memory + query_pos
             k = long_memory + query_pos
             tgt = output_embed
@@ -239,6 +248,7 @@ class QueryUpdater(nn.Module):
                     fake_tracks.iou = torch.zeros((1,), dtype=torch.float, device=device)
                     fake_tracks.last_output = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
                     fake_tracks.long_memory = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
+                    # fake_tracks.spectral_weights = torch.randn((1, 8), dtype=torch.float, device=device)
                     active_tracks = fake_tracks
                 tracks.append(active_tracks)
         else:
