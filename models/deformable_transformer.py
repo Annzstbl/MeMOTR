@@ -327,7 +327,10 @@ class DeformableTransformer(nn.Module):
             )
         # if inter is Ture, shape = (n_layers, B, Nq, C), (n_layers, B, Nq, 4), (n_layer, B, Nq, 2C)
         # else, shape = (B, Nq, C), (B, Nq, 4)
-        return output, init_reference_points, res_reference_points, inter_queries, init_query_spectral_weights, inter_query_spectral_weights
+        if self.decoder_spectral:
+            return output, init_reference_points, res_reference_points, inter_queries, init_query_spectral_weights, inter_query_spectral_weights
+        else:
+            return output, init_reference_points, res_reference_points, inter_queries
         # output:   if inter is Ture, (n_layers, B, Nq, C)
         #           else,             (B, Nq, C)
         # init_reference_points, (B, Nq, 2/4)
