@@ -27,7 +27,7 @@ class Value:
         if is_distributed():
             try:
                 # 添加内存清理
-                torch.cuda.empty_cache()
+                # torch.cuda.empty_cache()
                 
                 torch.distributed.barrier()
                 value_list_gather = [None] * distributed_world_size()

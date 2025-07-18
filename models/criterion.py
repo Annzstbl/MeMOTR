@@ -255,7 +255,7 @@ class ClipCriterion:
             trackinstances.boxes = model_outputs["pred_bboxes"][b][output_idx]
             trackinstances.logits = model_outputs["pred_logits"][b][output_idx]
             trackinstances.iou = torch.zeros((len(gt_idx),), dtype=torch.float)
-            # trackinstances.spectral_weights = model_outputs["last_query_spectral_weights"][b][output_idx]
+            trackinstances.spectral_weights = model_outputs["last_query_spectral_weights"][b][output_idx]
             trackinstances = trackinstances.to(self.device)
             new_trackinstances.append(trackinstances)
 
@@ -351,7 +351,7 @@ class ClipCriterion:
             detections.output_embed = model_outputs["outputs"][b][unmatched_indexes]
             detections.logits = model_outputs["pred_logits"][b][unmatched_indexes]
             detections.boxes = model_outputs["pred_bboxes"][b][unmatched_indexes]
-            # detections.spectral_weights = model_outputs["init_query_spectral_weights"][b][unmatched_indexes]
+            detections.spectral_weights = model_outputs["init_query_spectral_weights"][b][unmatched_indexes]
             # detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
             if self.use_dab:
                 detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]

@@ -248,7 +248,7 @@ class QueryUpdater(nn.Module):
                     fake_tracks.iou = torch.zeros((1,), dtype=torch.float, device=device)
                     fake_tracks.last_output = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
                     fake_tracks.long_memory = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
-                    # fake_tracks.spectral_weights = torch.randn((1, 8), dtype=torch.float, device=device)
+                    fake_tracks.spectral_weights = torch.randn((1, 8), dtype=torch.float, device=device)
                     active_tracks = fake_tracks
                 tracks.append(active_tracks)
         else:

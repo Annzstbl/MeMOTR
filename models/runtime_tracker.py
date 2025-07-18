@@ -40,6 +40,7 @@ class RuntimeTracker:
         tracks[0].logits = model_outputs["pred_logits"][0][n_dets:]
         tracks[0].output_embed = model_outputs["outputs"][0][n_dets:]
         tracks[0].scores = logits_to_scores(tracks[0].logits)
+        tracks[0].spectral_weights = model_outputs["last_query_spectral_weights"][0][n_dets:]
         for i in range(len(tracks[0])):
             if tracks[0].scores[i][tracks[0].labels[i]] < self.track_score_thresh:
                 tracks[0].disappear_time[i] += 1
@@ -74,6 +75,7 @@ class RuntimeTracker:
             )
         new_tracks.disappear_time = torch.zeros((len(new_tracks.logits), ), dtype=torch.long)
         new_tracks.labels = torch.max(new_tracks.scores, dim=-1).indices
+        new_tracks.spectral_weights = model_outputs["last_query_spectral_weights"][0][:n_dets][new_tracks_idxes]
 
         # We do not use this post-precess motion module in our final version,
         # this will bring a slight improvement,

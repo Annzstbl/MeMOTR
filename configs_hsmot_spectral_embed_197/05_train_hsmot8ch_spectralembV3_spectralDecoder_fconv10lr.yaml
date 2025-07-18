@@ -7,7 +7,7 @@ GIT_VERSION:
 MODE: train
 CONFIG_PATH:
 VISUALIZE: False
-AVAILABLE_GPUS: 0,1
+AVAILABLE_GPUS: 5,6
 DEVICE: cuda
 OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir/memotr/spectralemb/05_spectralembV3_spectralDecoder_fconv10lr_2gpu
 USE_DISTRIBUTED: False

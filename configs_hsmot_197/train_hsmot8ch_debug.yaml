@@ -7,7 +7,7 @@ GIT_VERSION:
 MODE: train
 CONFIG_PATH:
 VISUALIZE: False
-AVAILABLE_GPUS: 4,5
+AVAILABLE_GPUS: 6,7
 DEVICE: cuda
 OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir/memotr/debug
 USE_DISTRIBUTED: False
@@ -124,7 +124,7 @@ INPUT_CHANNELS: 8
 
 # framework setting
 NPY2RGB: False
-STEM: "conv3d_se_v3"
+STEM: "conv3d_se_v2"
 USE_SPECTRAL_ENCODER: True
 USE_SPECTRAL_DECODER: True
 
@@ -132,4 +132,4 @@ USE_SPECTRAL_DECODER: True
 EVALUATE_PER_EPOCH: 5
 
 # debug
-VID_WHITE_LIST: ['data46-5']
+# VID_WHITE_LIST: ['data46-5']

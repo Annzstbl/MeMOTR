@@ -7,7 +7,7 @@ GIT_VERSION:
 MODE: train
 CONFIG_PATH:
 VISUALIZE: False
-AVAILABLE_GPUS: 4,5
+AVAILABLE_GPUS: 6,7
 DEVICE: cuda
 OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir/memotr/spectralemb/04_spectralDecoder_fconv10lr_2gpu
 USE_DISTRIBUTED: False
@@ -126,3 +126,6 @@ USE_SPECTRAL_ENCODER: True
 
 # EVALUATE
 EVALUATE_PER_EPOCH: 1
+
+# debug
+# VID_WHITE_LIST: ['data46-5', 'data46-6']

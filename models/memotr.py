@@ -242,9 +242,8 @@ class MeMOTR(nn.Module):
                                                    query_mask=query_mask,
                                                    queries=inter_queries)
         if self.use_spectral_decoder:
-            pass
-            # res["last_query_spectral_weights"] = inverse_sigmoid(inter_query_spectral_weights[-1])
-            # res["init_query_spectral_weights"] = inverse_sigmoid(init_query_spectral_weights)
+            res["last_query_spectral_weights"] = inverse_sigmoid(inter_query_spectral_weights[-1])
+            res["init_query_spectral_weights"] = inverse_sigmoid(init_query_spectral_weights)
         res["outputs"] = outputs[-1]     # (B, Nd+Nq, C)
         res["spectral_weights"] = spectral_weights # List[B, C=8, H, W]
         return res
