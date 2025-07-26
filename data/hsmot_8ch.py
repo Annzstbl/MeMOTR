@@ -18,7 +18,7 @@ import numpy as np
 from hsmot.mmlab.hs_mmrotate import poly2obb, poly2obb_np
 import os.path as osp
 from hsmot.datasets.pipelines.compose import MotCompose, MotRandomChoice
-from hsmot.datasets.pipelines.channel import MotrToMmrotate, MmrotateToMotr, MmrotateToMotip, MotipToMmrotate
+from hsmot.datasets.pipelines.channel import MotrToMmrotate, MmrotateToMotr, MmrotateToMemotr, MotipToMmrotate
 from hsmot.datasets.pipelines.loading import MotLoadAnnotations, MotLoadImageFromFile, MotLoadMultichannelImageFromNpy
 from hsmot.datasets.pipelines.transforms import MotRRsize, MotRRandomFlip, MotRRandomCrop, MotNormalize, MotPad
 from hsmot.datasets.pipelines.formatting import MotCollect, MotDefaultFormatBundle, MotShow
@@ -242,7 +242,7 @@ def transfroms_for_train(coco_size: bool = False, overflow_bbox: bool = False, r
                 MotPad(size_divisor=32),
                 MotDefaultFormatBundle(),
                 MotCollect(keys=['img', 'gt_bboxes', 'gt_labels', 'gt_trackids']),
-                MmrotateToMotip()
+                MmrotateToMemotr()
                 #TODO 缺少一个reverse clip 但实际参数是0所以暂不实现
             ])
 

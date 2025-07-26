@@ -173,11 +173,12 @@ class MeMOTR(nn.Module):
             "pos_embeds": pos,
             "spectral_weights": spectral_weights,
             "query_embed": query_embed,
-            "ref_pts": reference_points,
+            "ref_pts": reference_points,#值域负无穷到正无穷
             "query_mask": query_mask,
         }
         if self.use_spectral_decoder:
-            transformer_kwargs["query_spectral_weights"] = query_spectral_weights
+            transformer_kwargs["query_spectral_weights"] = query_spectral_weights #值域负无穷到正无穷
+            # 返回的init_query_spectral_weights和inter_query_spectral_weights值域为0到1
             outputs, init_reference, inter_references, inter_queries, init_query_spectral_weights, inter_query_spectral_weights = self.transformer(**transformer_kwargs)
         else:
             outputs, init_reference, inter_references, inter_queries = self.transformer(**transformer_kwargs)
@@ -242,8 +243,9 @@ class MeMOTR(nn.Module):
                                                    query_mask=query_mask,
                                                    queries=inter_queries)
         if self.use_spectral_decoder:
-            res["last_query_spectral_weights"] = inverse_sigmoid(inter_query_spectral_weights[-1])
+            res["last_query_spectral_weights"] = inverse_sigmoid(inter_query_spectral_weights[-2])
             res["init_query_spectral_weights"] = inverse_sigmoid(init_query_spectral_weights)
+            res["pred_spectral_weights"] = inter_query_spectral_weights[-1]
         res["outputs"] = outputs[-1]     # (B, Nd+Nq, C)
         res["spectral_weights"] = spectral_weights # List[B, C=8, H, W]
         return res
@@ -315,10 +317,10 @@ class MeMOTR(nn.Module):
         Returns: (B, max_len, 8)
         获得所有batch中track的最长长度, 实际Batch = 1
         """
-        max_len = max([len(t.spectral_weights) for t in tracks])
+        max_len = max([len(t.query_spectral_weights) for t in tracks])
         spectral_weights = torch.zeros((len(tracks), max_len, 8))
         for i in range(len(tracks)):
-            spectral_weights[i, :len(tracks[i].spectral_weights), :] = tracks[i].spectral_weights
+            spectral_weights[i, :len(tracks[i].query_spectral_weights), :] = tracks[i].query_spectral_weights
         return spectral_weights
     
     def get_query_spectral_weights(self, tracks: list[TrackInstances]):

@@ -97,6 +97,7 @@ class ClipCriterion:
                 gt_trackinstances[b].labels = batch["infos"][b][c]["labels"]
                 gt_trackinstances[b].boxes = batch["infos"][b][c]["boxes"]
                 gt_trackinstances[b].norm_boxes = batch["infos"][b][c]["norm_boxes"]
+                gt_trackinstances[b].pred_spectral_weights = batch["infos"][b][c]["spectral_weights"]
                 gt_trackinstances[b] = gt_trackinstances[b].to(self.device)
             self.gt_trackinstances_list.append(gt_trackinstances)
 
@@ -109,14 +110,17 @@ class ClipCriterion:
                 "aux_box_l1_loss": torch.zeros(()).to(self.device),
                 "aux_box_giou_loss": torch.zeros(()).to(self.device),
                 "aux_label_focal_loss": torch.zeros(()).to(self.device),
-                "spectral_kl_loss": torch.zeros(()).to(self.device)
+                "spectral_kl_loss": torch.zeros(()).to(self.device),
+                "spectral_decoder_mse_loss": torch.zeros(()).to(self.device),
+                "aux_spectral_decoder_mse_loss": torch.zeros(()).to(self.device)
             }
         else:
             self.loss = {
                 "box_l1_loss": torch.zeros(()).to(self.device),
                 "box_giou_loss": torch.zeros(()).to(self.device),
                 "label_focal_loss": torch.zeros(()).to(self.device),
-                "spectral_kl_loss": torch.zeros(()).to(self.device)
+                "spectral_kl_loss": torch.zeros(()).to(self.device),
+                "spectral_decoder_mse_loss": torch.zeros(()).to(self.device)
             }
         return
 
@@ -130,6 +134,8 @@ class ClipCriterion:
                 return self.weight["label_focal_loss"]
             elif "spectral_kl_loss" in loss_name:
                 return self.weight["spectral_kl_loss"]
+            elif "spectral_decoder_mse_loss" in loss_name:
+                return self.weight["spectral_decoder_mse_loss"]
 
         loss = sum([
             get_weight(k) * v for k, v in loss_dict.items()
@@ -168,28 +174,32 @@ class ClipCriterion:
             tracked_instances: already tracked instances.
             frame_idx: frame_idx t.
         """
+
+        batch_size = len(tracked_instances)
+
         # 1. Get the GTs in current t frame.
         gt_trackinstances = self.gt_trackinstances_list[frame_idx]
 
-        # 2. Update the already tracked instances.
+        # 2. Update the already tracked instances. 
         tracked_instances = self.update_tracked_instances(model_outputs=model_outputs,
                                                           tracked_instances=tracked_instances)
 
         # 3. Get the detection results in current frame.
         detection_res = {
             "pred_logits": model_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),    # (B, Nd, n_classes)
-            "pred_boxes": model_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach()      # (B, Nd, 4)
+            "pred_boxes": model_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach(),      # (B, Nd, 4)
+            "pred_spectral_weights": model_outputs["pred_spectral_weights"][:, :self.n_det_queries, :].detach()      # (B, Nd, 8)
         }
 
         # 4. Find some gts that do not include in the tracked instances mentioned in (2.),
         #    this gts need to be detected in current frame.
         gt_ids_to_idx = []
-        for b in range(len(tracked_instances)):
+        for b in range(batch_size):
             gt_ids_to_idx.append({
                 gt_id.item(): gt_idx for gt_idx, gt_id in enumerate(gt_trackinstances[b].ids)
             })
         num_disappeared_tracked_gts = 0
-        for b in range(len(tracked_instances)):
+        for b in range(batch_size):
             gt_idx = []
             if len(tracked_instances[b]) > 0:
                 for gt_id in tracked_instances[b].ids.tolist():
@@ -203,11 +213,11 @@ class ClipCriterion:
         # 4.+ Filter the gts that not in the tracked instances:
         gt_full_idx = []
         untracked_gt_trackinstances = []
-        for b in range(len(tracked_instances)):
+        for b in range(batch_size):
             gt_full_idx.append(
                 torch.arange(start=0, end=len(gt_trackinstances[b]))
             )
-        for b in range(len(tracked_instances)):
+        for b in range(batch_size):
             idx_bool = torch.ones(size=gt_full_idx[b].shape, dtype=torch.bool)
             for i in tracked_instances[b].matched_idx:
                 if i.item() >= 0:
@@ -229,7 +239,7 @@ class ClipCriterion:
 
         # 6. Use the matched results to generate the tracked instances.
         new_trackinstances = []     # len is B
-        for b in range(len(tracked_instances)):
+        for b in range(batch_size):
             trackinstances = TrackInstances(frame_height=tracked_instances[b].frame_height,
                                             frame_width=tracked_instances[b].frame_width,
                                             hidden_dim=tracked_instances[b].hidden_dim,
@@ -255,14 +265,15 @@ class ClipCriterion:
             trackinstances.boxes = model_outputs["pred_bboxes"][b][output_idx]
             trackinstances.logits = model_outputs["pred_logits"][b][output_idx]
             trackinstances.iou = torch.zeros((len(gt_idx),), dtype=torch.float)
-            trackinstances.spectral_weights = model_outputs["last_query_spectral_weights"][b][output_idx]
+            trackinstances.pred_spectral_weights = model_outputs["pred_spectral_weights"][b][output_idx]
+            trackinstances.query_spectral_weights = model_outputs["last_query_spectral_weights"][b][output_idx]
             trackinstances = trackinstances.to(self.device)
             new_trackinstances.append(trackinstances)
 
         # 7. Add tracked instances to the matcher res, for loss computing.
         matcher_res = matcher_res_for_gt_idx(matcher_res)
         tracked_idx_to_gts_idx = []
-        for b in range(len(tracked_instances)):
+        for b in range(batch_size):
             tracked_outputs_idx = torch.arange(start=self.n_det_queries,
                                                end=self.n_det_queries + len(tracked_instances[b]))
             tracked_gts_idx = tracked_instances[b].matched_idx
@@ -271,10 +282,11 @@ class ClipCriterion:
             ])
             assert len(tracked_outputs_idx) == len(tracked_gts_idx)
         outputs_idx_to_gts_idx = copy.deepcopy(matcher_res)
-        for b in range(len(tracked_instances)):
+        for b in range(batch_size):
             outputs_idx_to_gts_idx[b][0] = torch.cat((outputs_idx_to_gts_idx[b][0], tracked_idx_to_gts_idx[b][0]))
             outputs_idx_to_gts_idx[b][1] = torch.cat((outputs_idx_to_gts_idx[b][1], tracked_idx_to_gts_idx[b][1]))
 
+        # 到此位置所有匹配工作结束
         # 8. Compute the classification loss.
         loss_label = self.get_loss_label(outputs=model_outputs,
                                          gt_trackinstances=gt_trackinstances,
@@ -285,15 +297,22 @@ class ClipCriterion:
                                                gt_trackinstances=gt_trackinstances,
                                                idx_to_gts_idx=outputs_idx_to_gts_idx, img_metas=img_metas)
 
+        # compute spectral decoder mse loss
+        loss_spectral_decoder_mse = self.get_loss_spectral_decoder_mse(outputs=model_outputs,
+                                                                       gt_trackinstances=gt_trackinstances,
+                                                                       idx_to_gts_idx=outputs_idx_to_gts_idx)
+
         # 10. Count how many GTs.
         n_gts = sum([len(gts) for gts in gt_trackinstances])
         self.loss["box_l1_loss"] += loss_l1 * self.frame_weights[frame_idx]
         self.loss["box_giou_loss"] += loss_giou * self.frame_weights[frame_idx]
         self.loss["label_focal_loss"] += loss_label * self.frame_weights[frame_idx]
+        self.loss["spectral_decoder_mse_loss"] += loss_spectral_decoder_mse * self.frame_weights[frame_idx]
         # Update logs.
         self.log[f"frame{frame_idx}_box_l1_loss"] = loss_l1.item()
         self.log[f"frame{frame_idx}_box_giou_loss"] = loss_giou.item()
         self.log[f"frame{frame_idx}_label_focal_loss"] = loss_label.item()
+        self.log[f"frame{frame_idx}_spectral_decoder_mse_loss"] = loss_spectral_decoder_mse.item()
         self.n_gts.append(n_gts)
 
         # 11. Compute aux loss.
@@ -302,7 +321,8 @@ class ClipCriterion:
                 # Same to 3.
                 aux_det_res = {
                     "pred_logits": aux_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),
-                    "pred_boxes": aux_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach()
+                    "pred_boxes": aux_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach(),
+                    "pred_spectral_weights": aux_outputs["pred_spectral_weights"][:, :self.n_det_queries, :].detach()
                 }
                 # Same to 5.
                 if i < self.merge_det_track_layer:
@@ -316,7 +336,7 @@ class ClipCriterion:
                     aux_matcher_res = matcher_res_for_gt_idx(aux_matcher_res)
                 # Same to some part in 7.
                 aux_idx_to_gts_idx = copy.deepcopy(aux_matcher_res)
-                for b in range(len(tracked_instances)):
+                for b in range(batch_size):
                     if i < self.merge_det_track_layer:
                         aux_idx_to_gts_idx[b][0] = aux_idx_to_gts_idx[b][0]
                         aux_idx_to_gts_idx[b][1] = aux_idx_to_gts_idx[b][1]
@@ -332,13 +352,15 @@ class ClipCriterion:
                                                                gt_trackinstances=gt_trackinstances,
                                                                idx_to_gts_idx=aux_idx_to_gts_idx, img_metas=img_metas)
 
+                aux_loss_spectral_decoder_mse = self.get_loss_spectral_decoder_mse(outputs=model_outputs["aux_outputs"][i], gt_trackinstances=gt_trackinstances, idx_to_gts_idx=aux_idx_to_gts_idx)
+
                 self.loss["aux_box_l1_loss"] += aux_loss_l1 * self.frame_weights[frame_idx] * self.aux_weights[i]
                 self.loss["aux_box_giou_loss"] += aux_loss_giou * self.frame_weights[frame_idx] * self.aux_weights[i]
                 self.loss["aux_label_focal_loss"] += aux_loss_label * self.frame_weights[frame_idx] * self.aux_weights[i]
 
         # Prepare the unmatched detection results.
         unmatched_detections = []
-        for b in range(len(tracked_instances)):
+        for b in range(batch_size):
             matched_indexes = set(outputs_idx_to_gts_idx[b][0].tolist())
             indexes = set([_ for _ in range(len(model_outputs["det_query_embed"]))])
             unmatched_indexes = list(indexes - matched_indexes)
@@ -351,7 +373,8 @@ class ClipCriterion:
             detections.output_embed = model_outputs["outputs"][b][unmatched_indexes]
             detections.logits = model_outputs["pred_logits"][b][unmatched_indexes]
             detections.boxes = model_outputs["pred_bboxes"][b][unmatched_indexes]
-            detections.spectral_weights = model_outputs["init_query_spectral_weights"][b][unmatched_indexes]
+            detections.pred_spectral_weights = model_outputs["pred_spectral_weights"][b][unmatched_indexes]
+            detections.query_spectral_weights = model_outputs["init_query_spectral_weights"][b][unmatched_indexes]
             # detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
             if self.use_dab:
                 detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
@@ -370,12 +393,12 @@ class ClipCriterion:
             pass
 
         # Move to device.
-        for b in range(len(tracked_instances)):
+        for b in range(batch_size):
             tracked_instances[b] = tracked_instances[b].to(self.device)
             new_trackinstances[b] = new_trackinstances[b].to(self.device)
 
         # Compute IoU.
-        for b in range(len(tracked_instances)):
+        for b in range(batch_size):
             new_trackinstances[b].iou[new_trackinstances[b].matched_idx >= 0] =  box_iou_rotated_norm_bboxes1(
                 new_trackinstances[b][new_trackinstances[b].matched_idx >= 0].boxes,
                 gt_trackinstances[b][new_trackinstances[b][new_trackinstances[b].matched_idx >= 0].matched_idx].boxes,
@@ -417,7 +440,8 @@ class ClipCriterion:
                 tracked_instances[b].output_embed = model_outputs["outputs"][b][self.n_det_queries:][~track_mask]
                 tracked_instances[b].matched_idx = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
                 tracked_instances[b].labels = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
-                # tracked_instances[b].spectral_weights = model_outputs["last_query_spectral_weights"][b][self.n_det_queries:][~track_mask]
+                # query_spectral_weights update in query_updater
+                tracked_instances[b].pred_spectral_weights = model_outputs["pred_spectral_weights"][b][self.n_det_queries:][~track_mask]
         return tracked_instances
 
     def get_loss_label(self, outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx):
@@ -476,6 +500,25 @@ class ClipCriterion:
             loss_giou = (1-loss_rotated_iou_norm_bboxes1(matched_pred_boxes,  gt_boxes, img_metas['img_shape'], img_metas['version'])).sum()
 
         return loss_l1, loss_giou
+
+    @staticmethod
+    def get_loss_spectral_decoder_mse(outputs, gt_trackinstances, idx_to_gts_idx):
+        """
+        Compute the spectral decoder mse loss.
+        """
+        matched_pred_spectral_weights = [
+            spectral_weights[outputs_idx[0][outputs_idx[1] >= 0]]
+            for spectral_weights, outputs_idx in zip(outputs["pred_spectral_weights"], idx_to_gts_idx)
+        ]
+        gt_spectral_weights = [
+            gt_trackinstances[b].pred_spectral_weights[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
+            for b in range(len(gt_trackinstances))
+        ]
+        matched_pred_spectral_weights = torch.cat(matched_pred_spectral_weights)
+        gt_spectral_weights = torch.cat(gt_spectral_weights)
+        loss_spectral_decoder_mse = F.mse_loss(matched_pred_spectral_weights, gt_spectral_weights)
+
+        return loss_spectral_decoder_mse
 
 
 def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):

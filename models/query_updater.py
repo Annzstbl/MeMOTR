@@ -89,22 +89,23 @@ class QueryUpdater(nn.Module):
         for b in range(len(tracks)):
             scores = torch.max(logits_to_scores(logits=tracks[b].logits), dim=1).values
             is_pos = scores > self.update_threshold
-            if self.visualize:
-                os.makedirs("./outputs/visualize_tmp/query_updater/", exist_ok=True)
-                torch.save(tracks[b].ref_pts.cpu(), "./outputs/visualize_tmp/query_updater/current_ref_pts.tensor")
-                # torch.save(tracks[b].query_embed[:, :].cpu(),
-                #            "./outputs/visualize_tmp/query_updater/current_query_pos.tensor")
-                # torch.save(tracks[b].query_embed[:, :].cpu(),
-                #            "./outputs/visualize_tmp/query_updater/current_query_feat.tensor")
-                torch.save(tracks[b].query_embed.cpu(),
-                           "./outputs/visualize_tmp/query_updater/current_query_feat.tensor")
-                torch.save(tracks[b].ids.cpu(), "./outputs/visualize_tmp/query_updater/current_ids.tensor")
-                torch.save(tracks[b].labels.cpu(), "./outputs/visualize_tmp/query_updater/current_labels.tensor")
-                torch.save(scores.cpu(), "./outputs/visualize_tmp/query_updater/current_scores.tensor")
+            # if self.visualize:
+            #     os.makedirs("./outputs/visualize_tmp/query_updater/", exist_ok=True)
+            #     torch.save(tracks[b].ref_pts.cpu(), "./outputs/visualize_tmp/query_updater/current_ref_pts.tensor")
+            #     # torch.save(tracks[b].query_embed[:, :].cpu(),
+            #     #            "./outputs/visualize_tmp/query_updater/current_query_pos.tensor")
+            #     # torch.save(tracks[b].query_embed[:, :].cpu(),
+            #     #            "./outputs/visualize_tmp/query_updater/current_query_feat.tensor")
+            #     torch.save(tracks[b].query_embed.cpu(),
+            #                "./outputs/visualize_tmp/query_updater/current_query_feat.tensor")
+            #     torch.save(tracks[b].ids.cpu(), "./outputs/visualize_tmp/query_updater/current_ids.tensor")
+            #     torch.save(tracks[b].labels.cpu(), "./outputs/visualize_tmp/query_updater/current_labels.tensor")
+            #     torch.save(scores.cpu(), "./outputs/visualize_tmp/query_updater/current_scores.tensor")
             if self.use_dab:
                 tracks[b].ref_pts[is_pos] = inverse_sigmoid(tracks[b][is_pos].boxes.detach().clone())
             else:
                 tracks[b].ref_pts[is_pos] = inverse_sigmoid(tracks[b][is_pos].boxes.detach().clone())
+            tracks[b].query_spectral_weights[is_pos] = tracks[b][is_pos].pred_spectral_weights.detach().clone()
 
 
             output_embed = tracks[b].output_embed
@@ -161,17 +162,17 @@ class QueryUpdater(nn.Module):
                 query_pos = self.norm_pos(query_pos)
                 tracks[b].query_embed[:, :self.hidden_dim][is_pos] = query_pos[is_pos]
 
-            if self.visualize:
-                torch.save(tracks[b].ref_pts.cpu(), "./outputs/visualize_tmp/query_updater/next_ref_pts.tensor")
-                # torch.save(tracks[b].query_embed[:, :self.hidden_dim].cpu(),
-                #            "./outputs/visualize_tmp/query_updater/next_query_pos.tensor")
-                # torch.save(tracks[b].query_embed[:, self.hidden_dim:].cpu(),
-                #            "./outputs/visualize_tmp/query_updater/next_query_feat.tensor")
-                torch.save(tracks[b].query_embed.cpu(),
-                           "./outputs/visualize_tmp/query_updater/next_query_feat.tensor")
-                torch.save(tracks[b].ids.cpu(), "./outputs/visualize_tmp/query_updater/next_ids.tensor")
-                torch.save(tracks[b].labels.cpu(), "./outputs/visualize_tmp/query_updater/next_labels.tensor")
-                torch.save(scores.cpu(), "./outputs/visualize_tmp/query_updater/next_scores.tensor")
+            # if self.visualize:
+            #     torch.save(tracks[b].ref_pts.cpu(), "./outputs/visualize_tmp/query_updater/next_ref_pts.tensor")
+            #     # torch.save(tracks[b].query_embed[:, :self.hidden_dim].cpu(),
+            #     #            "./outputs/visualize_tmp/query_updater/next_query_pos.tensor")
+            #     # torch.save(tracks[b].query_embed[:, self.hidden_dim:].cpu(),
+            #     #            "./outputs/visualize_tmp/query_updater/next_query_feat.tensor")
+            #     torch.save(tracks[b].query_embed.cpu(),
+            #                "./outputs/visualize_tmp/query_updater/next_query_feat.tensor")
+            #     torch.save(tracks[b].ids.cpu(), "./outputs/visualize_tmp/query_updater/next_ids.tensor")
+            #     torch.save(tracks[b].labels.cpu(), "./outputs/visualize_tmp/query_updater/next_labels.tensor")
+            #     torch.save(scores.cpu(), "./outputs/visualize_tmp/query_updater/next_scores.tensor")
 
         return tracks
 
@@ -182,7 +183,7 @@ class QueryUpdater(nn.Module):
         tracks = []
         if self.training:
             for b in range(len(new_tracks)):
-                # Update fields
+                # Update fields last_output long_memory
                 new_tracks[b].last_output = new_tracks[b].output_embed
                 if self.use_dab:
                     new_tracks[b].long_memory = new_tracks[b].query_embed
@@ -193,13 +194,17 @@ class QueryUpdater(nn.Module):
                     unmatched_dets[b].long_memory = unmatched_dets[b].query_embed
                 else:
                     unmatched_dets[b].long_memory = unmatched_dets[b].query_embed[:, self.hidden_dim:]
+                
+                
                 if self.tp_drop_ratio == 0.0 and self.fp_insert_ratio == 0.0:
                     active_tracks = TrackInstances.cat_tracked_instances(previous_tracks[b], new_tracks[b])
+                    # ids of unmatched_dets always be -1. 这里的Cat看起来没有作用
                     active_tracks = TrackInstances.cat_tracked_instances(active_tracks, unmatched_dets[b])
                     scores = torch.max(logits_to_scores(logits=active_tracks.logits), dim=1).values
-                    keep_idxes = (scores > self.update_threshold) | (active_tracks.ids >= 0)
+                    keep_idxes = (scores > self.update_threshold) | (active_tracks.ids >= 0) #控制逻辑
                     active_tracks = active_tracks[keep_idxes]
-                    active_tracks.ids[active_tracks.iou < 0.5] = -1
+                    active_tracks.ids[active_tracks.iou < 0.5] = -1 #额外iou控制
+                # 暂时不管
                 else:
                     active_tracks = TrackInstances.cat_tracked_instances(previous_tracks[b], new_tracks[b])
                     active_tracks = active_tracks[(active_tracks.iou > 0.5) & (active_tracks.ids >= 0)]
@@ -241,14 +246,15 @@ class QueryUpdater(nn.Module):
                     else:
                         # fake_tracks.ref_pts = torch.randn((1, 2), dtype=torch.float, device=device)
                         fake_tracks.ref_pts = torch.randn((1, 4), dtype=torch.float, device=device)
-                    fake_tracks.ids = torch.as_tensor([-2], dtype=torch.long, device=device)
+                    fake_tracks.ids = torch.as_tensor([-2], dtype=torch.long, device=device)# fake_tracks的id设置为-2
                     fake_tracks.matched_idx = torch.as_tensor([-2], dtype=torch.long, device=device)
                     fake_tracks.boxes = torch.randn((1, 5), dtype=torch.float, device=device)
                     fake_tracks.logits = torch.randn((1, active_tracks.logits.shape[1]), dtype=torch.float, device=device)
                     fake_tracks.iou = torch.zeros((1,), dtype=torch.float, device=device)
                     fake_tracks.last_output = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
                     fake_tracks.long_memory = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
-                    fake_tracks.spectral_weights = torch.randn((1, 8), dtype=torch.float, device=device)
+                    fake_tracks.pred_spectral_weights = torch.randn((1, 8), dtype=torch.float, device=device)
+                    fake_tracks.query_spectral_weights = torch.randn((1, 8), dtype=torch.float, device=device)
                     active_tracks = fake_tracks
                 tracks.append(active_tracks)
         else:
