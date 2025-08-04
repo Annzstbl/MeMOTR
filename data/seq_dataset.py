@@ -11,7 +11,7 @@ from hsmot.mmlab.hs_mmdet import to_tensor
 
 
 class SeqDataset(Dataset):
-    def __init__(self, seq_dir: str, stride=32, npy2rgb=False):
+    def __init__(self, seq_dir: str, stride=32, npy2rgb=False, npy2rgb_channels=None):
         # a hack implementation for BDD100K and others:
         # if "BDD100K" in seq_dir:
         #     image_paths = sorted(os.listdir(os.path.join(seq_dir)))
@@ -33,6 +33,7 @@ class SeqDataset(Dataset):
 
         self.stride=stride
         self.npy2rgb=npy2rgb
+        self.npy2rgb_channels = npy2rgb_channels
 
         return
 
@@ -53,7 +54,11 @@ class SeqDataset(Dataset):
         image = np.ascontiguousarray(image.transpose(2, 0, 1))
         image = to_tensor(image)
         if self.npy2rgb:
-            image = image[[1,2,4], :, :]
+            if self.npy2rgb_channels is None:
+                image = image[[1,2,4], :, :]
+            else:
+                npy2rgb_channels_index = [ch - 1 for ch in self.npy2rgb_channels.reverse()]
+                image = image[npy2rgb_channels_index, :, :]
         # image = image.unsqueeze(0)
         return image, ori_image
 

@@ -29,7 +29,8 @@ class Submitter:
                  motion_min_length: int = 3, motion_max_length: int = 5,
                  use_dab: bool = False,
                  visualize: bool = False,
-                 npy2rgb: bool = False):
+                 npy2rgb: bool = False,
+                 npy2rgb_channels: list = None):
         self.dataset_name = dataset_name
         self.seq_name = seq_name
         self.seq_dir = path.join(split_dir, seq_name)
@@ -43,7 +44,7 @@ class Submitter:
                                       visualize=visualize, use_dab=use_dab)
         self.result_score_thresh = result_score_thresh
         self.motion_lambda = motion_lambda
-        self.dataset = SeqDataset(seq_dir=self.seq_dir, npy2rgb=npy2rgb)
+        self.dataset = SeqDataset(seq_dir=self.seq_dir, npy2rgb=npy2rgb, npy2rgb_channels=npy2rgb_channels)
         self.dataloader = DataLoader(self.dataset, batch_size=1, num_workers=4, shuffle=False)
         self.device = next(self.model.parameters()).device
         self.use_dab = use_dab
@@ -273,7 +274,8 @@ def submit(config: dict):
             motion_max_length=motion_max_length,
             motion_lambda=motion_lambda,
             miss_tolerance=miss_tolerance,
-            npy2rgb = config["NPY2RGB"]
+            npy2rgb = config["NPY2RGB"],
+            npy2rgb_channels = config["NPY2RGB_CHANNELS"]
         )
         submitter.run()
     return
