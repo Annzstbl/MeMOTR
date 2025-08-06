@@ -181,6 +181,8 @@ class ClipCriterion:
         gt_trackinstances = self.gt_trackinstances_list[frame_idx]
 
         # 2. Update the already tracked instances. 
+        # 更新上一帧的boxes logits output_embed pred_spectral_weights
+        # 不更新query_embed和ref_pts和query_spectral_weights
         tracked_instances = self.update_tracked_instances(model_outputs=model_outputs,
                                                           tracked_instances=tracked_instances)
 
@@ -208,6 +210,7 @@ class ClipCriterion:
                     else:
                         gt_idx.append(-1)
                         num_disappeared_tracked_gts += 1
+            #根据上一帧的id和这一帧的gt匹配情况，更新matched_idx
             tracked_instances[b].matched_idx = torch.as_tensor(data=gt_idx,
                                                                dtype=tracked_instances[b].matched_idx.dtype)
         # 4.+ Filter the gts that not in the tracked instances:
@@ -238,6 +241,7 @@ class ClipCriterion:
             return res
 
         # 6. Use the matched results to generate the tracked instances.
+        # 根据新匹配到的目标构建trackinstances
         new_trackinstances = []     # len is B
         for b in range(batch_size):
             trackinstances = TrackInstances(frame_height=tracked_instances[b].frame_height,
@@ -261,12 +265,12 @@ class ClipCriterion:
                     dim=-1
                 )
             trackinstances.ref_pts = model_outputs["last_ref_pts"][b][output_idx]#TODO 这里是最后一层layer的输入
-            trackinstances.output_embed = model_outputs["outputs"][b][output_idx]
+            trackinstances.output_embed = model_outputs["outputs"][b][output_idx]#TODO 这里按理来说应该和query_embed一致，请坐检查
             trackinstances.boxes = model_outputs["pred_bboxes"][b][output_idx]
             trackinstances.logits = model_outputs["pred_logits"][b][output_idx]
             trackinstances.iou = torch.zeros((len(gt_idx),), dtype=torch.float)
             trackinstances.pred_spectral_weights = model_outputs["pred_spectral_weights"][b][output_idx]
-            trackinstances.query_spectral_weights = model_outputs["last_query_spectral_weights"][b][output_idx]
+            trackinstances.query_spectral_weights = model_outputs["last_query_spectral_weights"][b][output_idx]# 最后一层的输入
             trackinstances = trackinstances.to(self.device)
             new_trackinstances.append(trackinstances)
 
@@ -357,6 +361,7 @@ class ClipCriterion:
                 self.loss["aux_box_l1_loss"] += aux_loss_l1 * self.frame_weights[frame_idx] * self.aux_weights[i]
                 self.loss["aux_box_giou_loss"] += aux_loss_giou * self.frame_weights[frame_idx] * self.aux_weights[i]
                 self.loss["aux_label_focal_loss"] += aux_loss_label * self.frame_weights[frame_idx] * self.aux_weights[i]
+                self.loss["aux_spectral_decoder_mse_loss"] += aux_loss_spectral_decoder_mse * self.frame_weights[frame_idx] * self.aux_weights[i]
 
         # Prepare the unmatched detection results.
         unmatched_detections = []
@@ -515,8 +520,11 @@ class ClipCriterion:
             for b in range(len(gt_trackinstances))
         ]
         matched_pred_spectral_weights = torch.cat(matched_pred_spectral_weights)
-        gt_spectral_weights = torch.cat(gt_spectral_weights)
-        loss_spectral_decoder_mse = F.mse_loss(matched_pred_spectral_weights, gt_spectral_weights)
+        gt_spectral_weights = torch.cat(gt_spectral_weights).sigmoid()# 光谱强度归一化之后，sigmoid到[0,1]
+        if(len(matched_pred_spectral_weights) == 0):
+            loss_spectral_decoder_mse = outputs["pred_spectral_weights"].sum()*0.0
+        else:
+            loss_spectral_decoder_mse = F.mse_loss(matched_pred_spectral_weights, gt_spectral_weights)
 
         return loss_spectral_decoder_mse
 
@@ -567,7 +575,8 @@ def build(config: dict):
             "box_l1_loss": config["LOSS_WEIGHT_L1"],
             "box_giou_loss": config["LOSS_WEIGHT_GIOU"],
             "label_focal_loss": config["LOSS_WEIGHT_FOCAL"],
-            "spectral_kl_loss": config["LOSS_SPECTRAL_KL"]
+            "spectral_kl_loss": config["LOSS_SPECTRAL_KL"],
+            "spectral_decoder_mse_loss": config["LOSS_SPECTRAL_DECODER_MSE"]
         },
         max_frame_length=max(config["SAMPLE_LENGTHS"]),
         n_aux=config["NUM_DEC_LAYERS"]-1,

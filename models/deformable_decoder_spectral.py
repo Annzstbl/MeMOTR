@@ -33,6 +33,7 @@ class DeformableDecoderSpectral(nn.Module):
         self.merge_det_track_layer = merge_det_track_layer
         self.n_det_queries = n_det_queries
         self.d_model = d_model
+
         # hack implementation for iterative bounding box refinement and two-stage Deformable DETR
         self.bbox_embed = None # 在memotr模型中通过set_refine_bbox_embed函数赋值
         self.angle_embed = None #角度分量
@@ -56,7 +57,7 @@ class DeformableDecoderSpectral(nn.Module):
                 output_dim=self.d_model,
                 num_layers=2
             )
-            # 其实是8到d_model的embedding
+            # 是8到d_model的embedding
             self.spectral_weights_head = MLP(
                 input_dim=8,
                 hidden_dim=self.d_model,
@@ -87,35 +88,30 @@ class DeformableDecoderSpectral(nn.Module):
         intermediate_reference_points = []
         intermediate_queries = []
         intermediate_query_spectral_weights = []
+
         for lid, layer in enumerate(self.layers):
-            if (lid == 0) and (self.use_dab is False):       # for D-DETR ONLY
-                ref_pts_backup = reference_points.clone()
-                reference_points = reference_points[:, :, :2]
-                pass
-            if reference_points.shape[-1] == 5:
-                reference_points_input = reference_points[:, :, None] \
-                    * torch.cat([src_valid_ratios, src_valid_ratios,torch.ones((*src_valid_ratios.shape[:-1], 1), device=src_valid_ratios.device)], -1)[:, None]
-            else:
-                assert reference_points.shape[-1] == 2
-                reference_points_input = reference_points[:, :, None] * src_valid_ratios[:, None]
+            ### lid: layer id, start from 0
 
-            if self.use_dab:
-                anchor_embed = pos_to_pos_embed_rotated(
-                    pos=reference_points_input[:, :, 0, :],
-                    num_pos_feats=self.d_model//2
-                )# (..., d_model*2+2)
-                raw_query_pos = self.ref_point_head(anchor_embed)
-                pos_scale = self.query_scale(output) if lid != 0 else 1
-                query_pos = pos_scale * raw_query_pos
-                query_spectral = self.spectral_weights_head(query_spectral_weights) # (B, Nq, C)
 
-            intermediate_queries.append(output)
-            if self.visualize:
-                os.makedirs("./outputs/visualize_tmp/decoder/", exist_ok=True)
-                torch.save(reference_points[0, :300, :].cpu(),
-                           f"./outputs/visualize_tmp/decoder/detection_ref_pts_layer_{lid}.tensor")
-                torch.save(reference_points[0, 300:, :].cpu(),
-                           f"./outputs/visualize_tmp/decoder/track_ref_pts_layer_{lid}.tensor")
+            assert self.use_dab is True
+            assert reference_points.shape[-1] == 5
+
+            reference_points_input = reference_points[:, :, None] \
+                * torch.cat([src_valid_ratios, src_valid_ratios,torch.ones((*src_valid_ratios.shape[:-1], 1), device=src_valid_ratios.device)], -1)[:, None]
+
+            # 构造query_pos
+            anchor_embed = pos_to_pos_embed_rotated(
+                pos=reference_points_input[:, :, 0, :],
+                num_pos_feats=self.d_model//2
+            )# (..., d_model*2+2)
+            raw_query_pos = self.ref_point_head(anchor_embed)
+            pos_scale = self.query_scale(output) if lid != 0 else 1
+            query_pos = pos_scale * raw_query_pos
+
+            # 构造query_spectral
+            query_spectral = self.spectral_weights_head(query_spectral_weights) # (B, Nq, C)
+
+            intermediate_queries.append(output)# 每个layer的输入
 
             if self.use_checkpoint:
                 from torch.utils.checkpoint import checkpoint
@@ -138,7 +134,7 @@ class DeformableDecoderSpectral(nn.Module):
                     tgt=output,
                     query_pos=query_pos,
                     query_spectral=query_spectral,
-                    reference_points=reference_points_input,
+                    reference_points=reference_points_input,#这里还输入reference_points干什么呢？
                     src=src,
                     src_spatial_shapes=src_spatial_shapes,
                     level_start_index=src_level_start_index,
@@ -147,53 +143,40 @@ class DeformableDecoderSpectral(nn.Module):
                     merge_det_track=(lid >= self.merge_det_track_layer)
                 )   # (B, Nq, C)
 
-            if self.visualize:
-                os.system(f"mv ./outputs/visualize_tmp/decoder/attn_score.tensor "
-                          f"./outputs/visualize_tmp/decoder/attn_score_layer_{lid}.tensor")
-                os.system(f"mv ./outputs/visualize_tmp/decoder/sampling_locations.tensor "
-                          f"./outputs/visualize_tmp/decoder/sampling_locations_layer_{lid}.tensor")
-
             # hack implementation for iterative bounding box refinement.
-            if self.bbox_embed is not None:
-                assert self.angle_embed is not None
-                tmp = self.bbox_embed[lid](output)
-                angle = self.angle_embed[lid](output)
-                tmp = torch.cat((tmp, angle), dim=-1)  # (B, Nq, 5)
-                if reference_points.shape[-1] == 5:
-                    new_reference_points = tmp + inverse_sigmoid(reference_points)
-                    new_reference_points = new_reference_points.sigmoid()
-                else:
-                    assert reference_points.shape[-1] == 2
-                    new_reference_points = tmp  # (B, Nq, 4)
-                    new_reference_points[..., :2] = tmp[..., :2] + inverse_sigmoid(reference_points)
-                    new_reference_points = new_reference_points.sigmoid()
-                if lid < self.merge_det_track_layer:
-                    # reference_points = torch.cat((new_reference_points[:, :self.n_det_queries, :].detach(),
-                    #                               reference_points[:, self.n_det_queries:, :]), dim=1)
-                    if self.use_dab:
-                        reference_points = torch.cat((new_reference_points[:, :self.n_det_queries, :].detach(),
-                                                      reference_points[:, self.n_det_queries:, :]), dim=1)
-                    else:       # D-DETR
-                        reference_points = torch.cat((new_reference_points[:, :self.n_det_queries, :].detach(),
-                                                      ref_pts_backup[:, self.n_det_queries:, :]), dim=1)
-                else:
-                    reference_points = new_reference_points.detach()
+            assert self.bbox_embed is not None
+            assert self.angle_embed is not None
+
+            box_refine = torch.cat((self.bbox_embed[lid](output), self.angle_embed[lid](output)), dim=-1)# (B, Nq, 5)
+            new_reference_points = box_refine + inverse_sigmoid(reference_points)
+            new_reference_points = new_reference_points.sigmoid()
+
+            if lid < self.merge_det_track_layer:
+                reference_points = torch.cat((new_reference_points[:, :self.n_det_queries, :].detach(),
+                                                reference_points[:, self.n_det_queries:, :]), dim=1) #不处理trackd
+            else:
+                reference_points = new_reference_points.detach()
             
             if self.spectral_embed is not None:
-                tmp = self.spectral_embed[lid](output)
-                new_query_spectral_weights = tmp + inverse_sigmoid(query_spectral_weights)
+                spectral_refine = self.spectral_embed[lid](output)
+                new_query_spectral_weights = spectral_refine + inverse_sigmoid(query_spectral_weights)
                 new_query_spectral_weights = new_query_spectral_weights.sigmoid()
-                query_spectral_weights = new_query_spectral_weights
-
-
+                # 阻断梯度
+                query_spectral_weights = new_query_spectral_weights.detach()
 
             if self.return_intermediate:
-                intermediate.append(output)
-                intermediate_reference_points.append(reference_points)
-                intermediate_query_spectral_weights.append(query_spectral_weights.clone())
+                intermediate.append(output)#每个layer的输出
+                intermediate_reference_points.append(reference_points)#每个layer的输出box
+                intermediate_query_spectral_weights.append(query_spectral_weights)#每个layer的输出光谱权重
 
         if self.return_intermediate:
             # (n_layers, B, Nq, C), (n_layers, B, Nq, 4)
+            '''
+                intermediate输出的output_embed
+                intermediate_reference_points 输出的box
+                intermediate_queries 输入的query_embed
+                intermediate_query_spectral_weights 输出的query_spectral_weights
+            '''
             return torch.stack(intermediate), torch.stack(intermediate_reference_points), \
                    torch.stack(intermediate_queries), torch.stack(intermediate_query_spectral_weights)
         else:
@@ -277,11 +260,9 @@ class DeformableDecoderLayerSpectral(nn.Module):
         return tensor if query_spectral is None else tensor + query_spectral
 
     def forward_self_attn(self, tgt, query_pos, query_spectral, query_mask):
+        # q和k由 tgt(content query) query_pos和 query_spectral构成
         q = k = self.with_spectral_embed(self.with_pos_embed(tgt, query_pos), query_spectral)
         tgt2, _ = self.self_attn(q, k, tgt, key_padding_mask=query_mask)
-        if self.visualize:
-            torch.save(_[0, :, :].cpu(),
-                       "./outputs/visualize_tmp/decoder/attn_score.tensor")
         tgt = tgt + self.dropout2(tgt2)
         return self.norm2(tgt)
 
@@ -326,7 +307,7 @@ class DeformableDecoderLayerSpectral(nn.Module):
 
         """
         if merge_det_track is False:
-            # 不合并det和track，track使用自己的一套更新
+            # 只处理detection的部分，track完全保留
             track_tgt = tgt[:, self.n_det_queries:, :]      # (B, Nq_track, C)
             tgt = tgt[:, :self.n_det_queries, :]            # (B, Nq_det, C)
             query_pos = query_pos[:, :self.n_det_queries, :]
@@ -343,7 +324,7 @@ class DeformableDecoderLayerSpectral(nn.Module):
         # Cross Attention
         tgt2 = self.cross_attn(
             query=self.with_spectral_embed(self.with_pos_embed(tgt, query_pos), query_spectral),
-            reference_points=reference_points,#为什么需要点？
+            reference_points=reference_points,#为什么需要点，因为需要根据点的偏移来进行attention的组合
             input_flatten=src,
             input_spatial_shapes=src_spatial_shapes,
             input_level_start_index=level_start_index,

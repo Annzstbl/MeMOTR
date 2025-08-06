@@ -27,7 +27,7 @@ from models.utils import load_pretrained_model
 
 
 def train(config: dict):
-    train_logger = Logger(logdir=os.path.join(config["OUTPUTS_DIR"], "train"), only_main=True)
+    train_logger = Logger(logdir=os.path.join(config["OUTPUTS_DIR"], "train"), only_main=True, use_buffered_write=True)
     train_logger.show(head="Configs:", log=config)
     train_logger.write(log=config, filename="config.yaml", mode="w")
     train_logger.tb_add_git_version(git_version=config["GIT_VERSION"])
@@ -159,11 +159,13 @@ def train(config: dict):
                 )
 
         # 添加evaluate_one_epoch
-        # 在每个epoch结束后进行一次验证（如果配置中包含验证集）
-        if ("EVALUATE_PER_EPOCH" in config and config["EVALUATE_PER_EPOCH"] > 0 and (epoch+1) % config["EVALUATE_PER_EPOCH"] == 0) or (epoch == config["EPOCHS"] - 1):
+        # 在以EVALUATE_PER_EPOCH为间隔的epoch结束后进行一次验证
+        # 同时，最后5轮全部验证
+        if ("EVALUATE_PER_EPOCH" in config and config["EVALUATE_PER_EPOCH"] > 0 and (epoch+1) % config["EVALUATE_PER_EPOCH"] == 0) or (epoch >= config["EPOCHS"] - 5):
             from submit_engine import submit_during_train
             submit_during_train(config=config, epoch=epoch, model=model)
 
+        train_logger.flush_buffers()
     return
 
 

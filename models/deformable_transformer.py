@@ -23,7 +23,7 @@ from .deformable_encoder_spectral import DeformableEncoderLayerSpectral, Deforma
 from .deformable_decoder_spectral import DeformableDecoderLayerSpectral, DeformableDecoderSpectral
 from .ops.modules import MSDeformAttn
 from .mlp import MLP
-
+from deprecated.sphinx import deprecated
 
 class DeformableTransformer(nn.Module):
     def __init__(self, d_model=256, d_ffn=1024,
@@ -132,7 +132,9 @@ class DeformableTransformer(nn.Module):
                                                                 use_dab=self.use_dab,
                                                                 visualize=self.visualize)
 
+        # 把feature level映射为d_model的embedding
         self.level_embed = nn.Parameter(torch.Tensor(n_feature_levels, d_model))
+        # 把光谱权重映射为d_model的embedding
         self.spectral_embed = MLP(
                 input_dim=8,
                 hidden_dim=self.d_model,
@@ -171,6 +173,9 @@ class DeformableTransformer(nn.Module):
 
     @staticmethod
     def get_proposal_pos_embed(proposals):
+        '''
+            Deformable Transformer中的static method
+        ''' 
         num_pos_feats = 128
         temperature = 10000
         scale = 2 * math.pi
@@ -185,6 +190,7 @@ class DeformableTransformer(nn.Module):
         pos = torch.stack((pos[:, :, :, 0::2].sin(), pos[:, :, :, 1::2].cos()), dim=4).flatten(2)
         return pos
 
+    @deprecated(version="1.0", reason="only use in two stage detr")
     def gen_encoder_output_proposals(self, memory, memory_padding_mask, spatial_shapes):
         N_, S_, C_ = memory.shape
         base_scale = 4.0
@@ -237,6 +243,25 @@ class DeformableTransformer(nn.Module):
     def forward(self, srcs: List[torch.Tensor], masks: List[torch.Tensor],
                 pos_embeds: List[torch.Tensor], query_embed, ref_pts, query_mask,
                 spectral_weights: List[torch.Tensor], query_spectral_weights: torch.Tensor = None):
+        '''
+            src: feature from backbome
+            
+            masks: 解决一个batch图像大小不一样的问题
+            
+            pos_embes: feature的位置编码
+            
+            query_embed: 输入decoder的query, 包括检测和跟踪两部分
+            
+            ref_pts: 输入decoder的ref_pts, 包括检测和跟踪两部分
+            
+            query_mask: 用于解决一个batch跟踪目标数量不一样的mask
+            
+            spectral_weights [B, N, 8]: 这是encoder的输出, 指示feature不同区域的光谱权重
+
+            query_spectral_weights: 这是输入到decoder中的查询光谱权重, 来自anchor和track object,
+        '''
+    
+        
         assert self.two_stage or query_embed is not None
 
         src_flatten = []
@@ -244,6 +269,8 @@ class DeformableTransformer(nn.Module):
         lvl_pos_embed_flatten = []
         spatial_shapes = []
         spectral_embeds_flatten = []
+
+        # 展平, 位置编码加上层级权重, encoder光谱权重映射为特征
         for lvl, (src, mask, pos_embed, spectral_weight) in enumerate(zip(srcs, masks, pos_embeds, spectral_weights)):
             # src.shape = (B, C, H, W) in lvl level.
             # mask.shape = (B, H, W) in lvl level.
@@ -257,11 +284,13 @@ class DeformableTransformer(nn.Module):
             spectral_embed = self.spectral_embed(spectral_weight.flatten(2).transpose(1, 2)) # (B, H*W, C)
             # spectral_embed = spectral_embed.flatten(2).transpose(1, 2)    # (B, H*W, C=8)
             lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)    # (B, H*W, C)
+
             spatial_shapes.append(spatial_shape)
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
             spectral_embeds_flatten.append(spectral_embed) 
+
         src_flatten = torch.cat(src_flatten, 1)
         mask_flatten = torch.cat(mask_flatten, 1)
         spectral_embeds_flatten = torch.cat(spectral_embeds_flatten, 1)
@@ -296,12 +325,12 @@ class DeformableTransformer(nn.Module):
             else:
                 query_embed, tgt = torch.split(query_embed, c, dim=2)   # (B, Nq, C), (B, Nq, C)
             assert ref_pts is not None, "ref_pts should not be None."
-            reference_points = ref_pts.sigmoid()
-            init_reference_points = reference_points
+            reference_points = ref_pts.sigmoid() #! 注意这里sigmoid了
+            init_reference_points = reference_points # 保留的初始化reference_points 取值[0,1]
 
         if self.decoder_spectral:
             init_query_spectral_weights = query_spectral_weights.sigmoid() #取值范围0-1
-            output, res_reference_points, inter_queries, inter_query_spectral_weights = self.decoder(
+            output, res_reference_points, inter_queries, res_query_spectral_weights = self.decoder(
                 tgt=tgt,
                 reference_points=init_reference_points,
                 src=memory,
@@ -328,7 +357,7 @@ class DeformableTransformer(nn.Module):
         # if inter is Ture, shape = (n_layers, B, Nq, C), (n_layers, B, Nq, 4), (n_layer, B, Nq, 2C)
         # else, shape = (B, Nq, C), (B, Nq, 4)
         if self.decoder_spectral:
-            return output, init_reference_points, res_reference_points, inter_queries, init_query_spectral_weights, inter_query_spectral_weights
+            return output, init_reference_points, res_reference_points, inter_queries, init_query_spectral_weights, res_query_spectral_weights
         else:
             return output, init_reference_points, res_reference_points, inter_queries
         # output:   if inter is Ture, (n_layers, B, Nq, C)

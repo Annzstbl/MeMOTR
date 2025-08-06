@@ -65,8 +65,8 @@ class hsmot_8ch(MOTDataset):
             if vid_white_list is not None and os.path.splitext(vid)[0] not in vid_white_list:
                 print(f'skip vid {vid}')
                 continue
-            else:
-                print(f'loading vid {vid}')
+            # else:
+                # print(f'loading vid {vid}')
 
             gt_path = os.path.join(self.labels_dir, vid)
             for l in open(gt_path):

@@ -80,6 +80,8 @@ class QueryUpdater(nn.Module):
                 new_tracks: List[TrackInstances],
                 unmatched_dets: List[TrackInstances] | None,
                 no_augment: bool = False):
+        # scores> update_threshold 或者 active_tracks.ids>=0的会列为active_tracks
+        # iou<0.5的track的id会被置为-1
         tracks = self.select_active_tracks(previous_tracks, new_tracks, unmatched_dets, no_augment=no_augment)
         tracks = self.update_tracks_embedding(tracks=tracks)
 
@@ -88,7 +90,7 @@ class QueryUpdater(nn.Module):
     def update_tracks_embedding(self, tracks: List[TrackInstances]):
         for b in range(len(tracks)):
             scores = torch.max(logits_to_scores(logits=tracks[b].logits), dim=1).values
-            is_pos = scores > self.update_threshold
+            is_pos = scores > self.update_threshold #之前在选择active的时候按照 scores>update_threshold 或者 id>0来筛选，这里选择scores足够高的部分进行更新
             # if self.visualize:
             #     os.makedirs("./outputs/visualize_tmp/query_updater/", exist_ok=True)
             #     torch.save(tracks[b].ref_pts.cpu(), "./outputs/visualize_tmp/query_updater/current_ref_pts.tensor")
@@ -132,11 +134,13 @@ class QueryUpdater(nn.Module):
             q = short_memory + query_pos
             k = long_memory + query_pos
             tgt = output_embed
+            
             # Attention
             tgt2 = self.memory_attn(q[None, :], k[None, :], tgt[None, :])[0][0, :]
             tgt = tgt + self.memory_dropout(tgt2)
             tgt = self.memory_norm(tgt)
             tgt = self.memory_ffn(tgt)
+
             # Long Memory ResNet
             query_feat = long_memory + self.query_feat_dropout(tgt)
             query_feat = self.query_feat_norm(query_feat)

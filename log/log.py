@@ -69,6 +69,13 @@ class Value:
         return
 
     @property
+    def latest(self):
+        """获取最新值"""
+        if self.value_deque:
+            return self.value_deque[-1]
+        return 0.0
+
+    @property
     def avg(self):
         self.check_sync()
         if self.value_sync is not None:
@@ -109,13 +116,13 @@ class MetricLog:
     def __str__(self):
         s = str()
         if "total_loss" in self.metrics:
-            s += f"loss = {self.metrics['total_loss'].avg:.4f} ({self.metrics['total_loss'].global_avg:.4f}); "
+            s += f"loss = {self.metrics['total_loss'].latest:.4f} ({self.metrics['total_loss'].avg:.4f}, {self.metrics['total_loss'].global_avg:.4f}); "
         for name, value in self.metrics.items():
             if name == "time per iter":
                 continue
             if name == "total_loss":
                 continue
-            s += f"{name} = {value.avg:.4f} ({value.global_avg:.4f}); "
+            s += f"{name} = {value.latest:.4f} ( {value.avg:.4f},  {value.global_avg:.4f}); "
         return s
 
 
