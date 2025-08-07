@@ -524,7 +524,7 @@ class ClipCriterion:
         if(len(matched_pred_spectral_weights) == 0):
             loss_spectral_decoder_mse = outputs["pred_spectral_weights"].sum()*0.0
         else:
-            loss_spectral_decoder_mse = F.mse_loss(matched_pred_spectral_weights, gt_spectral_weights)
+            loss_spectral_decoder_mse = F.mse_loss(matched_pred_spectral_weights, gt_spectral_weights, reduction="sum") / matched_pred_spectral_weights.size(1)
 
         return loss_spectral_decoder_mse
 
