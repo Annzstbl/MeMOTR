@@ -17,6 +17,7 @@ from utils.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 from structures.instances import Instances
 from structures.track_instances import TrackInstances
 from hsmot.util.dist import l1_dist_rotate, box_iou_rotated_norm_bboxes1
+import torch.nn.functional as F
 
 class HungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
@@ -41,7 +42,8 @@ class HungarianMatcher(nn.Module):
     def __init__(self,
                  cost_class: float = 1,
                  cost_bbox: float = 1,
-                 cost_giou: float = 1):
+                 cost_giou: float = 1,
+                 cost_spectral_decoder_mse: float = 1):
         """Creates the matcher
 
         Params:
@@ -53,7 +55,8 @@ class HungarianMatcher(nn.Module):
         self.cost_class = cost_class
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
-        assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
+        self.cost_spectral_decoder_mse = cost_spectral_decoder_mse
+        assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0 or cost_spectral_decoder_mse != 0, "all costs cant be 0"
 
     def forward(self, outputs, targets, use_focal=True, img_metas=None):
         """ Performs the matching
@@ -77,7 +80,24 @@ class HungarianMatcher(nn.Module):
                 len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
         """
         with torch.no_grad():
+            
+                   
             bs, num_queries = outputs["pred_logits"].shape[:2]
+
+            if self.cost_spectral_decoder_mse != -1:
+                assert 'pred_spectral_weights' in outputs, "pred_spectral_weights is not in outputs"
+                pred_spectral_weights = outputs['pred_spectral_weights'].flatten(0, 1)  # [N, C]
+                if isinstance(targets[0], Instances) or isinstance(targets[0], TrackInstances):
+                    tgt_spectral_weights = torch.cat([gt_per_img.pred_spectral_weights for gt_per_img in targets])
+                else:
+                    tgt_spectral_weights = torch.cat([v["pred_spectral_weights"] for v in targets])
+                tgt_spectral_weights = tgt_spectral_weights.sigmoid()  # [M, C]
+                
+                # 计算每个预测与每个目标之间的MSE距离矩阵
+                # pred_spectral_weights: [N, C], tgt_spectral_weights: [M, C]
+                # 使用广播机制计算 (N, M, C) 的MSE，然后对C维度求平均得到 (N, M)
+                cost_spectral_decoder_mse = ((pred_spectral_weights.unsqueeze(1) - tgt_spectral_weights.unsqueeze(0)) ** 2).mean(dim=2)
+                # cost_spectral_decoder_mse 现在是 (N, M) 的形状，与其他成本矩阵一致
 
             # We flatten to compute the cost matrices in a batch
             if use_focal:
@@ -122,8 +142,12 @@ class HungarianMatcher(nn.Module):
 
 
 
+
             # Final cost matrix
             C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
+            if self.cost_spectral_decoder_mse != -1:
+                C = C + self.cost_spectral_decoder_mse * cost_spectral_decoder_mse
+            
             C = C.view(bs, num_queries, -1).cpu()
 
             if isinstance(targets[0], Instances):
@@ -138,8 +162,13 @@ class HungarianMatcher(nn.Module):
 
 
 def build(config: dict):
+    if "MATCH_COST_SPECTRAL_MSE" in config:
+        cost_spectral_decoder_mse = config["MATCH_COST_SPECTRAL_MSE"]
+    else:
+        cost_spectral_decoder_mse = -1
     return HungarianMatcher(
         cost_class=config["MATCH_COST_CLASS"],
         cost_bbox=config["MATCH_COST_BBOX"],
-        cost_giou=config["MATCH_COST_GIOU"]
+        cost_giou=config["MATCH_COST_GIOU"],
+        cost_spectral_decoder_mse=cost_spectral_decoder_mse
     )
