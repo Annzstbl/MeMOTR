@@ -61,7 +61,9 @@ class Submitter:
     def run(self):
         tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
                                  num_classes=get_model(self.model).num_classes,
-                                 use_dab=self.use_dab).to(self.device)]
+                                 use_dab=self.use_dab,
+                                 decoder_spectral_weights_dim = get_model(self.model).decoder_spectral_clusters * 8,
+                                 ).to(self.device)]
         # bdd100k_results = []    # for bdd100k, will be converted into json file, different from other datasets.
 
         txt_lines = []

@@ -21,7 +21,8 @@ class QueryUpdater(nn.Module):
                  dropout: float,
                  use_checkpoint: bool, use_dab: bool,
                  update_threshold: float, long_memory_lambda: float,
-                 visualize: bool = False):
+                 visualize: bool = False,
+                 query_spectral_weights_dim: int = 8):
         super(QueryUpdater, self).__init__()
         self.hidden_dim = hidden_dim
         self.ffn_dim = ffn_dim
@@ -67,6 +68,8 @@ class QueryUpdater(nn.Module):
             self.linear_pos2 = nn.Linear(256, 256)
             self.norm_pos = nn.LayerNorm(256)
             self.activation = nn.ReLU(inplace=True)
+        
+        self.query_spectral_weights_dim = query_spectral_weights_dim
 
         self.reset_parameters()
 
@@ -257,8 +260,8 @@ class QueryUpdater(nn.Module):
                     fake_tracks.iou = torch.zeros((1,), dtype=torch.float, device=device)
                     fake_tracks.last_output = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
                     fake_tracks.long_memory = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
-                    fake_tracks.pred_spectral_weights = torch.randn((1, 8), dtype=torch.float, device=device)
-                    fake_tracks.query_spectral_weights = torch.randn((1, 8), dtype=torch.float, device=device)
+                    fake_tracks.pred_spectral_weights = torch.randn((1, self.query_spectral_weights_dim), dtype=torch.float, device=device)
+                    fake_tracks.query_spectral_weights = torch.randn((1, self.query_spectral_weights_dim), dtype=torch.float, device=device)
                     active_tracks = fake_tracks
                 tracks.append(active_tracks)
         else:
@@ -287,6 +290,7 @@ def build(config: dict):
             use_dab=config["USE_DAB"],
             update_threshold=config["UPDATE_THRESH"],
             long_memory_lambda=config["LONG_MEMORY_LAMBDA"],
-            visualize=config["VISUALIZE"]
+            visualize=config["VISUALIZE"],
+            query_spectral_weights_dim=config["DECODER_SPECTRAL_CLUSTERS"] * 8
         )
 

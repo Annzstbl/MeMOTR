@@ -213,7 +213,7 @@ class hsmot_8ch(MOTDataset):
         return [self.get_single_frame(vid=vid, idx=i) for i in idxs]
 
 
-def transfroms_for_train(coco_size: bool = False, overflow_bbox: bool = False, reverse_clip: bool = False):
+def transfroms_for_train(use_cache=True, cache_path=None, coco_size: bool = False, overflow_bbox: bool = False, reverse_clip: bool = False, spectral_method=None, spectral_n_clusters=None):
     mean = [0.27358221, 0.28804452, 0.28133921, 0.26906377, 0.28309119, 0.26928305, 0.28372527, 0.27149373]
     std = [0.19756629, 0.17432339, 0.16413284, 0.17581682, 0.18366176, 0.1536845, 0.15964683, 0.16557951]
     mean = [_*255 for _ in mean]
@@ -242,7 +242,7 @@ def transfroms_for_train(coco_size: bool = False, overflow_bbox: bool = False, r
                 MotPad(size_divisor=32),
                 MotDefaultFormatBundle(),
                 MotCollect(keys=['img', 'gt_bboxes', 'gt_labels', 'gt_trackids']),
-                MmrotateToMemotr()
+                MmrotateToMemotr(use_cache=use_cache, cache_path=cache_path, spectral_method=spectral_method, spectral_n_clusters=spectral_n_clusters, mean=mean, std=std)
                 #TODO 缺少一个reverse clip 但实际参数是0所以暂不实现
             ])
 
@@ -264,9 +264,13 @@ def build(config: dict, split: str):
             config=config,
             split=split,
             transform=transfroms_for_train(
+                cache_path=os.path.join(config["DATA_ROOT"], config["DATASET"].replace("_8ch", "")),
                 coco_size=config["COCO_SIZE"],
                 overflow_bbox=config["OVERFLOW_BBOX"],
-                reverse_clip=config["REVERSE_CLIP"]
+                reverse_clip=config["REVERSE_CLIP"],
+                use_cache=config["DECODER_SPECTRAL_USE_CACHE"],
+                spectral_n_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
+                spectral_method=config["DECODER_SPECTRAL_METHOD"]
             )
         )
     elif split == "test":

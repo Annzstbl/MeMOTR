@@ -41,7 +41,8 @@ class DeformableTransformer(nn.Module):
                  use_dab: bool = False,
                  visualize: bool = False,
                  spectral_encoder: bool = True,
-                 spectral_decoder: bool = True):
+                 spectral_decoder: bool = True,
+                 decoder_spectral_clusters = 1):
         """
         Args:
             d_model:
@@ -73,6 +74,7 @@ class DeformableTransformer(nn.Module):
         self.visualize = visualize
         self.encoder_spectral = spectral_encoder
         self.decoder_spectral = spectral_decoder
+        self.decoder_spectral_clusters = decoder_spectral_clusters
 
 
         if spectral_encoder:
@@ -113,7 +115,8 @@ class DeformableTransformer(nn.Module):
                                                                                 d_model=self.d_model,
                                                                                 use_checkpoint=self.use_checkpoint,
                                                                                 use_dab=self.use_dab,
-                                                                                visualize=self.visualize)
+                                                                                visualize=self.visualize,
+                                                                                decoder_spectral_clusters=self.decoder_spectral_clusters)
         else:
             decoder_layer = DeformableDecoderLayer(
                 d_model=d_model, d_ffn=d_ffn,
@@ -409,5 +412,6 @@ def build(config: dict):
         visualize=config["VISUALIZE"],
         spectral_encoder=config["USE_SPECTRAL_ENCODER"],
         spectral_decoder=config["USE_SPECTRAL_DECODER"],
+        decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"], #decoder中spectral anchor的光谱数量
     )
 

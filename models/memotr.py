@@ -35,7 +35,8 @@ class MeMOTR(nn.Module):
                  use_dab: bool = False,
                  visualize: bool = False,
                  use_spectral_decoder: bool = False,
-                 use_spectral_refine: bool = True): 
+                 use_spectral_refine: bool = True,
+                 decoder_spectral_clusters: int = 1): 
         super(MeMOTR, self).__init__()
 
         self.num_classes = num_classes
@@ -52,6 +53,7 @@ class MeMOTR(nn.Module):
         self.visualize = visualize
         self.use_spectral_decoder = use_spectral_decoder
         self.use_spectral_refine = use_spectral_refine
+        self.decoder_spectral_clusters = decoder_spectral_clusters
 
         # Net:
         self.backbone = backbone
@@ -61,7 +63,7 @@ class MeMOTR(nn.Module):
         self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=4, num_layers=3)
         self.angle_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=1, num_layers=3)#添加角度分支
         if self.use_spectral_refine:
-            self.spectral_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=8, num_layers=3)#refine spectral时候使用的
+            self.spectral_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=self.decoder_spectral_clusters * 8, num_layers=3)#refine spectral时候使用的
 
         if self.use_dab:
             self.det_anchor = nn.Parameter(torch.randn(self.n_det_queries, 5))  # (N_det, 4) #旋转框改成5
@@ -70,7 +72,7 @@ class MeMOTR(nn.Module):
             self.det_query_embed = nn.Parameter(torch.randn(self.n_det_queries, self.hidden_dim * 2))   # (N_det, 2C)
         
         if self.use_spectral_decoder:
-            self.det_spectral_anchor = nn.Parameter(torch.randn(self.n_det_queries, 8))  # (N_det, 8) # 8光谱              
+            self.det_spectral_anchor = nn.Parameter(torch.randn(self.n_det_queries, self.decoder_spectral_clusters* 8))  # (N_det, decoder_spectral_clusters* 8) # 8光谱              
         
         assert self.n_feature_levels > 1
         n_backbone_inter_layers = backbone.n_inter_layers()
@@ -352,7 +354,7 @@ class MeMOTR(nn.Module):
         获得所有batch中track的最长长度, 实际Batch = 1
         """
         max_len = max([len(t.query_spectral_weights) for t in tracks])
-        spectral_weights = torch.zeros((len(tracks), max_len, 8))
+        spectral_weights = torch.zeros((len(tracks), max_len, self.decoder_spectral_clusters* 8))
         for i in range(len(tracks)):
             spectral_weights[i, :len(tracks[i].query_spectral_weights), :] = tracks[i].query_spectral_weights
         return spectral_weights
@@ -366,8 +368,6 @@ class MeMOTR(nn.Module):
         det_spectral_weights = self.get_det_spectral_weights().repeat(len(tracks), 1, 1)
         track_references = self.get_track_spectral_weights(tracks=tracks).to(det_spectral_weights.device)
         return torch.cat((det_spectral_weights, track_references), dim=1)
-
-
 
     def get_query_embed(self, tracks: list[TrackInstances]):
         """
@@ -439,5 +439,6 @@ def build(config: dict):
         checkpoint_level=config["CHECKPOINT_LEVEL"],
         use_dab=config["USE_DAB"],
         visualize=config["VISUALIZE"],
-        use_spectral_decoder=config["USE_SPECTRAL_DECODER"]
+        use_spectral_decoder=config["USE_SPECTRAL_DECODER"],
+        decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"], #decoder中spectral anchor的光谱数量
     )

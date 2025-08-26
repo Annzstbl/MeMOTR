@@ -25,7 +25,8 @@ class DeformableDecoderSpectral(nn.Module):
                  n_det_queries: int = 300, d_model: int = 256,
                  use_checkpoint: bool = False,
                  use_dab: bool = False,
-                 visualize: bool = False):
+                 visualize: bool = False,
+                 decoder_spectral_clusters = 1):
         super(DeformableDecoderSpectral, self).__init__()
         self.layers = get_clones(module=decoder_layer, n=num_layers)
         self.num_layers = num_layers
@@ -59,7 +60,7 @@ class DeformableDecoderSpectral(nn.Module):
             )
             # 是8到d_model的embedding
             self.spectral_weights_head = MLP(
-                input_dim=8,
+                input_dim=decoder_spectral_clusters * 8,
                 hidden_dim=self.d_model,
                 output_dim=self.d_model,
                 num_layers=2

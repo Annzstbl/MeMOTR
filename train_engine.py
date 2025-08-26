@@ -97,6 +97,9 @@ def train(config: dict):
 
     multi_checkpoint = "MULTI_CHECKPOINT" in config and config["MULTI_CHECKPOINT"]
 
+    # log记录开始时间
+    train_logger.write(head=f"训练开始 Start Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", filename="log.txt", mode="a")
+
     # Training:
     for epoch in range(start_epoch, config["EPOCHS"]):
         if is_distributed():
@@ -142,7 +145,8 @@ def train(config: dict):
             accumulation_steps=config["ACCUMULATION_STEPS"],
             use_dab=config["USE_DAB"],
             multi_checkpoint=multi_checkpoint,
-            no_grad_frames=no_grad_frames
+            no_grad_frames=no_grad_frames,
+            decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"]
         )
         scheduler.step()
         train_states["start_epoch"] += 1
@@ -166,6 +170,8 @@ def train(config: dict):
             submit_during_train(config=config, epoch=epoch, model=model)
 
         train_logger.flush_buffers()
+    # log记录结束时间
+    train_logger.write(head=f"训练结束 End Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", filename="log.txt", mode="a")
     return
 
 
@@ -174,7 +180,8 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     epoch: int, logger: Logger,
                     accumulation_steps: int = 1, use_dab: bool = False,
                     multi_checkpoint: bool = False,
-                    no_grad_frames: int | None = None):
+                    no_grad_frames: int | None = None,
+                    decoder_spectral_clusters: int=1):
     """
     Args:
         model: Model.
@@ -208,16 +215,18 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
 
     for i, batch in enumerate(dataloader):
         img_metas = batch["img_metas"][0][0]
-
+ 
         iter_start_timestamp = time.time()
         tracks = TrackInstances.init_tracks(batch=batch,
                                             hidden_dim=get_model(model).hidden_dim,
                                             num_classes=get_model(model).num_classes,
-                                            device=device, use_dab=use_dab)
+                                            device=device, use_dab=use_dab,
+                                            decoder_spectral_weights_dim=8*decoder_spectral_clusters)
         criterion.init_a_clip(batch=batch,
                               hidden_dim=get_model(model).hidden_dim,
                               num_classes=get_model(model).num_classes,
-                              device=device)
+                              device=device, 
+                              decoder_spectral_weights_dim=decoder_spectral_clusters * 8)
 
         for frame_idx in range(len(batch["imgs"][0])):
             if no_grad_frames is None or frame_idx >= no_grad_frames:
@@ -281,7 +290,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             max_memory = torch.cuda.max_memory_allocated() // (1024**2)
             second_per_iter = metric_log.metrics["time per iter"].avg
             second_per_data = metric_log.metrics["time per data"].avg
-            logger.show(head=f"[Epoch={epoch}, Iter={i}, "
+            logger.show(head=f"--[Epoch={epoch}, Iter={i}, "
                              f"{second_per_iter:.2f}s/iter, "
                              f"{second_per_data:.2f}s/data, "
                              f"{i}/{dataloader_len} iters, "
@@ -305,9 +314,9 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     metric_log.sync()
     epoch_end_timestamp = time.time()
     epoch_minutes = int((epoch_end_timestamp - epoch_start_timestamp) // 60)
-    logger.show(head=f"[Epoch: {epoch}, Total Time: {epoch_minutes}min]",
+    logger.show(head=f"--[Epoch: {epoch}, Total Time: {epoch_minutes}min]",
                 log=metric_log)
-    logger.write(head=f"[Epoch: {epoch}, Total Time: {epoch_minutes}min]",
+    logger.write(head=f"--[Epoch: {epoch}, Total Time: {epoch_minutes}min]",
                  log=metric_log, filename="log.txt", mode="a")
     logger.tb_add_metric_log(log=metric_log, steps=epoch, mode="epochs")
 

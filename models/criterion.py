@@ -18,14 +18,13 @@ import torch.distributed
 
 from typing import List, Tuple, Dict
 
-from .matcher import build as build_matcher, HungarianMatcher
+from .matcher import build as build_matcher, HungarianMatcher, pairwise_min_permuted_segment_loss
 from structures.track_instances import TrackInstances
 from utils.box_ops import generalized_box_iou, box_cxcywh_to_xyxy, box_iou_union
 from utils.utils import is_distributed, distributed_world_size
 
 from hsmot.loss.loss import l1_loss_rotate, loss_rotated_iou_norm_bboxes1
 from hsmot.util.dist import box_iou_rotated_norm_bboxes1
-
 
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
@@ -75,7 +74,7 @@ class ClipCriterion:
     def set_device(self, device: torch.device):
         self.device = device
 
-    def init_a_clip(self, batch: Dict, hidden_dim: int, num_classes: int, device: torch.device):
+    def init_a_clip(self, batch: Dict, hidden_dim: int, num_classes: int, device: torch.device, decoder_spectral_weights_dim: int = 8):
         """
         Init this function for a specific clip.
         Args:
@@ -91,7 +90,8 @@ class ClipCriterion:
         self.gt_trackinstances_list = []
         for c in range(clip_size):
             gt_trackinstances = TrackInstances.init_tracks(batch, hidden_dim=hidden_dim,
-                                                           num_classes=num_classes, device=self.device)
+                                                           num_classes=num_classes, device=self.device,
+                                                           decoder_spectral_weights_dim=decoder_spectral_weights_dim)
             for b in range(batch_size):
                 gt_trackinstances[b].ids = batch["infos"][b][c]["obj_ids"]
                 gt_trackinstances[b].labels = batch["infos"][b][c]["labels"]
@@ -524,7 +524,7 @@ class ClipCriterion:
         if(len(matched_pred_spectral_weights) == 0):
             loss_spectral_decoder_mse = outputs["pred_spectral_weights"].sum()*0.0
         else:
-            loss_spectral_decoder_mse = F.mse_loss(matched_pred_spectral_weights, gt_spectral_weights, reduction="sum") / matched_pred_spectral_weights.size(1)
+            loss_spectral_decoder_mse = pairwise_min_permuted_segment_loss(matched_pred_spectral_weights, gt_spectral_weights, reduction='mse', aggregate_segment='mean', aggregate_loss="sum") / matched_pred_spectral_weights.size(1)
 
         return loss_spectral_decoder_mse
 
