@@ -223,7 +223,7 @@ def pairwise_min_permuted_segment_error(
         raise ValueError("reduction 仅支持 'mse' 或 'l1'")
 
     if k == 1:
-        return seg_cost.squeeze()
+        return seg_cost.squeeze(3).squeeze(2)
 
     # ---- 对 k 段做最小置换匹配 ----
     if k <= perm_threshold and math.factorial(k) <= 40320:
