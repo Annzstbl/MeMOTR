@@ -212,6 +212,8 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     data_start_timestamp = time.time()
 
     criterion.set_epoch(epoch)
+    
+    TrackInstances.set_static_properties(use_spectral_decoder=get_model(model).use_spectral_decoder, decoder_spectral_weights_dim=8*decoder_spectral_clusters)
 
     for i, batch in enumerate(dataloader):
         img_metas = batch["img_metas"][0][0]
@@ -221,12 +223,11 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                                             hidden_dim=get_model(model).hidden_dim,
                                             num_classes=get_model(model).num_classes,
                                             device=device, use_dab=use_dab,
-                                            decoder_spectral_weights_dim=8*decoder_spectral_clusters)
+                                            )
         criterion.init_a_clip(batch=batch,
                               hidden_dim=get_model(model).hidden_dim,
                               num_classes=get_model(model).num_classes,
-                              device=device, 
-                              decoder_spectral_weights_dim=decoder_spectral_clusters * 8)
+                              device=device, )
 
         for frame_idx in range(len(batch["imgs"][0])):
             if no_grad_frames is None or frame_idx >= no_grad_frames:

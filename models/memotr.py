@@ -440,5 +440,6 @@ def build(config: dict):
         use_dab=config["USE_DAB"],
         visualize=config["VISUALIZE"],
         use_spectral_decoder=config["USE_SPECTRAL_DECODER"],
+        use_spectral_refine=config["USE_SPECTRAL_REFINE"],
         decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"], #decoder中spectral anchor的光谱数量
     )

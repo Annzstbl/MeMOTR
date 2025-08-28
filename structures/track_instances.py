@@ -8,15 +8,23 @@ class TrackInstances:
     """
     Tracked Instances.
     """
+    #static properities
+    use_spectral_decoder = True
+    decoder_spectral_weights_dim = 8
+
+    @staticmethod
+    def set_static_properties(use_spectral_decoder: bool = True, decoder_spectral_weights_dim: int = 8):
+        TrackInstances.use_spectral_decoder = use_spectral_decoder
+        TrackInstances.decoder_spectral_weights_dim = decoder_spectral_weights_dim
+
+
     def __init__(self, frame_height: float = 1.0, frame_width: float = 1.0,
-                 hidden_dim: int = 256, num_classes: int = 1, use_dab: bool = False, use_spectral_decoder: bool = False, decoder_spectral_weights_dim: int = 8):
+                 hidden_dim: int = 256, num_classes: int = 1, use_dab: bool = False):
         self.use_dab = use_dab
         self.frame_height = frame_height
         self.frame_width = frame_width
         self.hidden_dim = hidden_dim
         self.num_classes = num_classes
-        self.use_spectral_decoder = use_spectral_decoder
-        self.decoder_spectral_weights_dim = decoder_spectral_weights_dim
         if self.use_dab:
             self.ref_pts = torch.zeros((0, 5))
             self.query_embed = torch.zeros((0, hidden_dim))
@@ -37,8 +45,9 @@ class TrackInstances:
         self.last_output = torch.zeros((0, self.hidden_dim), dtype=torch.float)
         self.long_memory = torch.zeros((0, self.hidden_dim), dtype=torch.float)
         self.last_appear_boxes = torch.zeros((0, 4))
-        self.query_spectral_weights = torch.zeros((0, decoder_spectral_weights_dim), dtype=torch.float)# 如果参与预测，使用的query。不一定是最后预测的光谱权重，可能没更新。
-        self.pred_spectral_weights = torch.zeros((0, decoder_spectral_weights_dim), dtype=torch.float)# 最后预测的光谱权重
+        if TrackInstances.use_spectral_decoder:
+            self.query_spectral_weights = torch.zeros((0, TrackInstances.decoder_spectral_weights_dim), dtype=torch.float)# 如果参与预测，使用的query。不一定是最后预测的光谱权重，可能没更新。
+            self.pred_spectral_weights = torch.zeros((0, TrackInstances.decoder_spectral_weights_dim), dtype=torch.float)# 最后预测的光谱权重
 
     def to(self, device):
         res = TrackInstances(frame_height=self.frame_height, frame_width=self.frame_width,
@@ -70,7 +79,7 @@ class TrackInstances:
 
     # 只在初始化GT时候使用
     @staticmethod
-    def init_tracks(batch: dict, hidden_dim: int, num_classes: int, device="cpu", use_dab: bool = False, decoder_spectral_weights_dim: int = 8):
+    def init_tracks(batch: dict, hidden_dim: int, num_classes: int, device="cpu", use_dab: bool = False):
         """
         Init tracks for a batch.
         """
@@ -85,8 +94,7 @@ class TrackInstances:
                 frame_width=float(batch["imgs"][i][0].shape[-1] / w_max),
                 hidden_dim=hidden_dim,
                 num_classes=num_classes,
-                use_dab=use_dab,
-                decoder_spectral_weights_dim=decoder_spectral_weights_dim
+                use_dab=use_dab
             ).to(device))
         return tracks_list
 
