@@ -30,7 +30,8 @@ class Submitter:
                  motion_min_length: int = 3, motion_max_length: int = 5,
                  use_dab: bool = False,
                  visualize: bool = False,
-                 npy2rgb: bool = False):
+                 npy2rgb: bool = False, 
+                 decoder_spectral_enable: bool = True):
         self.dataset_name = dataset_name
         self.seq_name = seq_name
         self.seq_dir = path.join(split_dir, seq_name)
@@ -41,7 +42,7 @@ class Submitter:
                                       miss_tolerance=miss_tolerance,
                                       use_motion=use_motion,
                                       motion_min_length=motion_min_length, motion_max_length=motion_max_length,
-                                      visualize=visualize, use_dab=use_dab)
+                                      visualize=visualize, use_dab=use_dab, decoder_spectral_enable=decoder_spectral_enable)
         self.result_score_thresh = result_score_thresh
         self.motion_lambda = motion_lambda
         self.dataset = SeqDataset(seq_dir=self.seq_dir, npy2rgb=npy2rgb)
@@ -50,6 +51,7 @@ class Submitter:
         self.use_dab = use_dab
         self.use_motion = use_motion
         self.visualize = visualize
+        self.decoder_spectral_enable = decoder_spectral_enable
         # 对路径进行一些操作
         os.makedirs(self.predict_dir, exist_ok=True)
         if os.path.exists(os.path.join(self.predict_dir, f'{self.seq_name}.txt')):
@@ -62,7 +64,6 @@ class Submitter:
         tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
                                  num_classes=get_model(self.model).num_classes,
                                  use_dab=self.use_dab,
-                                 decoder_spectral_weights_dim = get_model(self.model).decoder_spectral_clusters * 8,
                                  ).to(self.device)]
         # bdd100k_results = []    # for bdd100k, will be converted into json file, different from other datasets.
 
@@ -336,7 +337,8 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module):
             motion_max_length=motion_max_length,
             motion_lambda=motion_lambda,
             miss_tolerance=miss_tolerance,
-            npy2rgb = config["NPY2RGB"]
+            npy2rgb = config["NPY2RGB"],
+            decoder_spectral_enable= config["USE_SPECTRAL_DECODER"]
         )
         submitter.run()
 
