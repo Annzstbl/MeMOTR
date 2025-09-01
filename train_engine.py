@@ -150,14 +150,14 @@ def train(config: dict):
             pass
         else:
             pass
-            # if config["DATASET"] == "DanceTrack" or config["EPOCHS"] < 100 or (epoch + 1) % 5 == 0:
-            #     save_checkpoint(
-            #         model=model,
-            #         path=os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth"),
-            #         states=train_states,
-            #         optimizer=optimizer,
-            #         scheduler=scheduler
-            #     )
+            if config["DATASET"] == "DanceTrack" or config["EPOCHS"] < 100 or (epoch + 1) % 5 == 0:
+                save_checkpoint(
+                    model=model,
+                    path=os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth"),
+                    states=train_states,
+                    optimizer=optimizer,
+                    scheduler=scheduler
+                )
 
         # 添加evaluate_one_epoch
         # 在每个epoch结束后进行一次验证（如果配置中包含验证集）
