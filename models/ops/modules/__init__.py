@@ -11,3 +11,4 @@
 
 from .ms_deform_attn import MSDeformAttn
 from .ms_deform_attn_rotate import MSDeformAttn_Rotate
+from .ms_deform_attn_spectral import MSDeformAttnSpectral

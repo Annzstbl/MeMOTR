@@ -197,7 +197,7 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
             model_shape = model_state_dict["det_anchor"].shape
             if pre_shape[0] == model_shape[0]:
                 model_state_dict["det_anchor"][:,:4] = pretrained_state_dict[k].clone()
-                pretrained_state_dict[k] = model_state_dict["det_anchor"]
+                pretrained_state_dict["det_anchor"] = model_state_dict["det_anchor"]
             else:
                 pretrained_state_dict["det_anchor"] = model_state_dict["det_anchor"]
                 print(f"Pretrain model's query num is {pretrained_state_dict[k].shape[0]}, "
@@ -230,6 +230,7 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
             if show_details:
                 if logger is not None:
                     logger.write(head=f"❌ Parameter '{k}' in pretrained model but not in current model", filename="log.txt", mode="a")
+                    logger.show(head=f"❌ Parameter '{k}' in pretrained model but not in current model")
                 else:
                     print(f"❌ Parameter '{k}' in pretrained model but not in current model")
 
@@ -241,6 +242,7 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
             if show_details:
                 if logger is not None:
                     logger.write(head=f"🆕 New parameter '{k}' in current model, not in pretrained model", filename="log.txt", mode="a")
+                    logger.show(head=f"🆕 New parameter '{k}' in current model, not in pretrained model")
                 else:
                     print(f"🆕 New parameter '{k}' in current model, not in pretrained model")
 
@@ -250,12 +252,14 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
         if k not in model_state_dict:
             if logger is not None:
                 logger.write(head=f"⚠️  Skip loading '{k}' - not in model (shape: {v.shape})", filename="log.txt", mode="a")
+                logger.show(head=f"⚠️  Skip loading '{k}' - not in model (shape: {v.shape})")
             else:
                 print(f"⚠️  Skip loading '{k}' - not in model (shape: {v.shape})")
         elif v.shape != model_state_dict[k].shape:
             shape_mismatch_count += 1
             if logger is not None:
                 logger.write(head=f"⚠️  Skip loading '{k}' - shape mismatch: required {model_state_dict[k].shape}, loaded {v.shape}", filename="log.txt", mode="a")
+                logger.show(head=f"⚠️  Skip loading '{k}' - shape mismatch: required {model_state_dict[k].shape}, loaded {v.shape}")
             else:
                 print(f"⚠️  Skip loading '{k}' - shape mismatch: required {model_state_dict[k].shape}, loaded {v.shape}")
 
@@ -268,12 +272,21 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
         logger.write(head=f"✅ Successfully loaded with strict=False", filename="log.txt", mode="a")
         logger.write(head=f"📉 Dropped parameters: {not_in_model}", filename="log.txt", mode="a")
         logger.write(head=f"📈 New parameters: {not_in_pretrained}", filename="log.txt", mode="a")
+        
+        logger.show(head="\n" + "="*60)
+        logger.show(head="📊 PRETRAINED MODEL LOADING SUMMARY")
+        logger.show(head="="*60)
+        logger.show(head=f"✅ Successfully loaded with strict=False")
+        logger.show(head=f"📉 Dropped parameters: {not_in_model}")
+        logger.show(head=f"📈 New parameters: {not_in_pretrained}")
+
     if shape_mismatch_count > 0:
         if logger is not None:
             logger.write(head=f"⚠️  Shape mismatches: {shape_mismatch_count}", filename="log.txt", mode="a")
+            logger.show(head=f"⚠️  Shape mismatches: {shape_mismatch_count}", filename="log.txt", mode="a")
     if logger is not None:
         logger.write(head="="*60, filename="log.txt", mode="a")
-
+        logger.show(head="="*60)
     return model
 
 

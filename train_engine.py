@@ -132,6 +132,12 @@ def train(config: dict):
                     no_grad_frames = config["NO_GRAD_FRAMES"][i]
                     break
 
+        sample_length = dataset_train.sample_length
+        if sample_length >= config["DYNAMIC_USE_CHECKPOINT_THRESHOLD"]:
+            dynamic_use_checkpoint = True
+        else:
+            dynamic_use_checkpoint = False
+
         train_one_epoch(
             model=model,
             train_states=train_states,
@@ -146,7 +152,8 @@ def train(config: dict):
             use_dab=config["USE_DAB"],
             multi_checkpoint=multi_checkpoint,
             no_grad_frames=no_grad_frames,
-            decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"]
+            decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
+            dynamic_use_checkpoint=dynamic_use_checkpoint
         )
         scheduler.step()
         train_states["start_epoch"] += 1
@@ -181,7 +188,8 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     accumulation_steps: int = 1, use_dab: bool = False,
                     multi_checkpoint: bool = False,
                     no_grad_frames: int | None = None,
-                    decoder_spectral_clusters: int=1):
+                    decoder_spectral_clusters: int=1,
+                    dynamic_use_checkpoint: bool = False):
     """
     Args:
         model: Model.
@@ -205,6 +213,15 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     optimizer.zero_grad()
     device = next(get_model(model).parameters()).device
 
+    # set using checkpoint
+    if dynamic_use_checkpoint:
+        get_model(model).enable_checkpoint(True)
+        logger.write(head=f"--Epoch={epoch} Settings: Enable using checkpoint", filename="log.txt", mode="a")
+        logger.show(head=f"--Epoch={epoch} Settings: Enable using checkpoint")
+    else:
+        get_model(model).enable_checkpoint(False)
+        logger.write(head=f"--Epoch={epoch} Settings: Disable using checkpoint", filename="log.txt", mode="a")
+        logger.show(head=f"--Epoch={epoch} Settings: Disable using checkpoint")
     dataloader_len = len(dataloader)
     metric_log = MetricLog()
     epoch_start_timestamp = time.time()
@@ -285,7 +302,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
         metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
         data_start_timestamp = time.time()
         # Outputs logs - 减少同步频率以避免NCCL超时
-        if i % 10 == 0:  # 改为每10个iteration同步一次，而不是每次
+        if i % 2 == 0:  # 改为每10个iteration同步一次，而不是每次
             metric_log.sync()
             # 修复：只获取当前GPU的内存使用情况，避免跨进程访问
             max_memory = torch.cuda.max_memory_allocated() // (1024**2)
@@ -298,8 +315,16 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                              f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
                              f"Max Memory={max_memory}MB]",
                         log=metric_log)
-            logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
-                         log=metric_log, filename="log.txt", mode="a")
+
+            logger.write(head=f"--[Epoch={epoch}, Iter={i}, "
+                             f"{second_per_iter:.2f}s/iter, "
+                             f"{second_per_data:.2f}s/data, "
+                             f"{i}/{dataloader_len} iters, "
+                             f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
+                             f"Max Memory={max_memory}MB]",
+                        log=metric_log, filename="log.txt", mode="a")
+            # logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
+                        #  log=metric_log, filename="log.txt", mode="a")
             logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
 
         if multi_checkpoint:
@@ -415,7 +440,10 @@ def get_param_groups(config: dict, model: nn.Module, logger: Logger = None) -> T
         lr = param_group.get("lr", "Not set")
         logger.write(head=f'=== Group {i+1} (lr={lr}) ===', filename="log.txt", mode="a")
         logger.write(head=f'Parameters ({len(param_group["params"])}):', filename="log.txt", mode="a")
+        logger.show(head=f'=== Group {i+1} (lr={lr}) ===')
+        logger.show(head=f'Parameters ({len(param_group["params"])}):')
         for j, param in enumerate(param_group["params"]):
             logger.write(head=f'  {j+1:3d}. {param}', filename="log.txt", mode="a")
+            logger.show(head=f'  {j+1:3d}. {param}')
 
     return param_groups, ["lr_backbone", "lr_points", "lr_query_updater", "lr", "lr_dictionary"]

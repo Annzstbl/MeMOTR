@@ -21,7 +21,7 @@ from .deformable_decoder import DeformableDecoderLayer, DeformableDecoder
 
 from .deformable_encoder_spectral import DeformableEncoderLayerSpectral, DeformableEncoderSpectral
 from .deformable_decoder_spectral import DeformableDecoderLayerSpectral, DeformableDecoderSpectral
-from .ops.modules import MSDeformAttn
+from .ops.modules import MSDeformAttn, MSDeformAttnSpectral, MSDeformAttn_Rotate
 from .mlp import MLP
 from deprecated.sphinx import deprecated
 
@@ -40,8 +40,9 @@ class DeformableTransformer(nn.Module):
                  checkpoint_level: int = 2,
                  use_dab: bool = False,
                  visualize: bool = False,
-                 spectral_encoder: bool = True,
-                 spectral_decoder: bool = True,
+                 spectral_encoder: bool = False, # 是否使用光谱的encoder
+                 spectral_decoder: bool = False,
+                 encoder_spectral_attention: bool = False,  # 是否在encoder中使用光谱attention
                  decoder_spectral_clusters = 1):
         """
         Args:
@@ -73,6 +74,7 @@ class DeformableTransformer(nn.Module):
         self.use_dab = use_dab
         self.visualize = visualize
         self.encoder_spectral = spectral_encoder
+        self.encoder_spectral_attention = encoder_spectral_attention
         self.decoder_spectral = spectral_decoder
         self.decoder_spectral_clusters = decoder_spectral_clusters
 
@@ -82,7 +84,8 @@ class DeformableTransformer(nn.Module):
                 d_model=d_model, d_ffn=d_ffn,
                 dropout=dropout, activation=activation,
                 n_levels=n_feature_levels, n_heads=n_heads,
-                n_points=n_enc_points, sigmoid_attn=False
+                n_points=n_enc_points, sigmoid_attn=False,
+                spectral_attention=self.encoder_spectral_attention
             )
             self.encoder: DeformableEncoderSpectral = DeformableEncoderSpectral(encoder_layer=encoder_layer, num_layers=n_enc_layers,
                                                                                 use_checkpoint=(self.use_checkpoint and
@@ -158,13 +161,19 @@ class DeformableTransformer(nn.Module):
                 self.reference_points = nn.Linear(d_model, 2)
 
         self.reset_parameters()
+    
+    def enable_checkpoint(self, enable: bool):
+        self.use_checkpoint = enable
+        self.encoder.use_checkpoint = enable
+        self.decoder.use_checkpoint = enable
+        return
 
     def reset_parameters(self):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
         for m in self.modules():
-            if isinstance(m, MSDeformAttn):
+            if any([isinstance(m, MSDeformAttn), isinstance(m, MSDeformAttnSpectral), isinstance(m, MSDeformAttn_Rotate)]):
                 m.reset_parameters()
         if not self.two_stage:
             if self.use_dab:
@@ -413,5 +422,6 @@ def build(config: dict):
         spectral_encoder=config["USE_SPECTRAL_ENCODER"],
         spectral_decoder=config["USE_SPECTRAL_DECODER"],
         decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"], #decoder中spectral anchor的光谱数量
+        encoder_spectral_attention=config["ENCODER_SPECTRAL_ATTENTION"],
     )
 

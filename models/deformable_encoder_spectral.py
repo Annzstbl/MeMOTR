@@ -14,7 +14,7 @@ import torch.nn as nn
 
 from torch.utils.checkpoint import checkpoint
 
-from .ops.modules import MSDeformAttn
+from .ops.modules import MSDeformAttn, MSDeformAttnSpectral
 from .utils import get_activation_layer, get_clones
 
 
@@ -68,11 +68,20 @@ class DeformableEncoderLayerSpectral(nn.Module):
     def __init__(self,
                  d_model=256, d_ffn=1024,
                  dropout=0.1, activation="ReLU",
-                 n_levels=4, n_heads=8, n_points=4, sigmoid_attn=False):
+                 n_levels=4, n_heads=8, n_points=4, sigmoid_attn=False, spectral_attention=False):
         super(DeformableEncoderLayerSpectral, self).__init__()
 
         # Self Attention
-        self.self_attn = MSDeformAttn(
+        if spectral_attention:
+            self.self_attn = MSDeformAttnSpectral(
+                d_model=d_model,
+                n_levels=n_levels,
+                n_heads=n_heads,
+                n_points=n_points,
+                sigmoid_attn=sigmoid_attn
+            )
+        else:
+            self.self_attn = MSDeformAttn(
             d_model=d_model,
             n_levels=n_levels,
             n_heads=n_heads,

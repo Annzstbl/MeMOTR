@@ -8,6 +8,7 @@
 * Copyright (c) 2018 Microsoft
 **************************************************************************
 */
+#pragma once
 
 #include <cstdio>
 #include <algorithm>

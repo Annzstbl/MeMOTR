@@ -191,42 +191,6 @@ class BackboneWithPE(nn.Module):
         return self.num_channels
 
 
-class Backbone_PE_SpectralWeights(nn.Module):
-    """
-    Backbone with Position Embedding and Spectral Weights.
-    输出: 多尺度特征、位置编码、每个尺度的spectral_weights（如SE权重）。
-    """
-    def __init__(self, backbone: nn.Module, position_embedding: nn.Module, spectral_embedding: nn.Module):
-        super().__init__()
-        self.backbone = backbone
-        self.position_embedding = position_embedding
-        self.strides = backbone.strides
-        self.num_channels = backbone.num_channels
-        self.spectral_embedding = spectral_embedding
-
-    def n_inter_layers(self):
-        return len(self.strides)
-
-    def n_inter_channels(self):
-        return self.num_channels
-
-
-    def forward(self, ntensor: NestedTensor):
-        backbone_outputs, se_weights = self.backbone(ntensor)
-        features: List[NestedTensor] = []
-        pos_embeds: List[torch.Tensor] = []
-        spectral_embeds: List[torch.Tensor] = []
-        # 取特征
-        for _, output in sorted(backbone_outputs.items()):
-            features.append(output)
-        # 位置编码
-        for feature in features:
-            pos_embeds.append(self.position_embedding(feature))
-        # 构建spectral_weights_list
-        for feature in features:
-            spectral_embeds.append(self.spectral_embedding(se_weights, feature))
-
-        return features, pos_embeds, spectral_embeds
 
 class Backbone_PE_SpectralWeights(nn.Module):
     """

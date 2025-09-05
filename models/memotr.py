@@ -121,7 +121,11 @@ class MeMOTR(nn.Module):
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(self.transformer.get_n_dec_layers())])
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(self.transformer.get_n_dec_layers())])
 
-    def forward(self, frame: NestedTensor, tracks: list[TrackInstances]):
+    def enable_checkpoint(self, enable: bool):
+        self.use_checkpoint = enable
+        self.transformer.enable_checkpoint(enable)
+
+    def forward(self, frame: NestedTensor, tracks: list[TrackInstances], debug=False):
         if self.visualize:
             os.makedirs("./outputs/visualize_tmp/memotr/", exist_ok=True)
 
@@ -274,6 +278,14 @@ class MeMOTR(nn.Module):
             res["pred_spectral_weights"] = inter_query_spectral_weights[-1]
         res["outputs"] = outputs[-1]     # (B, Nd+Nq, C)
         res["spectral_weights"] = spectral_weights # List[B, C=8, H, W]
+        if debug:
+            res["inter_query_spectral_weights"] = inter_query_spectral_weights
+            res["inter_references"] = inter_references
+            res["inter_queries"] = inter_queries
+            res["init_reference"] = init_reference
+            res["init_query_spectral_weights"] = init_query_spectral_weights
+            res["outputs"] = outputs
+            res["spectral_weights"] = spectral_weights
         return res
 
     @torch.jit.unused

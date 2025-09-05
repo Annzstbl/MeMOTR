@@ -213,15 +213,20 @@ class hsmot_8ch(MOTDataset):
         return [self.get_single_frame(vid=vid, idx=i) for i in idxs]
 
 
-def transfroms_for_train(use_cache=True, cache_path=None, coco_size: bool = False, overflow_bbox: bool = False, reverse_clip: bool = False, spectral_method=None, spectral_n_clusters=None, spectral_weights_enable=True):
+def transfroms_for_train(use_cache=True, cache_path=None, coco_size: bool = False, overflow_bbox: bool = False, reverse_clip: bool = False, spectral_method=None, spectral_n_clusters=None, spectral_weights_enable=True, resize=None):
     mean = [0.27358221, 0.28804452, 0.28133921, 0.26906377, 0.28309119, 0.26928305, 0.28372527, 0.27149373]
     std = [0.19756629, 0.17432339, 0.16413284, 0.17581682, 0.18366176, 0.1536845, 0.15964683, 0.16557951]
     mean = [_*255 for _ in mean]
     std = [_*255 for _ in std]
 
-    scales_w = [608, 640, 672, 704, 736, 768, 800, 832, 864, 896, 928, 960, 992, 1024, 1056, 1088, 1120, 1152, 1184]
-    scales_h = [ int(w/4*3) for w in scales_w ]
-    scales = list(zip(scales_h, scales_w))
+    if resize is not None:
+        scales_w = resize
+        scales_h = [int(w/4*3) for w in scales_w]
+        scales = list(zip(scales_h, scales_w))
+    else:
+        scales_w = [608, 640, 672, 704, 736, 768, 800, 832, 864, 896, 928, 960, 992, 1024, 1056, 1088, 1120, 1152, 1184]
+        scales_h = [ int(w/4*3) for w in scales_w ]
+        scales = list(zip(scales_h, scales_w))
     
     return MotCompose([
                 MotipToMmrotate(),
@@ -259,6 +264,7 @@ def transforms_for_eval():
 
 
 def build(config: dict, split: str):
+    resize = config["RESIZE"] if "RESIZE" in config else None
     if split == "train":
         return hsmot_8ch(
             config=config,
@@ -271,7 +277,8 @@ def build(config: dict, split: str):
                 spectral_weights_enable=config["SPECTRAL_WEIGHTS_ENABLE"],
                 use_cache=config["DECODER_SPECTRAL_USE_CACHE"],
                 spectral_n_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
-                spectral_method=config["DECODER_SPECTRAL_METHOD"]
+                spectral_method=config["DECODER_SPECTRAL_METHOD"],
+                resize=resize
             )
         )
     elif split == "test":

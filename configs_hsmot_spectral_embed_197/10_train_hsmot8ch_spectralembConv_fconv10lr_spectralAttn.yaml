@@ -7,14 +7,13 @@ GIT_VERSION:
 MODE: train
 CONFIG_PATH:
 VISUALIZE: False
-AVAILABLE_GPUS: 4,5
+AVAILABLE_GPUS: 3,4
 DEVICE: cuda
-OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/debug
+OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/10_encoder_spectral_attn
 USE_DISTRIBUTED: False
 USE_CHECKPOINT: True
 DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
-# 这里好像可以到4，但是为了防止训练出问题，设为3
-CHECKPOINT_LEVEL: 2               # gradient checkpoint level.
+CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
                                   # As the number increases (from 1 to 4), the memory cost increases.
                                   # We have deleted many comments in this official code simplicity,
                                   # if you have any questions, feel free to contact with the author.
@@ -23,7 +22,7 @@ RESUME_SCHEDULER: True
 MULTI_CHECKPOINT: False
 
 # About submit
-SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/debug
+SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/10_encoder_spectral_attn
 SUBMIT_MODEL:
 SUBMIT_DATA_SPLIT: test
 DET_SCORE_THRESH: 0.5
@@ -50,7 +49,7 @@ USE_CROWDHUMAN:
 MOTSYNTH_RATE:
 DATA_ROOT: /data/users/litianhao/data
 DATA_PATH:
-NUM_WORKERS: 1
+NUM_WORKERS: 2
 BATCH_SIZE: 1
 ACCUMULATION_STEPS: 1
 COCO_SIZE: False
@@ -76,7 +75,6 @@ USE_DAB: True
 UPDATE_THRESH: 0.5
 LONG_MEMORY_LAMBDA: 0.01
 # Pretrain model 
-# PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr_8ch_interpolate.pth
 PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr_convhsi.pth
 
 # Sampling setting
@@ -103,8 +101,7 @@ LR_SCHEDULER: MultiStep
 LR_DROP_RATE: 0.1
 LR_DROP_MILESTONES: [12]
 
-LR_DICTIONARY_NAMES: [stem]
-# LR_DICTIONARY_NAMES: [backbone.conv1]
+LR_DICTIONARY_NAMES: [stem_conv]
 LR_DICTIONARY_SCALE: 1
 # DETR matcher
 MATCH_COST_CLASS: 2
@@ -117,39 +114,22 @@ LOSS_WEIGHT_L1: 5
 LOSS_WEIGHT_GIOU: 2
 LOSS_SPECTRAL_KL: 0
 LOSS_SPECTRAL_DECODER_MSE: -1
-
 # Aux Loss Weight
 AUX_LOSS_WEIGHT: [1.0, 1.0, 1.0, 1.0, 1.0]
 
-RESIZE: [1184]
+
 # multispectral image
 INPUT_CHANNELS: 8
-
-# multispectral image
 NPY2RGB: False
 STEM: conv3d_se_v2
-
-# USE_SPECTRAL_DECODER: True
-# USE_SPECTRAL_REFINE: True
-# DECODER_SPECTRAL_CLUSTERS: 1
-# DECODER_SPECTRAL_METHOD: mean
-# SPECTRAL_WEIGHTS_ENABLE: True
-# DECODER_SPECTRAL_USE_CACHE: False
 USE_SPECTRAL_DECODER: False
 USE_SPECTRAL_REFINE: False
-DECODER_SPECTRAL_CLUSTERS: 0
-DECODER_SPECTRAL_METHOD: none
-SPECTRAL_WEIGHTS_ENABLE: False
-DECODER_SPECTRAL_USE_CACHE: False
-
 USE_SPECTRAL_ENCODER: True
+SPECTRAL_WEIGHTS_ENABLE: False
+DECODER_SPECTRAL_CLUSTERS: 0
+DECODER_SPECTRAL_USE_CACHE: False
+DECODER_SPECTRAL_METHOD: none
 ENCODER_SPECTRAL_ATTENTION: True
 
 # EVALUATE
-EVALUATE_PER_EPOCH: 1
-
-# debug
-VID_WHITE_LIST: ['data46-5']
-
-
-
+EVALUATE_PER_EPOCH: 2

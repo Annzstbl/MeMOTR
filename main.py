@@ -20,7 +20,7 @@ def parse_option():
     # About system, Like GPUs:
     parser.add_argument("--available-gpus", type=str, help="Available GPUs, like '0,1,2,3'.")
     parser.add_argument("--use-distributed", action="store_true", help="Use distributed training.")
-    parser.add_argument("--use-checkpoint", action="store_true", help="Use gradient checkpoint to save GPU memory.")
+    # parser.add_argument("--use-checkpoint", action="store_true", help="Use gradient checkpoint to save GPU memory.")
     parser.add_argument("--checkpoint-level", type=int)
 
     # Running mode, Training? Evaluation? or ?
