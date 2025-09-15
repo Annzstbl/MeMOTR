@@ -1,0 +1,10 @@
+PARENT_CONFIG: ./default99.yaml
+
+AVAILABLE_GPUS: 2,3  #if not set, will use all gpus
+
+NUM_FEATURE_LEVELS: 3
+
+ENCODER_SPECTRAL: True
+
+OUTPUTS_DIR: /data/users/wangying01/lth/hsmot/workdir_2/memotr/spectralemb/11_level3
+SUBMIT_DIR: /data/users/wangying01/lth/hsmot/workdir_2/memotr/spectralemb/11_level3

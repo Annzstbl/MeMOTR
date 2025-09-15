@@ -1,0 +1,6 @@
+PARENT_CONFIG: ../configs_hsmot_spectral_embed_197/default.yaml
+
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/debug99
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/debug99
+
+DATA_ROOT: /data/users/wangying01/lth/hsmot/data
