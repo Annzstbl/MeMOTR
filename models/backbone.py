@@ -401,14 +401,19 @@ def build(config: dict) -> Union[BackboneWithPE, Backbone_PE_SpectralWeights]:
     CONFIG_STEM=config["STEM"]
     position_embedding = build_position_embedding(config=config)
     backbone = Backbone(backbone_name=config["BACKBONE"], train_backbone=True, return_interm_layers=True, input_channel=config["INPUT_CHANNELS"], stem=CONFIG_STEM)
+    
+    num_levels = config["NUM_FEATURE_LEVELS"]
+    assert (num_levels == 3 or num_levels == 4), "num_levels should be 3 or 4"
+    resnet_output_layer = ["layer2", "layer3", "layer4"] if num_levels == 3 else ["layer2", "layer3", "layer4", "layer_extra"]
+
     if CONFIG_STEM=="conv3d_se":
         spectral_embedding = SpectralEmbedding()
         return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding, weights_version="v1")
     elif CONFIG_STEM=="conv3d_se_v2":
-        spectral_embedding = SpectralEmbeddingConv(resnet_output_layer=["layer2", "layer3", "layer4", "layer_extra"])
+        spectral_embedding = SpectralEmbeddingConv(resnet_output_layer=resnet_output_layer)
         return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding, weights_version="v2")
     elif CONFIG_STEM=="conv3d_se_v3":
-        spectral_embedding = SpectralEmbeddingV3(resnet_output_layer=["layer2", "layer3", "layer4", "layer_extra"])
+        spectral_embedding = SpectralEmbeddingV3(resnet_output_layer=resnet_output_layer)
         return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding, weights_version="v3")
     else:
         return BackboneWithPE(backbone=backbone, position_embedding=position_embedding)

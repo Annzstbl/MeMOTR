@@ -4,15 +4,18 @@
 
 GIT_VERSION:
 
+PARENT_CONFIG: 
+
 MODE: train
 CONFIG_PATH:
 VISUALIZE: False
-AVAILABLE_GPUS: 2,3
+AVAILABLE_GPUS: #if not set, will use all gpus
 DEVICE: cuda
-OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/02_v2_fconv10lr_2gpu
+OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/11_encoder_spectral_attn_level3
 USE_DISTRIBUTED: False
 USE_CHECKPOINT: False
-CHECKPOINT_LEVEL: 4               # gradient checkpoint level.
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 10
+CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
                                   # As the number increases (from 1 to 4), the memory cost increases.
                                   # We have deleted many comments in this official code simplicity,
                                   # if you have any questions, feel free to contact with the author.
@@ -21,7 +24,7 @@ RESUME_SCHEDULER: True
 MULTI_CHECKPOINT: False
 
 # About submit
-SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/02_v2_fconv10lr_2gpu
+SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/11_encoder_spectral_attn_level3
 SUBMIT_MODEL:
 SUBMIT_DATA_SPLIT: test
 DET_SCORE_THRESH: 0.5
@@ -102,32 +105,42 @@ LR_DROP_MILESTONES: [12]
 
 LR_DICTIONARY_NAMES: [stem_conv]
 LR_DICTIONARY_SCALE: 1
+
 # DETR matcher
 MATCH_COST_CLASS: 2
 MATCH_COST_BBOX: 5
 MATCH_COST_GIOU: 2
 MATCH_COST_SPECTRAL_MSE: -1
+
 # DETR loss
 LOSS_WEIGHT_FOCAL: 2
 LOSS_WEIGHT_L1: 5
 LOSS_WEIGHT_GIOU: 2
 LOSS_SPECTRAL_KL: 0
 LOSS_SPECTRAL_DECODER_MSE: -1
+
 # Aux Loss Weight
 AUX_LOSS_WEIGHT: [1.0, 1.0, 1.0, 1.0, 1.0]
 
+# EVALUATE
+EVALUATE_PER_EPOCH: 2
 
 # multispectral image
 INPUT_CHANNELS: 8
 NPY2RGB: False
+
+# structure
 STEM: conv3d_se_v2
-USE_SPECTRAL_DECODER: False
-USE_SPECTRAL_REFINE: False
-USE_SPECTRAL_ENCODER: True
-SPECTRAL_WEIGHTS_ENABLE: False
-DECODER_SPECTRAL_CLUSTERS: 0
-DECODER_SPECTRAL_USE_CACHE: False
-DECODER_SPECTRAL_METHOD: none
+
+# encoder
+ENCODER_SPECTRAL: False
 ENCODER_SPECTRAL_ATTENTION: False
-# EVALUATE
-EVALUATE_PER_EPOCH: 2
+ENCODER_GLOBAL_TOKEN: False
+
+# decoder
+DECODER_SPECTRAL: False
+DECODER_SPECTRAL_REFINE: False
+
+DECODER_SPECTRAL_METHOD: none #mean kmeans
+DECODER_SPECTRAL_CLUSTERS: 0 # >1 just for kmean
+DECODER_SPECTRAL_USE_CACHE: False #kmeans

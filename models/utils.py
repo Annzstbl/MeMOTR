@@ -173,9 +173,22 @@ def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: 
                         else:
                             raise NotImplementedError(f"some thing wrong with the bbox_embed.")
                 elif "ref_point_head" in k or "query_pos_head" in k:
+                    logger.write(head=f"[Modify Param], {k} from {pretrained_state_dict[k].shape} to {model_state_dict[k].shape}", filename="log.txt", mode="a")
+                    logger.show(head=f"[Modify Param], {k} from {pretrained_state_dict[k].shape} to {model_state_dict[k].shape}")
                     model_state_dict[k][:,:512] = pretrained_state_dict[k]
                     pretrained_state_dict[k] = model_state_dict[k]
-                    print(f'load the first 512 dim of {k} from pretrained model')
+                elif "level_embed" in k:
+                    logger.write(head=f"[Modify Param], {k} from {pretrained_state_dict[k].shape} to {model_state_dict[k].shape}", filename="log.txt", mode="a")
+                    logger.show(head=f"[Modify Param], {k} from {pretrained_state_dict[k].shape} to {model_state_dict[k].shape}")
+                    mismatch_shape = model_state_dict[k].shape[0]
+                    model_state_dict[k] = pretrained_state_dict[k][:mismatch_shape, :]
+                    pretrained_state_dict[k] = model_state_dict[k]
+                elif "attention_weights" in k or "sampling_offsets" in k:
+                    logger.write(head=f"[Modify Param], {k} from {pretrained_state_dict[k].shape} to {model_state_dict[k].shape}", filename="log.txt", mode="a")
+                    logger.show(head=f"[Modify Param], {k} from {pretrained_state_dict[k].shape} to {model_state_dict[k].shape}")
+                    mismatch_shape = model_state_dict[k].shape[0]
+                    model_state_dict[k] = pretrained_state_dict[k][:mismatch_shape]
+                    pretrained_state_dict[k] = model_state_dict[k]
                 else:
                     print(f"Parameter {k} has shape{pretrained_state_dict[k].shape} in pretrained model, "
                           f"but get shape{model_state_dict[k].shape} in current model.")

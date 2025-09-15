@@ -10,6 +10,7 @@ import torch.backends.cudnn
 from utils.utils import distributed_rank
 from utils.utils import yaml_to_dict
 from configs.utils import update_config
+from utils.utils import load_yaml_with_inheritance
 
 
 def parse_option():
@@ -122,7 +123,7 @@ def main(config: dict):
 
 if __name__ == '__main__':
     opt = parse_option()                  # runtime options
-    cfg = yaml_to_dict(opt.config_path)   # configs
+    cfg = load_yaml_with_inheritance(opt.config_path)   # configs with PARENT_CONFIG inheritance
 
     # Merge parser option and .yaml config, then run main function.
     merged_config = update_config(config=cfg, option=opt)

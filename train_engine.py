@@ -96,6 +96,7 @@ def train(config: dict):
         model = DDP(module=model, device_ids=[distributed_rank()],)
 
     multi_checkpoint = "MULTI_CHECKPOINT" in config and config["MULTI_CHECKPOINT"]
+    use_checkpoint = "USE_CHECKPOINT" in config and config["USE_CHECKPOINT"]
 
     # log记录开始时间
     train_logger.write(head=f"训练开始 Start Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", filename="log.txt", mode="a")
@@ -153,7 +154,7 @@ def train(config: dict):
             multi_checkpoint=multi_checkpoint,
             no_grad_frames=no_grad_frames,
             decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
-            dynamic_use_checkpoint=dynamic_use_checkpoint
+            dynamic_use_checkpoint=dynamic_use_checkpoint and use_checkpoint
         )
         scheduler.step()
         train_states["start_epoch"] += 1
@@ -230,7 +231,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
 
     criterion.set_epoch(epoch)
     
-    TrackInstances.set_static_properties(use_spectral_decoder=get_model(model).use_spectral_decoder, decoder_spectral_weights_dim=8*decoder_spectral_clusters)
+    TrackInstances.set_static_properties(use_spectral_decoder=get_model(model).decoder_spectral, decoder_spectral_weights_dim=8*decoder_spectral_clusters)
 
     for i, batch in enumerate(dataloader):
         img_metas = batch["img_metas"][0][0]

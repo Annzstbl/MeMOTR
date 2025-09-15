@@ -29,7 +29,7 @@ from hsmot.util.dist import box_iou_rotated_norm_bboxes1
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
                  max_frame_length: int, n_aux: int, merge_det_track_layer: int = 0, aux_weights: List = None,
-                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral_mse_enable :bool = True):
+                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = True):
         """
         Init a criterion function.
 
@@ -61,7 +61,7 @@ class ClipCriterion:
         self.epoch = 0
         self.kl_cos_scheduler_epoch = kl_cos_scheduler_epoch
         self.kl_weight_eta = kl_weight_eta
-        self.decoder_spectral_mse_enable = decoder_spectral_mse_enable
+        self.decoder_spectral_mse = decoder_spectral
 
     def set_epoch(self, epoch: int):
         self.epoch = epoch
@@ -112,7 +112,7 @@ class ClipCriterion:
                 "aux_label_focal_loss": torch.zeros(()).to(self.device),
                 "spectral_kl_loss": torch.zeros(()).to(self.device),
             }
-            if self.decoder_spectral_mse_enable:
+            if self.decoder_spectral_mse:
                 # "spectral_decoder_mse_loss": torch.zeros(()).to(self.device),
                 # "aux_spectral_decoder_mse_loss": torch.zeros(()).to(self.device)
                 self.loss["spectral_decoder_mse_loss"] = torch.zeros(()).to(self.device)
@@ -124,7 +124,7 @@ class ClipCriterion:
                 "label_focal_loss": torch.zeros(()).to(self.device),
                 "spectral_kl_loss": torch.zeros(()).to(self.device),
             }
-            if self.decoder_spectral_mse_enable:
+            if self.decoder_spectral_mse:
                 self.loss["spectral_decoder_mse_loss"] = torch.zeros(()).to(self.device)
         return
 
@@ -191,7 +191,7 @@ class ClipCriterion:
                                                           tracked_instances=tracked_instances)
 
         # 3. Get the detection results in current frame.
-        if self.decoder_spectral_mse_enable:
+        if self.decoder_spectral_mse:
             detection_res = {
                 "pred_logits": model_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),    # (B, Nd, n_classes)
                 "pred_boxes": model_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach(),      # (B, Nd, 4)
@@ -279,7 +279,7 @@ class ClipCriterion:
             trackinstances.boxes = model_outputs["pred_bboxes"][b][output_idx]
             trackinstances.logits = model_outputs["pred_logits"][b][output_idx]
             trackinstances.iou = torch.zeros((len(gt_idx),), dtype=torch.float)
-            if self.decoder_spectral_mse_enable:
+            if self.decoder_spectral_mse:
                 trackinstances.pred_spectral_weights = model_outputs["pred_spectral_weights"][b][output_idx]
                 trackinstances.query_spectral_weights = model_outputs["last_query_spectral_weights"][b][output_idx]# 最后一层的输入
             trackinstances = trackinstances.to(self.device)
@@ -312,7 +312,7 @@ class ClipCriterion:
                                                gt_trackinstances=gt_trackinstances,
                                                idx_to_gts_idx=outputs_idx_to_gts_idx, img_metas=img_metas)
 
-        if self.decoder_spectral_mse_enable:
+        if self.decoder_spectral_mse:
             # compute spectral decoder mse loss
             loss_spectral_decoder_mse = self.get_loss_spectral_decoder_mse(outputs=model_outputs,
                                                                         gt_trackinstances=gt_trackinstances,
@@ -323,13 +323,13 @@ class ClipCriterion:
         self.loss["box_l1_loss"] += loss_l1 * self.frame_weights[frame_idx]
         self.loss["box_giou_loss"] += loss_giou * self.frame_weights[frame_idx]
         self.loss["label_focal_loss"] += loss_label * self.frame_weights[frame_idx]
-        if self.decoder_spectral_mse_enable:
+        if self.decoder_spectral_mse:
             self.loss["spectral_decoder_mse_loss"] += loss_spectral_decoder_mse * self.frame_weights[frame_idx]
         # Update logs.
         self.log[f"frame{frame_idx}_box_l1_loss"] = loss_l1.item()
         self.log[f"frame{frame_idx}_box_giou_loss"] = loss_giou.item()
         self.log[f"frame{frame_idx}_label_focal_loss"] = loss_label.item()
-        if self.decoder_spectral_mse_enable:
+        if self.decoder_spectral_mse:
             self.log[f"frame{frame_idx}_spectral_decoder_mse_loss"] = loss_spectral_decoder_mse.item()
         self.n_gts.append(n_gts)
 
@@ -337,7 +337,7 @@ class ClipCriterion:
         if self.aux_loss:
             for i, aux_outputs in enumerate(model_outputs["aux_outputs"]):
                 # Same to 3.
-                if self.decoder_spectral_mse_enable:
+                if self.decoder_spectral_mse:
                     aux_det_res = {
                         "pred_logits": aux_outputs["pred_logits"][:, :self.n_det_queries, :].detach(),
                         "pred_boxes": aux_outputs["pred_bboxes"][:, :self.n_det_queries, :].detach(),
@@ -376,13 +376,13 @@ class ClipCriterion:
                                                                gt_trackinstances=gt_trackinstances,
                                                                idx_to_gts_idx=aux_idx_to_gts_idx, img_metas=img_metas)
 
-                if self.decoder_spectral_mse_enable:
+                if self.decoder_spectral_mse:
                     aux_loss_spectral_decoder_mse = self.get_loss_spectral_decoder_mse(outputs=model_outputs["aux_outputs"][i], gt_trackinstances=gt_trackinstances, idx_to_gts_idx=aux_idx_to_gts_idx)
 
                 self.loss["aux_box_l1_loss"] += aux_loss_l1 * self.frame_weights[frame_idx] * self.aux_weights[i]
                 self.loss["aux_box_giou_loss"] += aux_loss_giou * self.frame_weights[frame_idx] * self.aux_weights[i]
                 self.loss["aux_label_focal_loss"] += aux_loss_label * self.frame_weights[frame_idx] * self.aux_weights[i]
-                if self.decoder_spectral_mse_enable:
+                if self.decoder_spectral_mse:
                     self.loss["aux_spectral_decoder_mse_loss"] += aux_loss_spectral_decoder_mse * self.frame_weights[frame_idx] * self.aux_weights[i]
 
         # Prepare the unmatched detection results.
@@ -400,7 +400,7 @@ class ClipCriterion:
             detections.output_embed = model_outputs["outputs"][b][unmatched_indexes]
             detections.logits = model_outputs["pred_logits"][b][unmatched_indexes]
             detections.boxes = model_outputs["pred_bboxes"][b][unmatched_indexes]
-            if self.decoder_spectral_mse_enable:
+            if self.decoder_spectral_mse:
                 detections.pred_spectral_weights = model_outputs["pred_spectral_weights"][b][unmatched_indexes]
                 detections.query_spectral_weights = model_outputs["init_query_spectral_weights"][b][unmatched_indexes]
             # detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
@@ -469,7 +469,7 @@ class ClipCriterion:
                 tracked_instances[b].matched_idx = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
                 tracked_instances[b].labels = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
                 # query_spectral_weights update in query_updater
-                if self.decoder_spectral_mse_enable:
+                if self.decoder_spectral_mse:
                     tracked_instances[b].pred_spectral_weights = model_outputs["pred_spectral_weights"][b][self.n_det_queries:][~track_mask]
         return tracked_instances
 
@@ -608,5 +608,5 @@ def build(config: dict):
         aux_weights=config["AUX_LOSS_WEIGHT"],
         hidden_dim=config["HIDDEN_DIM"],
         use_dab=config["USE_DAB"],
-        decoder_spectral_mse_enable=config["USE_SPECTRAL_DECODER"]
+        decoder_spectral=config["DECODER_SPECTRAL"]
     )

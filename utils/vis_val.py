@@ -11,7 +11,7 @@ import numpy as np
 
 if __name__ == "__main__":
     # val_root_path = sys.argv[1]
-    val_root_path = '/data4/litianhao/hsmot/memotr/spectralemb/02_v2_fconv10lr_2gpu_git_reset'
+    val_root_path = '/data4/litianhao/hsmot/memotr/spectralemb/11_encoder_spectral_attn_level3'
     fig_path = os.path.join(val_root_path, 'fig')
     os.makedirs(fig_path, exist_ok=True)
     val_folder_list = glob.glob(os.path.join(val_root_path, "epoch*"))

@@ -23,7 +23,7 @@ class QueryUpdater(nn.Module):
                  update_threshold: float, long_memory_lambda: float,
                  visualize: bool = False,
                  query_spectral_weights_dim: int = 8, 
-                 decoder_spectral_enable: bool = True):
+                 decoder_spectral: bool = True):
         super(QueryUpdater, self).__init__()
         self.hidden_dim = hidden_dim
         self.ffn_dim = ffn_dim
@@ -71,7 +71,7 @@ class QueryUpdater(nn.Module):
             self.activation = nn.ReLU(inplace=True)
         
         self.query_spectral_weights_dim = query_spectral_weights_dim
-        self.decoder_spectral_enable = decoder_spectral_enable
+        self.decoder_spectral = decoder_spectral
 
         self.reset_parameters()
 
@@ -113,7 +113,7 @@ class QueryUpdater(nn.Module):
             else:
                 tracks[b].ref_pts[is_pos] = inverse_sigmoid(tracks[b][is_pos].boxes.detach().clone())
 
-            if self.decoder_spectral_enable:
+            if self.decoder_spectral:
                 tracks[b].query_spectral_weights[is_pos] = tracks[b][is_pos].pred_spectral_weights.detach().clone()
 
 
@@ -264,7 +264,7 @@ class QueryUpdater(nn.Module):
                     fake_tracks.iou = torch.zeros((1,), dtype=torch.float, device=device)
                     fake_tracks.last_output = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
                     fake_tracks.long_memory = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
-                    if self.decoder_spectral_enable:
+                    if self.decoder_spectral:
                         fake_tracks.pred_spectral_weights = torch.randn((1, self.query_spectral_weights_dim), dtype=torch.float, device=device)
                         fake_tracks.query_spectral_weights = torch.randn((1, self.query_spectral_weights_dim), dtype=torch.float, device=device)
                     active_tracks = fake_tracks
@@ -297,6 +297,6 @@ def build(config: dict):
             long_memory_lambda=config["LONG_MEMORY_LAMBDA"],
             visualize=config["VISUALIZE"],
             query_spectral_weights_dim=config["DECODER_SPECTRAL_CLUSTERS"] * 8,
-            decoder_spectral_enable=config["USE_SPECTRAL_DECODER"]
+            decoder_spectral=config["DECODER_SPECTRAL"]
         )
 

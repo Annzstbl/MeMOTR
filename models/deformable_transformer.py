@@ -21,6 +21,7 @@ from .deformable_decoder import DeformableDecoderLayer, DeformableDecoder
 
 from .deformable_encoder_spectral import DeformableEncoderLayerSpectral, DeformableEncoderSpectral
 from .deformable_decoder_spectral import DeformableDecoderLayerSpectral, DeformableDecoderSpectral
+from .deformable_encoder_spectral_global import DeformableEncoderLayerSpectralGlobal, DeformableEncoderSpectralGlobal
 from .ops.modules import MSDeformAttn, MSDeformAttnSpectral, MSDeformAttn_Rotate
 from .mlp import MLP
 from deprecated.sphinx import deprecated
@@ -40,9 +41,10 @@ class DeformableTransformer(nn.Module):
                  checkpoint_level: int = 2,
                  use_dab: bool = False,
                  visualize: bool = False,
-                 spectral_encoder: bool = False, # 是否使用光谱的encoder
-                 spectral_decoder: bool = False,
+                 encoder_spectral: bool = False, # 是否使用光谱的encoder
                  encoder_spectral_attention: bool = False,  # 是否在encoder中使用光谱attention
+                 encoder_global_token: bool = False,
+                 decoder_spectral: bool = False,
                  decoder_spectral_clusters = 1):
         """
         Args:
@@ -73,23 +75,36 @@ class DeformableTransformer(nn.Module):
         self.checkpoint_level = checkpoint_level
         self.use_dab = use_dab
         self.visualize = visualize
-        self.encoder_spectral = spectral_encoder
+        self.encoder_spectral = encoder_spectral
         self.encoder_spectral_attention = encoder_spectral_attention
-        self.decoder_spectral = spectral_decoder
+        self.encoder_global_token = encoder_global_token
+        self.decoder_spectral = decoder_spectral
         self.decoder_spectral_clusters = decoder_spectral_clusters
 
-
-        if spectral_encoder:
-            encoder_layer = DeformableEncoderLayerSpectral(
-                d_model=d_model, d_ffn=d_ffn,
-                dropout=dropout, activation=activation,
-                n_levels=n_feature_levels, n_heads=n_heads,
-                n_points=n_enc_points, sigmoid_attn=False,
-                spectral_attention=self.encoder_spectral_attention
-            )
-            self.encoder: DeformableEncoderSpectral = DeformableEncoderSpectral(encoder_layer=encoder_layer, num_layers=n_enc_layers,
+        
+        if encoder_spectral:
+            if encoder_global_token:
+                encoder_layer = DeformableEncoderLayerSpectralGlobal(
+                    d_model=d_model, d_ffn=d_ffn,
+                    dropout=dropout, activation=activation,
+                    n_levels=n_feature_levels, n_heads=n_heads,
+                    n_points=n_enc_points, sigmoid_attn=False,
+                    spectral_attention=self.encoder_spectral_attention
+                )
+                self.encoder: DeformableEncoderSpectralGlobal = DeformableEncoderSpectralGlobal(encoder_layer=encoder_layer, num_layers=n_enc_layers,
                                                                                 use_checkpoint=(self.use_checkpoint and
                                                                                 self.checkpoint_level == 1))
+            else:
+                encoder_layer = DeformableEncoderLayerSpectral(
+                    d_model=d_model, d_ffn=d_ffn,
+                    dropout=dropout, activation=activation,
+                    n_levels=n_feature_levels, n_heads=n_heads,
+                    n_points=n_enc_points, sigmoid_attn=False,
+                    spectral_attention=self.encoder_spectral_attention
+                )
+                self.encoder: DeformableEncoderSpectral = DeformableEncoderSpectral(encoder_layer=encoder_layer, num_layers=n_enc_layers,
+                                                                                    use_checkpoint=(self.use_checkpoint and
+                                                                                    self.checkpoint_level == 1))
         else:
             encoder_layer = DeformableEncoderLayer(
             d_model=d_model, d_ffn=d_ffn,
@@ -102,7 +117,7 @@ class DeformableTransformer(nn.Module):
                                                                 self.checkpoint_level == 1))
 
 
-        if spectral_decoder:
+        if decoder_spectral:
             decoder_layer = DeformableDecoderLayerSpectral(
                 d_model=d_model, d_ffn=d_ffn,
                 dropout=dropout, activation=activation,
@@ -254,7 +269,9 @@ class DeformableTransformer(nn.Module):
 
     def forward(self, srcs: List[torch.Tensor], masks: List[torch.Tensor],
                 pos_embeds: List[torch.Tensor], query_embed, ref_pts, query_mask,
-                spectral_weights: List[torch.Tensor], query_spectral_weights: torch.Tensor = None):
+                spectral_weights: List[torch.Tensor], query_spectral_weights: torch.Tensor = None,
+                global_token: List[torch.Tensor] = None, global_spectral_weights: List[torch.Tensor] = None,global_pos_embeds: List[torch.Tensor] = None,
+                ):
         '''
             src: feature from backbome
             
@@ -294,7 +311,6 @@ class DeformableTransformer(nn.Module):
             pos_embed = pos_embed.flatten(2).transpose(1, 2)    # (B, H*W, C), same as src.
 
             spectral_embed = self.spectral_embed(spectral_weight.flatten(2).transpose(1, 2)) # (B, H*W, C)
-            # spectral_embed = spectral_embed.flatten(2).transpose(1, 2)    # (B, H*W, C=8)
             lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)    # (B, H*W, C)
 
             spatial_shapes.append(spatial_shape)
@@ -303,28 +319,53 @@ class DeformableTransformer(nn.Module):
             mask_flatten.append(mask)
             spectral_embeds_flatten.append(spectral_embed) 
 
-        src_flatten = torch.cat(src_flatten, 1)
+        src_flatten = torch.cat(src_flatten, 1) #(B, sum(W_l * H_l), C)
         mask_flatten = torch.cat(mask_flatten, 1)
-        spectral_embeds_flatten = torch.cat(spectral_embeds_flatten, 1)
-        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
+        spectral_embeds_flatten = torch.cat(spectral_embeds_flatten, 1) #(B, sum(W_l * H_l), C)
+        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)#
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)   # (n_levels, 2)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1,)),
                                        spatial_shapes.prod(1).cumsum(0)[:-1]))                          # (n_levels, )
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)         # (B, n_levels, 2)
 
-        # Encoder:
-        if self.use_checkpoint and (self.checkpoint_level == 2 or self.checkpoint_level == 3):
-            from torch.utils.checkpoint import checkpoint
-            memory = checkpoint(self.encoder, src_flatten, spatial_shapes, level_start_index,
-                                valid_ratios, lvl_pos_embed_flatten, mask_flatten, spectral_embeds_flatten, use_reentrant=False)
+        if self.encoder_global_token:
+            global_token = torch.stack(global_token, 1)#(B, lvls, C)
+            global_spectral_weights = self.spectral_embed(torch.stack(global_spectral_weights, 1))#(B, lvls, 8)
+            global_lvl_pos_embed = []
+            for lvl, global_pos in enumerate(global_pos_embeds):
+                global_lvl_pos_embed.append(global_pos + self.level_embed[lvl].view(1, -1))#(B, C)
+            global_lvl_pos_embed = torch.stack(global_lvl_pos_embed, 1)#(B, lvls, C)
+
+        # 如果使用global token
+        if self.encoder_global_token:
+            if self.use_checkpoint and (self.checkpoint_level == 2 or self.checkpoint_level == 3):
+                from torch.utils.checkpoint import checkpoint
+                memory, global_token = checkpoint(self.encoder, src_flatten, spatial_shapes, level_start_index,
+                                    valid_ratios, lvl_pos_embed_flatten, mask_flatten, spectral_embeds_flatten, use_reentrant=False)
+            else:
+                memory, global_token = self.encoder(
+                    src=src_flatten, spatial_shapes=spatial_shapes,
+                    level_start_index=level_start_index, valid_ratios=valid_ratios,
+                    pos=lvl_pos_embed_flatten, padding_mask=mask_flatten, 
+                    spectral=spectral_embeds_flatten,
+                    global_token=global_token, global_spectral_weights=global_spectral_weights, global_pos_embeds=global_lvl_pos_embed
+                )
+            bs, _, c = memory.shape
+            #TODO 需要拿到最新的global token 暂时没有使用
         else:
-            memory = self.encoder(
-                src=src_flatten, spatial_shapes=spatial_shapes,
-                level_start_index=level_start_index, valid_ratios=valid_ratios,
-                pos=lvl_pos_embed_flatten, padding_mask=mask_flatten, 
-                spectral=spectral_embeds_flatten
-            )   # (B, sum(W_l * H_l), C) = (B, N, C)
-        bs, _, c = memory.shape
+            if self.use_checkpoint and (self.checkpoint_level == 2 or self.checkpoint_level == 3):
+                from torch.utils.checkpoint import checkpoint
+                memory = checkpoint(self.encoder, src_flatten, spatial_shapes, level_start_index,
+                                    valid_ratios, lvl_pos_embed_flatten, mask_flatten, spectral_embeds_flatten, use_reentrant=False)
+            else:
+                memory = self.encoder(
+                    src=src_flatten, spatial_shapes=spatial_shapes,
+                    level_start_index=level_start_index, valid_ratios=valid_ratios,
+                    pos=lvl_pos_embed_flatten, padding_mask=mask_flatten, 
+                    spectral=spectral_embeds_flatten
+                )
+            bs, _, c = memory.shape
+            
 
 
         # decoder
@@ -419,9 +460,9 @@ def build(config: dict):
         checkpoint_level=config["CHECKPOINT_LEVEL"],
         use_dab=config["USE_DAB"],
         visualize=config["VISUALIZE"],
-        spectral_encoder=config["USE_SPECTRAL_ENCODER"],
-        spectral_decoder=config["USE_SPECTRAL_DECODER"],
-        decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"], #decoder中spectral anchor的光谱数量
+        encoder_spectral=config["ENCODER_SPECTRAL"],
         encoder_spectral_attention=config["ENCODER_SPECTRAL_ATTENTION"],
+        encoder_global_token=config["ENCODER_GLOBAL_TOKEN"],
+        decoder_spectral=config["DECODER_SPECTRAL"],
+        decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
     )
-
