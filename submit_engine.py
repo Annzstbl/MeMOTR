@@ -31,7 +31,7 @@ class Submitter:
                  use_dab: bool = False,
                  visualize: bool = False,
                  npy2rgb: bool = False, 
-                 decoder_spectral_enable: bool = True):
+                 decoder_spectral: bool = True):
         self.dataset_name = dataset_name
         self.seq_name = seq_name
         self.seq_dir = path.join(split_dir, seq_name)
@@ -42,7 +42,7 @@ class Submitter:
                                       miss_tolerance=miss_tolerance,
                                       use_motion=use_motion,
                                       motion_min_length=motion_min_length, motion_max_length=motion_max_length,
-                                      visualize=visualize, use_dab=use_dab, decoder_spectral_enable=decoder_spectral_enable)
+                                      visualize=visualize, use_dab=use_dab, decoder_spectral=decoder_spectral)
         self.result_score_thresh = result_score_thresh
         self.motion_lambda = motion_lambda
         self.dataset = SeqDataset(seq_dir=self.seq_dir, npy2rgb=npy2rgb)
@@ -51,7 +51,7 @@ class Submitter:
         self.use_dab = use_dab
         self.use_motion = use_motion
         self.visualize = visualize
-        self.decoder_spectral_enable = decoder_spectral_enable
+        self.decoder_spectral = decoder_spectral
         # 对路径进行一些操作
         os.makedirs(self.predict_dir, exist_ok=True)
         if os.path.exists(os.path.join(self.predict_dir, f'{self.seq_name}.txt')):
@@ -338,7 +338,7 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module):
             motion_lambda=motion_lambda,
             miss_tolerance=miss_tolerance,
             npy2rgb = config["NPY2RGB"],
-            decoder_spectral_enable= config["USE_SPECTRAL_DECODER"]
+            decoder_spectral= config["DECODER_SPECTRAL"]
         )
         submitter.run()
 

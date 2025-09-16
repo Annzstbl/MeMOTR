@@ -14,7 +14,7 @@ class RuntimeTracker:
     def __init__(self, det_score_thresh: float = 0.7, track_score_thresh: float = 0.6,
                  miss_tolerance: int = 5,
                  use_motion: bool = False, motion_min_length: int = 3, motion_max_length: int = 5,
-                 visualize: bool = False, use_dab: bool = True, decoder_spectral_enable=True):
+                 visualize: bool = False, use_dab: bool = True, decoder_spectral=True):
         self.det_score_thresh = det_score_thresh
         self.track_score_thresh = track_score_thresh
         self.miss_tolerance = miss_tolerance
@@ -25,7 +25,7 @@ class RuntimeTracker:
         self.motion_max_length = motion_max_length
         self.motions: Dict[Motion] = {}
         self.use_dab = use_dab
-        self.decoder_spectral_enable = decoder_spectral_enable
+        self.decoder_spectral = decoder_spectral
 
     def update(self, model_outputs: dict, tracks: List[TrackInstances]):
         assert len(tracks) == 1
@@ -41,7 +41,7 @@ class RuntimeTracker:
         tracks[0].logits = model_outputs["pred_logits"][0][n_dets:]
         tracks[0].output_embed = model_outputs["outputs"][0][n_dets:]
         tracks[0].scores = logits_to_scores(tracks[0].logits)
-        if self.decoder_spectral_enable:
+        if self.decoder_spectral:
             tracks[0].pred_spectral_weights = model_outputs["pred_spectral_weights"][0][n_dets:]
             tracks[0].query_spectral_weights = model_outputs["pred_spectral_weights"][0][n_dets:]
         # tracks[0].query_spectral_weights = model_outputs["last_query_spectral_weights"][0][n_dets:]
@@ -80,7 +80,7 @@ class RuntimeTracker:
             )
         new_tracks.disappear_time = torch.zeros((len(new_tracks.logits), ), dtype=torch.long)
         new_tracks.labels = torch.max(new_tracks.scores, dim=-1).indices
-        if self.decoder_spectral_enable:
+        if self.decoder_spectral:
             new_tracks.query_spectral_weights = model_outputs["pred_spectral_weights"][0][:n_dets][new_tracks_idxes]
             new_tracks.pred_spectral_weights = model_outputs["pred_spectral_weights"][0][:n_dets][new_tracks_idxes]
 
