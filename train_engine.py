@@ -99,6 +99,7 @@ def train(config: dict):
     use_checkpoint = "USE_CHECKPOINT" in config and config["USE_CHECKPOINT"]
 
     # log记录开始时间
+    train_logger.show(head=f"训练开始 Start Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
     train_logger.write(head=f"训练开始 Start Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", filename="log.txt", mode="a")
 
     # Training:
@@ -180,6 +181,7 @@ def train(config: dict):
         train_logger.flush_buffers()
     # log记录结束时间
     train_logger.write(head=f"训练结束 End Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", filename="log.txt", mode="a")
+    train_logger.show(head=f"训练结束 End Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
     return
 
 

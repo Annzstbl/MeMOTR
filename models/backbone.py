@@ -158,18 +158,49 @@ class Backbone(nn.Module):
         return res, se_weights
 
 
-class BackboneWithPE(nn.Module):
+
+class BackboneWoPe(nn.Module):
+    """
+        包装
+    """
+    def __init__(self, backbone: nn.Module):
+        super(BackboneWoPe, self).__init__()
+        self.backbone = backbone
+        # self.position_embedding = position_embedding
+        self.strides = backbone.strides
+        self.num_channels = backbone.num_channels
+
+    def forward(self, ntensor: NestedTensor) -> List[NestedTensor]:
+        backbone_outputs = self.backbone(ntensor)
+        features: List[NestedTensor] = list()
+        # pos_embeds: List[torch.Tensor] = list()
+        # Image Features
+        for _, output in sorted(backbone_outputs.items()):
+            features.append(output)
+        # Position Embedding
+        # for feature in features:
+            # pos_embeds.append(self.position_embedding(feature))
+        # return features, pos_embeds     # (B, C, H, W), (B, 2*num_pos_feats, H, W)，C is different in different layers.
+        return features
+
+    def n_inter_layers(self):
+        return len(self.strides)
+
+    def n_inter_channels(self):
+        return self.num_channels
+
+
+
+
+class BackboneWithPE(BackboneWoPe):
     """
     Backbone with Position Embedding.
     Input: NestedTensor in (B, C, H, W)
     Output: Multi layer (B, C, H, W) as Image Features, multi layer (B, 2*num_pos_feats, H, W) as Position Embedding.
     """
     def __init__(self, backbone: nn.Module, position_embedding: nn.Module):
-        super(BackboneWithPE, self).__init__()
-        self.backbone = backbone
+        super(BackboneWithPE, self).__init__(backbone)
         self.position_embedding = position_embedding
-        self.strides = backbone.strides
-        self.num_channels = backbone.num_channels
 
     def forward(self, ntensor: NestedTensor) -> (List[NestedTensor], List[torch.Tensor]):
         backbone_outputs = self.backbone(ntensor)
@@ -184,33 +215,60 @@ class BackboneWithPE(nn.Module):
 
         return features, pos_embeds     # (B, C, H, W), (B, 2*num_pos_feats, H, W)，C is different in different layers.
 
-    def n_inter_layers(self):
-        return len(self.strides)
 
-    def n_inter_channels(self):
-        return self.num_channels
+class BackboneWoPe_SpectralWeights(BackboneWoPe):
+    def __init__(self, backbone: nn.Module, spectral_embedding: nn.Module, weights_version="v1"):
+        super(BackboneWoPe_SpectralWeights, self).__init__(backbone)
+        self.spectral_embedding = spectral_embedding
+        self.weights_version = weights_version
+        
+            
+    def forward_v1(self, ntensor: NestedTensor):
+        backbone_outputs, se_weights = self.backbone(ntensor)
+        features: List[NestedTensor] = []
+        spectral_embeds: List[torch.Tensor] = []
+        # 取特征
+        for _, output in sorted(backbone_outputs.items()):
+            features.append(output)
+        # 构建spectral_weights_list
+        for feature in features:
+            spectral_embeds.append(self.spectral_embedding(se_weights, feature))
 
+        return features, spectral_embeds
 
+    def forward_v2(self, ntensor: NestedTensor):
+        layers=["layer2", "layer3", "layer4"]
+        backbone_outputs, se_weights = self.backbone(ntensor)
+        features: List[NestedTensor] = []
+        spectral_embeds: List[torch.Tensor] = []
+        # 取特征
+        for _, output in sorted(backbone_outputs.items()):
+            features.append(output)
+        # 构建spectral_weights_list
+        for feature, layer in zip(features, layers):
+            spectral_embeds.append(self.spectral_embedding(se_weights, feature, layer=layer))
 
-class Backbone_PE_SpectralWeights(nn.Module):
+        return features, spectral_embeds
+    
+    def forward(self, ntensor: NestedTensor):
+        if self.weights_version == "v1":
+            return self.forward_v1(ntensor)
+        elif self.weights_version == "v2":
+            return self.forward_v2(ntensor)
+        elif self.weights_version == "v3":
+            return self.forward_v2(ntensor)#复用
+        else:
+            raise ValueError(f"Unsupported weights_version: {self.weights_version}")
+        
+class Backbone_PE_SpectralWeights(BackboneWithPE):
     """
     Backbone with Position Embedding and Spectral Weights.
     输出: 多尺度特征、位置编码、每个尺度的spectral_weights（如SE权重）。
     """
     def __init__(self, backbone: nn.Module, position_embedding: nn.Module, spectral_embedding: nn.Module, weights_version="v1"):
-        super().__init__()
-        self.backbone = backbone
-        self.position_embedding = position_embedding
-        self.strides = backbone.strides
-        self.num_channels = backbone.num_channels
+        super(Backbone_PE_SpectralWeights, self).__init__(backbone, position_embedding)
         self.spectral_embedding = spectral_embedding
         self.weights_version = weights_version
-
-    def n_inter_layers(self):
-        return len(self.strides)
-
-    def n_inter_channels(self):
-        return self.num_channels
 
     def forward_v1(self, ntensor: NestedTensor):
         backbone_outputs, se_weights = self.backbone(ntensor)
@@ -419,4 +477,22 @@ def build(config: dict) -> Union[BackboneWithPE, Backbone_PE_SpectralWeights]:
         return BackboneWithPE(backbone=backbone, position_embedding=position_embedding)
 
 
+def build_woPe(config: dict) -> Union[BackboneWoPe, BackboneWoPe_SpectralWeights]:
+    CONFIG_STEM=config["STEM"]
+    backbone = Backbone(backbone_name=config["BACKBONE"], train_backbone=True, return_interm_layers=True, input_channel=config["INPUT_CHANNELS"], stem=CONFIG_STEM)
 
+    num_levels = config["NUM_FEATURE_LEVELS"]
+    assert (num_levels == 3 or num_levels == 4), "num_levels should be 3 or 4"
+    resnet_output_layer = ["layer2", "layer3", "layer4"] if num_levels == 3 else ["layer2", "layer3", "layer4", "layer_extra"]
+
+    if CONFIG_STEM=="conv3d_se":
+        spectral_embedding = SpectralEmbedding()
+        return BackboneWoPe_SpectralWeights(backbone=backbone, spectral_embedding=spectral_embedding, weights_version="v1")
+    elif CONFIG_STEM=="conv3d_se_v2":
+        spectral_embedding = SpectralEmbeddingConv(resnet_output_layer=resnet_output_layer)
+        return BackboneWoPe_SpectralWeights(backbone=backbone, spectral_embedding=spectral_embedding, weights_version="v2")
+    elif CONFIG_STEM=="conv3d_se_v3":
+        spectral_embedding = SpectralEmbeddingV3(resnet_output_layer=resnet_output_layer)
+        return BackboneWoPe_SpectralWeights(backbone=backbone, spectral_embedding=spectral_embedding, weights_version="v3")
+    else:
+        return BackboneWoPe(backbone=backbone)

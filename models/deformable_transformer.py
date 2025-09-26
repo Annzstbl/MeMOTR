@@ -14,7 +14,7 @@ import math
 import torch.nn as nn
 
 from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
-from typing import List
+from typing import List, Optional
 
 from .deformable_encoder import DeformableEncoderLayer, DeformableEncoder
 from .deformable_decoder import DeformableDecoderLayer, DeformableDecoder
@@ -22,6 +22,7 @@ from .deformable_decoder import DeformableDecoderLayer, DeformableDecoder
 from .deformable_encoder_spectral import DeformableEncoderLayerSpectral, DeformableEncoderSpectral
 from .deformable_decoder_spectral import DeformableDecoderLayerSpectral, DeformableDecoderSpectral
 from .deformable_encoder_spectral_global import DeformableEncoderLayerSpectralGlobal, DeformableEncoderSpectralGlobal
+from .deformable_encoder_spectral_rope import DeformableEncoderLayerSpectralRope, DeformableEncoderSpectralRope
 from .ops.modules import MSDeformAttn, MSDeformAttnSpectral, MSDeformAttn_Rotate
 from .mlp import MLP
 from deprecated.sphinx import deprecated
@@ -45,7 +46,8 @@ class DeformableTransformer(nn.Module):
                  encoder_spectral_attention: bool = False,  # 是否在encoder中使用光谱attention
                  encoder_global_token: bool = False,
                  decoder_spectral: bool = False,
-                 decoder_spectral_clusters = 1):
+                 decoder_spectral_clusters = 1,
+                 rope_pos_module = None):
         """
         Args:
             d_model:
@@ -80,9 +82,13 @@ class DeformableTransformer(nn.Module):
         self.encoder_global_token = encoder_global_token
         self.decoder_spectral = decoder_spectral
         self.decoder_spectral_clusters = decoder_spectral_clusters
-
+        self.rope_pos_module = rope_pos_module
+        self.rope_pos = self.rope_pos_module is not None
         
         if encoder_spectral:
+            # 判断encoder_global_token和rope_pos_module不能同时为真
+            assert not (encoder_global_token and rope_pos_module), "encoder_global_token and rope_pos_module cannot be True at the same time"
+            
             if encoder_global_token:
                 encoder_layer = DeformableEncoderLayerSpectralGlobal(
                     d_model=d_model, d_ffn=d_ffn,
@@ -94,6 +100,18 @@ class DeformableTransformer(nn.Module):
                 self.encoder: DeformableEncoderSpectralGlobal = DeformableEncoderSpectralGlobal(encoder_layer=encoder_layer, num_layers=n_enc_layers,
                                                                                 use_checkpoint=(self.use_checkpoint and
                                                                                 self.checkpoint_level == 1))
+            elif rope_pos_module:
+                encoder_layer = DeformableEncoderLayerSpectralRope(
+                    d_model=d_model, d_ffn=d_ffn,
+                    dropout=dropout, activation=activation,
+                    n_levels=n_feature_levels, n_heads=n_heads,
+                    n_points=n_enc_points, sigmoid_attn=False,
+                    spectral_attention=self.encoder_spectral_attention
+                )
+                self.encoder: DeformableEncoderSpectralRope = DeformableEncoderSpectralRope(encoder_layer=encoder_layer, num_layers=n_enc_layers,
+                                                                                use_checkpoint=(self.use_checkpoint and
+                                                                                self.checkpoint_level == 1),
+                                                                                rope_pos_module=self.rope_pos_module)
             else:
                 encoder_layer = DeformableEncoderLayerSpectral(
                     d_model=d_model, d_ffn=d_ffn,
@@ -106,6 +124,8 @@ class DeformableTransformer(nn.Module):
                                                                                     use_checkpoint=(self.use_checkpoint and
                                                                                     self.checkpoint_level == 1))
         else:
+            assert rope_pos_module is None, "rope_pos_module should be None when encoder_spectral is False"
+            assert not encoder_global_token, "encoder_global_token should be False when encoder_spectral is False"
             encoder_layer = DeformableEncoderLayer(
             d_model=d_model, d_ffn=d_ffn,
             dropout=dropout, activation=activation,
@@ -153,8 +173,11 @@ class DeformableTransformer(nn.Module):
                                                                 use_dab=self.use_dab,
                                                                 visualize=self.visualize)
 
-        # 把feature level映射为d_model的embedding
-        self.level_embed = nn.Parameter(torch.Tensor(n_feature_levels, d_model))
+        if not self.rope_pos:
+            # lvl embedding
+            self.level_embed = nn.Parameter(torch.Tensor(n_feature_levels, d_model))
+
+
         # 把光谱权重映射为d_model的embedding
         self.spectral_embed = MLP(
                 input_dim=8,
@@ -196,7 +219,8 @@ class DeformableTransformer(nn.Module):
             else:
                 xavier_uniform_(self.reference_points.weight.data, gain=1.0)
                 constant_(self.reference_points.bias.data, 0.)
-        normal_(self.level_embed)
+        if not self.rope_pos:
+            normal_(self.level_embed)
 
     @staticmethod
     def get_proposal_pos_embed(proposals):
@@ -268,7 +292,7 @@ class DeformableTransformer(nn.Module):
         return valid_ratio                          # (B, 2)
 
     def forward(self, srcs: List[torch.Tensor], masks: List[torch.Tensor],
-                pos_embeds: List[torch.Tensor], query_embed, ref_pts, query_mask,
+                pos_embeds: Optional[List[torch.Tensor]], query_embed, ref_pts, query_mask,
                 spectral_weights: List[torch.Tensor], query_spectral_weights: torch.Tensor = None,
                 global_token: List[torch.Tensor] = None, global_spectral_weights: List[torch.Tensor] = None,global_pos_embeds: List[torch.Tensor] = None,
                 ):
@@ -299,30 +323,55 @@ class DeformableTransformer(nn.Module):
         spatial_shapes = []
         spectral_embeds_flatten = []
 
-        # 展平, 位置编码加上层级权重, encoder光谱权重映射为特征
-        for lvl, (src, mask, pos_embed, spectral_weight) in enumerate(zip(srcs, masks, pos_embeds, spectral_weights)):
-            # src.shape = (B, C, H, W) in lvl level.
-            # mask.shape = (B, H, W) in lvl level.
-            # pos_embed.shape = (B, C, H, W) in lvl level.
-            bs, c, h, w = src.shape
-            spatial_shape = (h, w)
-            src = src.flatten(2).transpose(1, 2)                # (B, H*W, C)
-            mask = mask.flatten(1)                              # (B, H*W)
-            pos_embed = pos_embed.flatten(2).transpose(1, 2)    # (B, H*W, C), same as src.
+        assert spectral_weights is not None, "只支持spectral encoder"
 
-            spectral_embed = self.spectral_embed(spectral_weight.flatten(2).transpose(1, 2)) # (B, H*W, C)
-            lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)    # (B, H*W, C)
+        if pos_embeds is None: #使用了rope编码
+            for lvl, (src, mask, spectral_weight) in enumerate(zip(srcs, masks, spectral_weights)):
+                # src.shape = (B, C, H, W) in lvl level.
+                # mask.shape = (B, H, W) in lvl level.
+                # pos_embed.shape = (B, C, H, W) in lvl level.
+                bs, c, h, w = src.shape
+                spatial_shape = (h, w)
+                src = src.flatten(2).transpose(1, 2)                # (B, H*W, C)
+                mask = mask.flatten(1)                              # (B, H*W)
+                # pos_embed = pos_embed.flatten(2).transpose(1, 2)    # (B, H*W, C), same as src.
 
-            spatial_shapes.append(spatial_shape)
-            lvl_pos_embed_flatten.append(lvl_pos_embed)
-            src_flatten.append(src)
-            mask_flatten.append(mask)
-            spectral_embeds_flatten.append(spectral_embed) 
+                spectral_embed = self.spectral_embed(spectral_weight.flatten(2).transpose(1, 2)) # (B, H*W, C)
+                # lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)    # (B, H*W, C)
+
+                spatial_shapes.append(spatial_shape)
+                # lvl_pos_embed_flatten.append(lvl_pos_embed)
+                src_flatten.append(src)
+                mask_flatten.append(mask)
+                spectral_embeds_flatten.append(spectral_embed) 
+        else:
+            # 展平, 位置编码加上层级权重, encoder光谱权重映射为特征
+            for lvl, (src, mask, pos_embed, spectral_weight) in enumerate(zip(srcs, masks, pos_embeds, spectral_weights)):
+                # src.shape = (B, C, H, W) in lvl level.
+                # mask.shape = (B, H, W) in lvl level.
+                # pos_embed.shape = (B, C, H, W) in lvl level.
+                bs, c, h, w = src.shape
+                spatial_shape = (h, w)
+                src = src.flatten(2).transpose(1, 2)                # (B, H*W, C)
+                mask = mask.flatten(1)                              # (B, H*W)
+                pos_embed = pos_embed.flatten(2).transpose(1, 2)    # (B, H*W, C), same as src.
+
+                spectral_embed = self.spectral_embed(spectral_weight.flatten(2).transpose(1, 2)) # (B, H*W, C)
+                lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)    # (B, H*W, C)
+
+                spatial_shapes.append(spatial_shape)
+                lvl_pos_embed_flatten.append(lvl_pos_embed)
+                src_flatten.append(src)
+                mask_flatten.append(mask)
+                spectral_embeds_flatten.append(spectral_embed) 
 
         src_flatten = torch.cat(src_flatten, 1) #(B, sum(W_l * H_l), C)
         mask_flatten = torch.cat(mask_flatten, 1)
         spectral_embeds_flatten = torch.cat(spectral_embeds_flatten, 1) #(B, sum(W_l * H_l), C)
-        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)#
+        if self.rope_pos:
+            lvl_pos_embed_flatten = None#(B, sum(W_l * H_l), C)
+        else:
+            lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)#(B, sum(W_l * H_l), C)
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)   # (n_levels, 2)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1,)),
                                        spatial_shapes.prod(1).cumsum(0)[:-1]))                          # (n_levels, )
@@ -439,7 +488,7 @@ class DeformableTransformer(nn.Module):
         self.decoder.spectral_embed = spectral_embed
         return
 
-def build(config: dict):
+def build(config: dict, rope_pos_module: Optional[nn.Module] = None):
     return DeformableTransformer(
         d_model=config["HIDDEN_DIM"],
         d_ffn=config["FFN_DIM"],
@@ -465,4 +514,5 @@ def build(config: dict):
         encoder_global_token=config["ENCODER_GLOBAL_TOKEN"],
         decoder_spectral=config["DECODER_SPECTRAL"],
         decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
+        rope_pos_module=rope_pos_module
     )

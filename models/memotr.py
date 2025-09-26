@@ -16,6 +16,8 @@ from .query_updater import build as build_query_updater
 from .utils import get_clones, pos_to_pos_embed
 
 from .backbone import build as build_backbone_with_pe
+from .backbone import build_woPe as build_backbone_woPe
+from .position_embedding_rope_nd import build as build_rope_pos
 from .deformable_transformer import build as build_deformable_transformer
 
 from utils.nested_tensor import NestedTensor
@@ -37,7 +39,9 @@ class MeMOTR(nn.Module):
                  decoder_spectral: bool = False,
                  decoder_spectral_refine: bool = False,
                  decoder_spectral_clusters: int = 1,
-                 encoder_global_token: bool = False): 
+                 encoder_spectral: bool = False,
+                 encoder_global_token: bool = False,
+                 rope_pos_module = None): 
         super(MeMOTR, self).__init__()
 
         self.num_classes = num_classes
@@ -56,7 +60,8 @@ class MeMOTR(nn.Module):
         self.decoder_spectral_refine = decoder_spectral_refine
         self.decoder_spectral_clusters = decoder_spectral_clusters
         self.encoder_global_token = encoder_global_token
-
+        self.encoder_spectral = encoder_spectral
+        
         # Net:
         self.backbone = backbone
         self.transformer = transformer
@@ -76,6 +81,13 @@ class MeMOTR(nn.Module):
         if self.decoder_spectral:
             self.det_spectral_anchor = nn.Parameter(torch.randn(self.n_det_queries, self.decoder_spectral_clusters* 8))  # (N_det, decoder_spectral_clusters* 8) # 8光谱              
         
+        self.rope_pos_module = rope_pos_module
+        if self.rope_pos_module is not None:
+            self.rope_pos = True # enable bool
+        else:
+            self.rope_pos = False
+
+
         assert self.n_feature_levels > 1
         n_backbone_inter_layers = backbone.n_inter_layers()
         n_backbone_inter_channels = backbone.n_inter_channels()
@@ -144,14 +156,19 @@ class MeMOTR(nn.Module):
         else:
             feature_tuple = self.backbone(frame)
 
-        # 输出3个表示有光谱权重
-        if isinstance(feature_tuple, (tuple, list)) and len(feature_tuple) == 3:
-            features, pos, spectral_weights = feature_tuple
-        elif isinstance(feature_tuple, (tuple, list)) and len(feature_tuple) == 2:
-            features, pos = feature_tuple
-            spectral_weights = None
+        # 解包
+        pos = None
+        spectral_weights = None
+        if self.rope_pos:
+            if self.encoder_spectral:
+                features, spectral_weights = feature_tuple
+            else:
+                features = feature_tuple
         else:
-            raise ValueError("outputs 必须是长度为2或3的tuple或list")
+            if self.encoder_spectral:
+                features, pos, spectral_weights = feature_tuple
+            else:
+                features, pos = feature_tuple
 
         srcs, masks = [], []
         for layer, feat in enumerate(features):
@@ -169,7 +186,8 @@ class MeMOTR(nn.Module):
                     src = self.feature_projs[layer](srcs[-1])
                 mask = frame.masks
                 mask = F.interpolate(mask[None, ...].float(), size=src.shape[-2:])[0].to(torch.bool)
-                pos.append(self.backbone.position_embedding(NestedTensor(src, mask)).to(src.device))
+                if pos is not None:
+                    pos.append(self.backbone.position_embedding(NestedTensor(src, mask)).to(src.device))
                 if spectral_weights is not None:
                     spectral_weights.append(self.backbone.spectral_embedding(spectral_weights[0], NestedTensor(src, mask)).to(src.device))
                 srcs.append(src)
@@ -459,12 +477,21 @@ def build(config: dict):
     assert config["DATASET"] in dataset_num_classes, f"Do not know the class num of {config['DATASET']} dataset."
     num_classes = dataset_num_classes[config["DATASET"]]
 
-    backbone_with_pe = build_backbone_with_pe(config=config)
-    deformable_transformer = build_deformable_transformer(config=config)
+    rope_pos = config["ROPE_POS"]
+    if rope_pos:
+        backbone = build_backbone_woPe(config=config)
+        rope_pos_module = build_rope_pos(config=config)
+
+    else:
+        backbone = build_backbone_with_pe(config=config)
+        rope_pos_module = None
+
+    # backbone_with_pe = build_backbone_with_pe(config=config)
+    deformable_transformer = build_deformable_transformer(config=config, rope_pos_module=rope_pos_module)
     query_updater = build_query_updater(config=config)
 
     return MeMOTR(
-        backbone=backbone_with_pe,
+        backbone=backbone,
         transformer=deformable_transformer,
         query_updater=query_updater,
         num_classes=num_classes,
@@ -483,4 +510,6 @@ def build(config: dict):
         decoder_spectral_refine=config["DECODER_SPECTRAL_REFINE"],
         decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"], #decoder中spectral anchor的光谱数量
         encoder_global_token=config["ENCODER_GLOBAL_TOKEN"],
+        encoder_spectral=config["ENCODER_SPECTRAL"],
+        rope_pos_module=rope_pos_module,
     )

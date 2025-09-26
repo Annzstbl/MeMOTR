@@ -1,10 +1,6 @@
-# @Author       : Ruopeng Gao
-# @Description  : Config for training DanceTrack.
-#                 We change some parameters compared with our paper, looking forward more stable training convergence.
-
-AVAILABLE_GPUS: 0,1
-
 PARENT_CONFIG: ./default.yaml
+
+AVAILABLE_GPUS: 4,5  #if not set, will use all gpus
 
 USE_CHECKPOINT: False
 DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
@@ -13,19 +9,23 @@ CHECKPOINT_LEVEL: 2               # gradient checkpoint level.
                                   # As the number increases (from 1 to 4), the memory cost increases.
                                   # We have deleted many comments in this official code simplicity,
                                   # if you have any questions, feel free to contact with the author.
-SAMPLE_LENGTHS: [5, 3, 4, 5]
-# NUM_FEATURE_LEVELS: 3
-RESIZE: [1184]
+NUM_FEATURE_LEVELS: 4
+
+# SAMPLE_LENGTHS: [5, 3, 4, 5]
+
+OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/12_2_global_resumeQueryUpdater
+SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/12_2_global_resumeQueryUpdater
+
+
 
 ENCODER_SPECTRAL: True
-ENCODER_GLOBAL_TOKEN: False
-ROPE_POS: True
+ENCODER_GLOBAL_TOKEN: True
 
 # resume
-# RESUME: /data4/litianhao/hsmot/memotr/spectralemb/12_global/checkpoint_19.pth
-# RESUME_SCHEDULER: True
-# PRETRAINED_MODEL: 
-# EPOCHS: 25
-# ONLY_TRAIN_QUERY_UPDATER_AFTER: 20
-# LR_DROP_RATE: 0.1
-# LR_DROP_MILESTONES: [12]
+RESUME: /data4/litianhao/hsmot/memotr/spectralemb/12_global/checkpoint_19.pth
+RESUME_SCHEDULER: True
+PRETRAINED_MODEL: 
+EPOCHS: 25
+ONLY_TRAIN_QUERY_UPDATER_AFTER: 20
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [12]
