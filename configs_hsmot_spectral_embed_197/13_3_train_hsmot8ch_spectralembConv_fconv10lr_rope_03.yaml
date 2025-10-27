@@ -1,6 +1,6 @@
 PARENT_CONFIG: ./default.yaml
 
-AVAILABLE_GPUS: 2,3  #if not set, will use all gpus
+AVAILABLE_GPUS: 4,5  #if not set, will use all gpus
 
 USE_CHECKPOINT: False
 DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
@@ -13,8 +13,8 @@ NUM_FEATURE_LEVELS: 4
 
 # SAMPLE_LENGTHS: [5, 3, 4, 5]
 
-OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/13_rope_01
-SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/13_rope_01
+OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/13_rope_3
+SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/13_rope_3
 
 
 
@@ -25,7 +25,7 @@ ENCODER_SPECTRAL: True
 # pos
 ROPE_POS: False
 ROPE_MIN_FREQ: 1
-ROPE_MAX_FREQ: 64
+ROPE_MAX_FREQ: 100
 ROPE_P_ZERO_FREQS: 0.0
 ROPE_DIMENSION: 3
 ROPE_WEIGHTS: [0.75, 1.0, 0.5]
