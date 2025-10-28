@@ -1,0 +1,9 @@
+AVAILABLE_GPUS: 1,2
+
+PARENT_CONFIG: ./default.yaml
+
+ENCODER_SPECTRAL: True
+
+# OUTPUTS_DIR: /data/users/litianhao01/hsmot_code/workdir_2/memotr/debug
+OUTPUTS_DIR: /data/users/litianhao01/hsmot/workdir_2/memotr/debug_223
+SUBMIT_DIR: /data/users/litianhao01/hsmot/workdir_2/memotr/debug_223
