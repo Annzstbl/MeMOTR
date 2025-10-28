@@ -41,7 +41,7 @@ def train(config: dict):
         model = load_pretrained_model(model, config["PRETRAINED_MODEL"], show_details=True, logger=train_logger)
 
     # Data process
-    dataset_train = build_dataset(config=config, split="train")
+    dataset_train = build_dataset(config=config, split="train", logger=train_logger)
     sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
     dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
                                         batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])

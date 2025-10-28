@@ -25,7 +25,7 @@ from hsmot.datasets.pipelines.formatting import MotCollect, MotDefaultFormatBund
 
 
 class hsmot_8ch(MOTDataset):
-    def __init__(self, config: dict, split: str, transform, version='le135'):
+    def __init__(self, config: dict, split: str, transform, version='le135', logger=None):
         super(hsmot_8ch, self).__init__(config=config, split=split, transform=transform)
 
         self.config = config
@@ -58,12 +58,26 @@ class hsmot_8ch(MOTDataset):
         self.labels_dir = os.path.join(config["DATA_ROOT"], self.dataset_name, split, "mot")
 
         vid_white_list = config["VID_WHITE_LIST"] if "VID_WHITE_LIST" in config else None
+        self.train_half = config["TRAIN_HALF"] if "TRAIN_HALF" in config else False
+        if self.train_half:
+            self.train_half_list = set()
+            self.train_half_file = os.path.join(config["DATA_ROOT"], self.dataset_name, "train_half.txt")
+            with open(self.train_half_file, 'r') as f:
+                for line in f:
+                    self.train_half_list.add(line.strip())
+            if logger is not None:
+                logger.show(head=f"Usetrain half list from {self.train_half_file}, total {len(self.train_half_list)} vids.")
+                logger.write(head=f"Usetrain half list from {self.train_half_file}, total {len(self.train_half_list)} vids.", filename="log.txt", mode="a")
+            self.vid_white_list = None
 
         self.labels_full = defaultdict(lambda: defaultdict(list))
         for vid in os.listdir(self.labels_dir):
             # 过滤视频序列
             if vid_white_list is not None and os.path.splitext(vid)[0] not in vid_white_list:
                 print(f'skip vid {vid}')
+                continue
+            if self.train_half and os.path.splitext(vid)[0] not in self.train_half_list:
+                logger.write(head=f'skip vid {vid} not in train half list', filename="log.txt", mode="a")
                 continue
             # else:
                 # print(f'loading vid {vid}')
@@ -263,7 +277,7 @@ def transforms_for_eval():
     ])
 
 
-def build(config: dict, split: str):
+def build(config: dict, split: str, logger):
     resize = config["RESIZE"] if "RESIZE" in config else None
     if split == "train":
         return hsmot_8ch(
@@ -279,7 +293,8 @@ def build(config: dict, split: str):
                 spectral_n_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
                 spectral_method=config["DECODER_SPECTRAL_METHOD"],
                 resize=resize
-            )
+            ),
+            logger = logger
         )
     elif split == "test":
         return hsmot_8ch(config=config, split=split, transform=transforms_for_eval())

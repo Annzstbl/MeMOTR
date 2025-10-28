@@ -25,7 +25,7 @@ from utils.utils import is_distributed
 from .hsmot_8ch import build as build_hsmot_8ch
 
 
-def build_dataset(config: dict, split: str) -> MOTDataset:
+def build_dataset(config: dict, split: str, logger) -> MOTDataset:
     if config["DATASET"] == "DanceTrack":
         return build_dancetrack(config=config, split=split)
     elif config["DATASET"] == "SportsMOT":
@@ -37,7 +37,7 @@ def build_dataset(config: dict, split: str) -> MOTDataset:
     elif config["DATASET"] == "BDD100K":
         return build_bbd100k(config=config, split=split)
     elif config["DATASET"] == "hsmot_8ch":
-        return build_hsmot_8ch(config=config, split=split)
+        return build_hsmot_8ch(config=config, split=split, logger=logger)
     else:
         raise ValueError(f"Dataset {config['DATASET']} is not supported!")
 
