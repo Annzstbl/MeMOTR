@@ -29,7 +29,7 @@ from hsmot.util.dist import box_iou_rotated_norm_bboxes1
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
                  max_frame_length: int, n_aux: int, merge_det_track_layer: int = 0, aux_weights: List = None,
-                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = True):
+                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = False, scem: bool = False):
         """
         Init a criterion function.
 
@@ -55,6 +55,7 @@ class ClipCriterion:
         self.merge_det_track_layer = merge_det_track_layer
 
         self.gt_trackinstances_list: None | List[List[TrackInstances]] = None     # (clip_size, B)
+        self.target_list: None | List[List[Dict]] = None
         self.loss = {}
         self.log = {}
         self.n_gts = []
@@ -62,6 +63,7 @@ class ClipCriterion:
         self.kl_cos_scheduler_epoch = kl_cos_scheduler_epoch
         self.kl_weight_eta = kl_weight_eta
         self.decoder_spectral_mse = decoder_spectral
+        self.scem = scem
 
     def set_epoch(self, epoch: int):
         self.epoch = epoch
@@ -89,16 +91,27 @@ class ClipCriterion:
         clip_size = len(batch["imgs"][0])
         batch_size = len(batch["imgs"])
         self.gt_trackinstances_list = []
+        self.target_list = []
         for c in range(clip_size):
             gt_trackinstances = TrackInstances.init_tracks(batch, hidden_dim=hidden_dim,
                                                            num_classes=num_classes, device=self.device)
+            target_list = []
             for b in range(batch_size):
                 gt_trackinstances[b].ids = batch["infos"][b][c]["obj_ids"]
                 gt_trackinstances[b].labels = batch["infos"][b][c]["labels"]
                 gt_trackinstances[b].boxes = batch["infos"][b][c]["boxes"]
                 gt_trackinstances[b].norm_boxes = batch["infos"][b][c]["norm_boxes"]
                 gt_trackinstances[b].pred_spectral_weights = batch["infos"][b][c]["spectral_weights"]
+                # gt_trackinstances[b].heatmap = batch["infos"][b][c]["heatmap"]
                 gt_trackinstances[b] = gt_trackinstances[b].to(self.device)
+                
+                if 'heatmap' in batch["infos"][b][c]:
+                    _target = {
+                        "heatmap" : batch["infos"][b][c]["heatmap"].to(self.device)
+                    }
+                    target_list.append(_target)
+
+            self.target_list.append(target_list)
             self.gt_trackinstances_list.append(gt_trackinstances)
 
         self.n_gts = []
@@ -126,6 +139,12 @@ class ClipCriterion:
             }
             if self.decoder_spectral_mse:
                 self.loss["spectral_decoder_mse_loss"] = torch.zeros(()).to(self.device)
+
+        if self.scem:
+            self.loss["scem_nll_loss"] = torch.zeros(()).to(self.device)
+            self.loss["scem_bce_loss"] = torch.zeros(()).to(self.device)
+            self.loss["scem_dice_loss"] = torch.zeros(()).to(self.device)
+
         return
 
     def get_sum_loss_dict(self, loss_dict: dict):
@@ -140,6 +159,12 @@ class ClipCriterion:
                 return self.weight["spectral_kl_loss"]
             elif "spectral_decoder_mse_loss" in loss_name:
                 return self.weight["spectral_decoder_mse_loss"]
+            elif "scem_nll_loss" in loss_name:
+                return self.weight["scem_nll_loss"]
+            elif "scem_bce_loss" in loss_name:
+                return self.weight["scem_bce_loss"]
+            elif "scem_dice_loss" in loss_name:
+                return self.weight["scem_dice_loss"]
 
         loss = sum([
             get_weight(k) * v for k, v in loss_dict.items()
@@ -157,12 +182,19 @@ class ClipCriterion:
         n_gts = torch.clamp(n_gts / distributed_world_size(), min=1).tolist()
         loss = {}
         for k in self.loss:
-            loss[k] = self.loss[k] / total_n_gts
+            # scem损失不需要除以总的gt数
+            if "scem" not in k:
+                loss[k] = self.loss[k] / total_n_gts
+            else:
+                loss[k] = self.loss[k]
         log = {}
         for k in self.log:
             for i in range(len(n_gts)):
                 if f"frame{i}" in k:
-                    log[k] = (self.log[k] / n_gts[i], 1)
+                    if "scem" not in k:
+                        log[k] = (self.log[k] / n_gts[i], 1)
+                    else:
+                        log[k] = (self.log[k], 1)
                     break
         return loss, log
 
@@ -452,6 +484,29 @@ class ClipCriterion:
         self.loss["spectral_kl_loss"] += kl_loss * self.frame_weights[frame_idx]
         self.log[f"frame{frame_idx}_spectral_kl_loss"] = kl_loss.item()
 
+        # 13 calculate scem loss
+        if self.scem:
+            gamma = model_outputs["scem_gamma"]
+            log_mix = model_outputs["scem_log_mix"]
+
+            heatmap = self.target_list[frame_idx][0]['heatmap'].unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+            # heatmap = gt_trackinstances[0].heatmap.unsqueeze(0)  # (1, 1, H, W)
+            #降尺度
+            heatmap = F.adaptive_avg_pool2d(heatmap, (gamma.shape[2], gamma.shape[3]))
+            scem_bce_loss = focal_bce_loss(gamma, heatmap)
+            scem_dice_loss = dice_loss(gamma, heatmap)
+            scem_nll_loss = -log_mix.mean()
+ 
+            self.loss["scem_bce_loss"] += scem_bce_loss * self.frame_weights[frame_idx]
+            self.loss["scem_nll_loss"] += scem_nll_loss * self.frame_weights[frame_idx]
+            self.loss["scem_dice_loss"] += scem_dice_loss * self.frame_weights[frame_idx]
+            
+            # log
+            self.log[f"frame{frame_idx}_scem_bce_loss"] = scem_bce_loss.item()
+            self.log[f"frame{frame_idx}_scem_nll_loss"] = scem_nll_loss.item()
+            self.log[f"frame{frame_idx}_scem_dice_loss"] = scem_dice_loss.item()
+
+
         return tracked_instances, new_trackinstances, unmatched_detections
 
     def update_tracked_instances(self, model_outputs: dict, tracked_instances: List[TrackInstances])\
@@ -552,6 +607,19 @@ class ClipCriterion:
 
         return loss_spectral_decoder_mse
 
+    
+def focal_bce_loss(pred, target, alpha=0.75, gamma=2.0):
+    eps = 1e-6
+    pred = pred.clamp(eps, 1-eps)
+    pos_loss = -alpha * (1 - pred) ** gamma * target * torch.log(pred)
+    neg_loss = -(1 - alpha) * pred ** gamma * (1 - target) * torch.log(1 - pred)
+    return (pos_loss + neg_loss).mean()
+
+def dice_loss(pred, target, eps=1e-6):
+    inter = (pred * target).sum()
+    union = (pred * pred).sum() + (target * target).sum()
+    return 1 - (2 * inter + eps) / (union + eps)
+
 
 def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
     """
@@ -600,7 +668,10 @@ def build(config: dict):
             "box_giou_loss": config["LOSS_WEIGHT_GIOU"],
             "label_focal_loss": config["LOSS_WEIGHT_FOCAL"],
             "spectral_kl_loss": config["LOSS_SPECTRAL_KL"],
-            "spectral_decoder_mse_loss": config["LOSS_SPECTRAL_DECODER_MSE"]
+            "spectral_decoder_mse_loss": config["LOSS_SPECTRAL_DECODER_MSE"],
+            "scem_nll_loss": config["LOSS_SCEM_NLL"],
+            "scem_bce_loss": config["LOSS_SCEM_BCE"],
+            "scem_dice_loss": config["LOSS_SCEM_DICE"],
         },
         max_frame_length=max(config["SAMPLE_LENGTHS"]),
         n_aux=config["NUM_DEC_LAYERS"]-1,
@@ -608,5 +679,6 @@ def build(config: dict):
         aux_weights=config["AUX_LOSS_WEIGHT"],
         hidden_dim=config["HIDDEN_DIM"],
         use_dab=config["USE_DAB"],
-        decoder_spectral=config["DECODER_SPECTRAL"]
+        decoder_spectral=config["DECODER_SPECTRAL"],
+        scem = config["SCEM"]["ENABLE"]
     )

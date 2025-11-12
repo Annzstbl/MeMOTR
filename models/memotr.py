@@ -25,6 +25,8 @@ from structures.track_instances import TrackInstances
 from utils.utils import inverse_sigmoid
 
 from torch.utils.checkpoint import checkpoint
+from .SCEM import build as build_scem
+from .SCEM import SCEM
 
 
 class MeMOTR(nn.Module):
@@ -41,7 +43,10 @@ class MeMOTR(nn.Module):
                  decoder_spectral_clusters: int = 1,
                  encoder_spectral: bool = False,
                  encoder_global_token: bool = False,
-                 rope_pos_module = None): 
+                 rope_pos_module = None,
+                 scem_module = None,
+                 scem_use_gt = False,
+                 ): 
         super(MeMOTR, self).__init__()
 
         self.num_classes = num_classes
@@ -86,6 +91,11 @@ class MeMOTR(nn.Module):
             self.rope_pos = True # enable bool
         else:
             self.rope_pos = False
+            
+        self.scem_module = scem_module
+        self.use_scem = self.scem_module is not None
+        self.scem_use_gt = scem_use_gt
+
 
 
         assert self.n_feature_levels > 1
@@ -146,9 +156,9 @@ class MeMOTR(nn.Module):
         self.use_checkpoint = enable
         self.transformer.enable_checkpoint(enable)
 
-    def forward(self, frame: NestedTensor, tracks: list[TrackInstances], debug=False):
-        if self.visualize:
-            os.makedirs("./outputs/visualize_tmp/memotr/", exist_ok=True)
+    def forward(self, frame: NestedTensor, tracks: list[TrackInstances], debug=False, heatmap=None):
+        # if self.visualize:
+            # os.makedirs("./outputs/visualize_tmp/memotr/", exist_ok=True)
 
         # 图像经过 backbone
         if self.use_checkpoint and self.checkpoint_level != 3:
@@ -170,6 +180,7 @@ class MeMOTR(nn.Module):
             else:
                 features, pos = feature_tuple
 
+        # 特征统一映射到256维
         srcs, masks = [], []
         for layer, feat in enumerate(features):
             src, mask = feat.decompose()
@@ -197,6 +208,14 @@ class MeMOTR(nn.Module):
         # pos is n_features_levels * [(B, C, H, W)]
         # spectral_weights is n_features_levels * [(B, C=8, H, W)]
 
+        # scem增强
+        if self.use_scem:
+            gamma, log_mix = self.scem_module(srcs, masks)
+            srcs = self.scem_module.apply_posterior_enhance(srcs, masks, gamma, alpha=0.5)
+        if self.scem_use_gt:
+            assert self.use_scem is False
+            assert heatmap is not None
+            srcs = SCEM.apply_posterior_enhance(srcs, masks, heatmap.unsqueeze(1), alpha=0.5)
 
         if self.encoder_global_token:
             # 通过平均值生成global_token
@@ -332,6 +351,11 @@ class MeMOTR(nn.Module):
             res["init_reference"] = init_reference
             res["outputs"] = outputs
             res["spectral_weights"] = spectral_weights
+
+        if self.use_scem:
+            res["scem_gamma"] = gamma
+            res["scem_log_mix"] = log_mix
+    
         return res
 
     @torch.jit.unused
@@ -490,6 +514,10 @@ def build(config: dict):
     deformable_transformer = build_deformable_transformer(config=config, rope_pos_module=rope_pos_module)
     query_updater = build_query_updater(config=config)
 
+
+    scem_gt = config["SCEM"]["USE_GT"]
+    scem = build_scem(config = config["SCEM"])
+
     return MeMOTR(
         backbone=backbone,
         transformer=deformable_transformer,
@@ -512,4 +540,6 @@ def build(config: dict):
         encoder_global_token=config["ENCODER_GLOBAL_TOKEN"],
         encoder_spectral=config["ENCODER_SPECTRAL"],
         rope_pos_module=rope_pos_module,
+        scem_module = scem,
+        scem_use_gt = scem_gt,
     )

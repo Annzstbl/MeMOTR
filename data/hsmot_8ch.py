@@ -258,7 +258,7 @@ def transfroms_for_train(use_cache=True, cache_path=None, coco_size: bool = Fals
                 ]),                
                 # 缺少一个颜色预训练
                 MotNormalize(mean=mean, std=std, to_rgb=False),
-                MotPad(size_divisor=32),
+                MotPad(size_divisor=64),
                 MotDefaultFormatBundle(),
                 MotCollect(keys=['img', 'gt_bboxes', 'gt_labels', 'gt_trackids']),
                 MmrotateToMemotr(use_cache=use_cache, cache_path=cache_path, spectral_method=spectral_method, spectral_n_clusters=spectral_n_clusters, mean=mean, std=std, get_spectral_weights=get_spectral_weights)

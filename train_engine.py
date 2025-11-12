@@ -255,7 +255,16 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 for f in frame:
                     f.requires_grad_(False)
                 frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
-                res = model(frame=frame, tracks=tracks)
+
+                if 'heatmap' in batch["infos"][0][0]:
+                    heatmap = [hs[frame_idx]['heatmap'] for hs in batch["infos"]]
+                    for h in heatmap:
+                        h.requires_grad_(False)
+                    heatmap = torch.stack(heatmap, dim=0).to(device)
+                else:
+                    heatmap = None
+
+                res = model(frame=frame, tracks=tracks, heatmap=heatmap)
                 previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                     model_outputs=res,
                     tracked_instances=tracks,

@@ -48,6 +48,7 @@ class TrackInstances:
         if TrackInstances.use_spectral_decoder:
             self.query_spectral_weights = torch.zeros((0, TrackInstances.decoder_spectral_weights_dim), dtype=torch.float)# 如果参与预测，使用的query。不一定是最后预测的光谱权重，可能没更新。
             self.pred_spectral_weights = torch.zeros((0, TrackInstances.decoder_spectral_weights_dim), dtype=torch.float)# 最后预测的光谱权重
+        self.heatmap = torch.zeros((0,0), dtype=torch.float)
 
     def to(self, device):
         res = TrackInstances(frame_height=self.frame_height, frame_width=self.frame_width,

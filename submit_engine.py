@@ -18,7 +18,7 @@ from utils.utils import yaml_to_dict, is_distributed, distributed_world_size, di
 from utils.nested_tensor import tensor_list_to_nested_tensor
 from utils.box_ops import box_cxcywh_to_xyxy
 from log.logger import Logger
-from data.seq_dataset import SeqDataset
+from data.seq_dataset import SeqDataset, SeqDataset_HeatmapGT
 from structures.track_instances import TrackInstances
 from hsmot.datasets.pipelines.channel import rotate_norm_boxes_to_boxes
 from hsmot.mmlab.hs_mmrotate import obb2poly
@@ -31,7 +31,8 @@ class Submitter:
                  use_dab: bool = False,
                  visualize: bool = False,
                  npy2rgb: bool = False, 
-                 decoder_spectral: bool = True):
+                 decoder_spectral: bool = True,
+                 use_scem_gt: bool = False):
         self.dataset_name = dataset_name
         self.seq_name = seq_name
         self.seq_dir = path.join(split_dir, seq_name)
@@ -45,7 +46,12 @@ class Submitter:
                                       visualize=visualize, use_dab=use_dab, decoder_spectral=decoder_spectral)
         self.result_score_thresh = result_score_thresh
         self.motion_lambda = motion_lambda
-        self.dataset = SeqDataset(seq_dir=self.seq_dir, npy2rgb=npy2rgb)
+        self.use_scem_gt = use_scem_gt
+        if self.use_scem_gt:
+            self.label_file = os.path.join(split_dir, '..', 'mot', '{seq_name}.txt'.format(seq_name=seq_name))
+            self.dataset = SeqDataset_HeatmapGT(seq_dir=self.seq_dir, label_file=self.label_file, npy2rgb=npy2rgb)
+        else:
+            self.dataset = SeqDataset(seq_dir=self.seq_dir, npy2rgb=npy2rgb)
         self.dataloader = DataLoader(self.dataset, batch_size=1, num_workers=4, shuffle=False)
         self.device = next(self.model.parameters()).device
         self.use_dab = use_dab
@@ -61,6 +67,70 @@ class Submitter:
 
     @torch.no_grad()
     def run(self):
+        if self.use_scem_gt:
+            self._run_with_GT()
+        else:
+            self._run()
+
+    @torch.no_grad()
+    def _run_with_GT(self):
+        tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
+                                 num_classes=get_model(self.model).num_classes,
+                                 use_dab=self.use_dab,
+                                 ).to(self.device)]
+
+        txt_lines = []
+        for i, ((image, ori_image), info, heatmap) in enumerate(tqdm(self.dataloader, desc=f"Submit seq: {self.seq_name}")):
+            # image: (1, C, H, W); ori_image: (1, H, W, C)
+            frame = tensor_list_to_nested_tensor([image[0]]).to(self.device)
+            heatmap = heatmap.to(self.device)
+            res = self.model(frame=frame, tracks=tracks, heatmap=heatmap)
+            previous_tracks, new_tracks = self.tracker.update(
+                model_outputs=res,
+                tracks=tracks
+            )
+            tracks: List[TrackInstances] = get_model(self.model).postprocess_single_frame(previous_tracks, new_tracks, None)
+
+            # We do not use this...
+            # but I do not want to remove this part.
+            # WHAT IF it breaks down!!!
+            # of course not :)
+            if self.use_motion:
+                for _ in range(len(tracks[0])):
+                    if tracks[0].disappear_time[_].item() > 0:
+                        if len(self.tracker.motions[tracks[0].ids[_].item()]) >= \
+                               self.tracker.motions[tracks[0].ids[_].item()].min_record_length:
+                            tracks[0].ref_pts[_] = inverse_sigmoid(
+                                tracks[0].last_appear_boxes[_]
+                            ) + self.motion_lambda * self.tracker.motions[tracks[0].ids[_].item()].get_box_delta(
+                                miss_length=tracks[0].disappear_time[_].item()
+                            ).to(tracks[0].last_appear_boxes.device)
+
+            tracks_result = tracks[0].to(torch.device("cpu"))
+            ori_h, ori_w = ori_image.shape[1], ori_image.shape[2]
+            # box = [x, y, w, h]
+            tracks_result.area = tracks_result.boxes[:, 2] * ori_w * \
+                                 tracks_result.boxes[:, 3] * ori_h
+            tracks_result = self.filter_by_score(tracks_result, thresh=self.result_score_thresh)
+            tracks_result = self.filter_by_area(tracks_result)
+            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (image.shape[2], image.shape[3]), version='le135')
+            boxes_xyxyxyxy = obb2poly(boxes_xyxyxyxy)
+
+            for _tracks, xyxyxyxy in zip(tracks_result, boxes_xyxyxyxy):
+                save_format = '{frame:6d},{id:6d},{x1:.3f},{y1:.3f},{x2:.3f},{y2:.3f},{x3:.3f},{y3:.3f},{x4:.3f},{y4:.3f},{conf:.3f},{label:2d},-1\n'
+                x1, y1, x2, y2, x3, y3, x4, y4 = xyxyxyxy.tolist()
+                obj_id = _tracks.ids.item()
+                conf = torch.max(_tracks.scores, dim=-1).values.item()
+                label = _tracks.labels.item()
+                line = save_format.format(frame=i + 1, id=obj_id, x1=x1, y1=y1, x2=x2, y2=y2, x3=x3, y3=y3, x4=x4, y4=y4, conf=conf, label=label)
+                txt_lines.append(line)
+
+        with open(os.path.join(self.predict_dir, f"{self.seq_name}.txt"), "w") as file:
+            file.writelines(txt_lines)
+        return
+
+    @torch.no_grad()
+    def _run(self):
         tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
                                  num_classes=get_model(self.model).num_classes,
                                  use_dab=self.use_dab,
@@ -338,7 +408,8 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module):
             motion_lambda=motion_lambda,
             miss_tolerance=miss_tolerance,
             npy2rgb = config["NPY2RGB"],
-            decoder_spectral= config["DECODER_SPECTRAL"]
+            decoder_spectral= config["DECODER_SPECTRAL"],
+            use_scem_gt=config["SCEM"]["USE_GT"]
         )
         submitter.run()
 
