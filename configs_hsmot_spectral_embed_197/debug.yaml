@@ -2,7 +2,7 @@
 # @Description  : Config for training DanceTrack.
 #                 We change some parameters compared with our paper, looking forward more stable training convergence.
 
-AVAILABLE_GPUS: 0,1
+AVAILABLE_GPUS: "4"
 
 PARENT_CONFIG: ./default.yaml
 
@@ -36,6 +36,10 @@ SCEM:
   ENABLE: True
   SOME_PARAMETRES: 1
   USE_GT: False
+  PRIOR_MODE: gate
 LOSS_SCEM_NLL: 1
 LOSS_SCEM_BCE: 1
 LOSS_SCEM_DICE: 1
+
+PRETRAINED_MODEL: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/debug_gpu/checkpoint_19.pth
+

@@ -23,10 +23,13 @@ from .deformable_transformer import build as build_deformable_transformer
 from utils.nested_tensor import NestedTensor
 from structures.track_instances import TrackInstances
 from utils.utils import inverse_sigmoid
+from .utils import logits_to_scores
 
 from torch.utils.checkpoint import checkpoint
 from .SCEM import build as build_scem
 from .SCEM import SCEM
+from utils.GMC import compensate_rotated_boxes
+import numpy as np
 
 
 class MeMOTR(nn.Module):
@@ -156,7 +159,15 @@ class MeMOTR(nn.Module):
         self.use_checkpoint = enable
         self.transformer.enable_checkpoint(enable)
 
-    def forward(self, frame: NestedTensor, tracks: list[TrackInstances], debug=False, heatmap=None):
+    def forward(self, frame: NestedTensor, tracks: list[TrackInstances], debug=False, heatmap=None, gmc=None):
+        """
+            #解释每个参数
+            frame: NestedTensor, shape = [B, C, H, W]
+            tracks: list[TrackInstances], length = B 
+            debug: bool, 是否打印调试信息
+            heatmap: Tensor, shape = [B, H, W]
+            gmc: Tensor, shape = [B, 2, 3]
+        """
         # if self.visualize:
             # os.makedirs("./outputs/visualize_tmp/memotr/", exist_ok=True)
 
@@ -208,10 +219,16 @@ class MeMOTR(nn.Module):
         # pos is n_features_levels * [(B, C, H, W)]
         # spectral_weights is n_features_levels * [(B, C=8, H, W)]
 
+       
+        prior_map = self.get_prior_map(tracks=tracks, gmcs=gmc, frame=frame)
         # scem增强
         if self.use_scem:
-            gamma, log_mix = self.scem_module(srcs, masks)
+            if self.scem_module.prior_mode is not None:
+                gamma, log_mix = self.scem_module(srcs, masks, prior_map=prior_map)
+            else:
+                gamma, log_mix = self.scem_module(srcs, masks)
             srcs = self.scem_module.apply_posterior_enhance(srcs, masks, gamma, alpha=0.5)
+            
         if self.scem_use_gt:
             assert self.use_scem is False
             assert heatmap is not None
@@ -237,6 +254,8 @@ class MeMOTR(nn.Module):
         query_mask = self.get_query_mask(tracks=tracks).to(srcs[0].device)                  # (B, Nd+Nq)
         if self.decoder_spectral:
             query_spectral_weights = self.get_query_spectral_weights(tracks=tracks).to(srcs[0].device)
+ 
+
 
         # DETR:
         transformer_kwargs = {
@@ -425,6 +444,211 @@ class MeMOTR(nn.Module):
             )
         track_references = self.get_track_reference_points(tracks=tracks).to(det_references.device)     # (B, Nq, 2)
         return torch.cat((det_references, track_references), dim=1)
+
+
+    def get_prior_map(self, tracks: List[TrackInstances], gmcs: torch.Tensor, frame: NestedTensor) -> torch.Tensor:
+        """
+        根据 tracks 的位置和置信度生成先验热力图。
+        
+        Args:
+            tracks: List[TrackInstances]，包含 ref_pts 和 logits
+            gmcs: Tensor (B, 2, 3)的仿射矩阵
+            frame: NestedTensor，用于获取图像尺寸
+        
+        Returns:
+            prior_map: (B, H, W) 的先验热力图，尺寸匹配原图
+        """
+        # 获取图像尺寸
+        H, W = frame.tensors.shape[-2:]
+        B = len(tracks)
+        device = frame.tensors.device
+        
+        prior_maps = []
+        
+        for b in range(B):
+            if len(tracks[b]) == 0:
+                # 如果没有轨迹，返回全零热力图
+                prior_maps.append(torch.zeros((H, W), device=device))
+                continue
+            
+            # 1. 从 tracks 中提取 ref_pts 和 logits
+            ref_pts = tracks[b].ref_pts  # (N, 5) 或 (N, 4) 或 (N, 2)
+            logits = tracks[b].logits    # (N, num_classes)
+            
+            # 2. 通过 sigmoid 得到归一化坐标，然后转换为物理坐标
+            if ref_pts.shape[-1] == 5:
+                # 旋转框格式 [cx, cy, w, h, angle]
+                norm_boxes = ref_pts.sigmoid()  # (N, 5) 值域 [0, 1]
+                # 转换为物理坐标
+                boxes = norm_boxes.clone()
+                boxes[:, 0] = boxes[:, 0] * W  # cx
+                boxes[:, 1] = boxes[:, 1] * H  # cy
+                boxes[:, 2] = boxes[:, 2] * W  # w
+                boxes[:, 3] = boxes[:, 3] * H  # h
+                # angle 已经是归一化的，需要转换为弧度
+                # 根据 le135 版本：angle_range = 1, angle_offset = -1/4
+                angle_range = math.pi
+                angle_offset = -math.pi / 4
+                boxes[:, 4] = boxes[:, 4] * angle_range + angle_offset
+            # elif ref_pts.shape[-1] == 4:
+            #     # 4维格式，假设是 [cx, cy, w, h]
+            #     norm_boxes = ref_pts.sigmoid()  # (N, 4)
+            #     boxes = norm_boxes.clone()
+            #     boxes[:, 0] = boxes[:, 0] * W
+            #     boxes[:, 1] = boxes[:, 1] * H
+            #     boxes[:, 2] = boxes[:, 2] * W
+            #     boxes[:, 3] = boxes[:, 3] * H
+            #     # 添加角度维度（假设为0，即水平框）
+            #     boxes = torch.cat([boxes, torch.zeros((boxes.shape[0], 1), device=device)], dim=-1)
+            # elif ref_pts.shape[-1] == 2:
+            #     # 2维格式，假设是 [cx, cy]
+            #     norm_pts = ref_pts.sigmoid()  # (N, 2)
+            #     boxes = norm_pts.clone()
+            #     boxes[:, 0] = boxes[:, 0] * W
+            #     boxes[:, 1] = boxes[:, 1] * H
+            #     # 添加 w, h, angle（使用默认值）
+            #     default_w = W * 0.1
+            #     default_h = H * 0.1
+            #     boxes = torch.cat([
+            #         boxes,
+            #         torch.full((boxes.shape[0], 1), default_w, device=device),
+            #         torch.full((boxes.shape[0], 1), default_h, device=device),
+            #         torch.zeros((boxes.shape[0], 1), device=device)
+            #     ], dim=-1)
+            else:
+                raise ValueError(f"Unsupported ref_pts shape: {ref_pts.shape}")
+            
+            # 3. 使用 GMC 矩阵对坐标进行补偿
+            if gmcs is not None and len(gmcs) > b:
+                gmc_matrix = gmcs[b]  # (2, 3)
+                if gmc_matrix is not None:
+                    # 转换为 numpy 进行 GMC 补偿
+                    boxes_np = boxes.detach().cpu().numpy()
+                    gmc_matrix_np = gmc_matrix.detach().cpu().numpy() if isinstance(gmc_matrix, torch.Tensor) else gmc_matrix
+                    # 补偿旋转框
+                    boxes_compensated = compensate_rotated_boxes(boxes_np, gmc_matrix_np)
+                    boxes = torch.from_numpy(boxes_compensated).to(device)
+            
+            # 4. 从 logits 中提取置信度分数
+            scores = torch.max(logits_to_scores(logits=logits), dim=1).values  # (N,)
+            
+            # 5. 使用类似 HeatmapFromRotateGt 的方法生成热力图，根据置信度加权
+            prior_map = self._generate_prior_heatmap(
+                boxes=boxes,  # (N, 5) [cx, cy, w, h, angle_rad]
+                scores=scores,  # (N,)
+                img_shape=(H, W),
+                device=device
+            )
+            # 大于均值的+0.5
+            prior_map = prior_map + 0.5 * (prior_map > prior_map.mean())
+            prior_map = prior_map.clamp_(0, 1)
+
+            prior_maps.append(prior_map.detach())
+
+        # 返回 (B, H, W)
+        return torch.stack(prior_maps, dim=0)
+    
+    def _generate_prior_heatmap(self, boxes: torch.Tensor, scores: torch.Tensor, 
+                                img_shape: tuple, device: torch.device,
+                                mode: str = 'fixed_peak', peak: float = 0.5,
+                                k: float = 5.0) -> torch.Tensor:
+        """
+        根据旋转框和置信度生成先验热力图。
+        
+        Args:
+            boxes: (N, 5) [cx, cy, w, h, angle_rad]
+            scores: (N,) 置信度分数
+            img_shape: (H, W)
+            device: 设备
+            mode: 'fixed_peak' 或 'normalized'
+            peak: 峰值（用于 fixed_peak 模式）
+            k: 高斯核的倍数
+        
+        Returns:
+            prior_map: (H, W) 热力图
+        """
+        H, W = img_shape
+        N = boxes.shape[0]
+        
+        if N == 0:
+            return torch.zeros((H, W), device=device)
+        
+        # 创建坐标网格
+        ys = torch.arange(H, device=device, dtype=torch.float32)
+        xs = torch.arange(W, device=device, dtype=torch.float32)
+        Y, X = torch.meshgrid(ys, xs, indexing='ij')
+        
+        # 初始化累积图
+        accum = torch.zeros((H, W), device=device)
+        
+        for i in range(N):
+            box = boxes[i]  # [cx, cy, w, h, angle_rad]
+            score = scores[i].item()
+            
+            if score <= 0:
+                continue
+            
+            xc, yc = box[0].item(), box[1].item()
+            w = max(box[2].item(), 1e-6)
+            h = max(box[3].item(), 1e-6)
+            th = box[4].item()
+            c, s = math.cos(th), math.sin(th)
+            
+            # 计算 sigma（类似 HeatmapFromRotateGt）
+            sigma_star = math.sqrt(1.0 / math.pi)
+            s_size = math.sqrt(w * h)
+            boundary_size = 8.0
+            sigma_scalar = sigma_star * max(s_size / boundary_size, 1e-6)
+            sig_w = sigma_scalar * (w / max(s_size, 1e-6))
+            sig_h = sigma_scalar * (h / max(s_size, 1e-6))
+            
+            # 计算旋转后的 sigma 范围
+            rx = k * math.sqrt((sig_w * c)**2 + (sig_h * s)**2)
+            ry = k * math.sqrt((sig_w * s)**2 + (sig_h * c)**2)
+            
+            # 计算局部区域
+            x0 = int(torch.clamp(torch.tensor(xc - rx, device=device), 0, W).item())
+            x1 = int(torch.clamp(torch.tensor(xc + rx, device=device), 0, W).item())
+            y0 = int(torch.clamp(torch.tensor(yc - ry, device=device), 0, H).item())
+            y1 = int(torch.clamp(torch.tensor(yc + ry, device=device), 0, H).item())
+            
+            if x1 <= x0 or y1 <= y0:
+                continue
+            
+            # 计算局部区域的偏差
+            dx = X[y0:y1, x0:x1] - xc
+            dy = Y[y0:y1, x0:x1] - yc
+            
+            # 旋转变换
+            dxp = c * dx + s * dy
+            dyp = -s * dx + c * dy
+            
+            # 计算高斯权重
+            qf = (dxp / sig_w)**2 + (dyp / sig_h)**2
+            
+            if mode == 'fixed_peak':
+                contrib = peak * torch.exp(-0.5 * qf)
+            elif mode == 'normalized':
+                denom = (2.0 * math.pi) * sig_w * sig_h
+                contrib = torch.exp(-0.5 * qf) / denom
+            else:
+                raise ValueError(f"Unsupported mode: {mode}")
+            
+            # 根据置信度加权# TODO 超参数
+            contrib = contrib * score**0.5
+            
+            # 累积到总图中（使用 max 或 sum）
+            accum[y0:y1, x0:x1] += contrib
+            # accum[y0:y1, x0:x1] = torch.maximum(accum[y0:y1, x0:x1], contrib)
+        
+        # 归一化到 [0, 1]
+        # if accum.max() > 0:
+            # accum = accum / accum.max()
+        
+        return accum
+
+
+
 
 
     def get_det_spectral_weights(self):

@@ -24,6 +24,7 @@ from torch.optim.lr_scheduler import MultiStepLR, CosineAnnealingLR
 from log.logger import Logger, ProgressLogger
 from log.log import MetricLog
 from models.utils import load_pretrained_model
+from utils.vis_val import visualize_validation_metrics
 
 
 def train(config: dict):
@@ -182,6 +183,22 @@ def train(config: dict):
     # log记录结束时间
     train_logger.write(head=f"训练结束 End Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", filename="log.txt", mode="a")
     train_logger.show(head=f"训练结束 End Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+    
+    # 训练结束后可视化验证指标
+    if is_main_process():
+        try:
+            train_logger.show(head="开始生成验证指标可视化...")
+            best_result = visualize_validation_metrics(
+                val_root_path=config["OUTPUTS_DIR"],
+                fig_path=os.path.join(config["OUTPUTS_DIR"], 'fig')
+            )
+            if best_result:
+                train_logger.show(head=f"最佳组合分数: Epoch {best_result['epoch']}, "
+                                     f"Combined Score: {best_result['combined_score']:.4f}")
+            train_logger.show(head="验证指标可视化完成")
+        except Exception as e:
+            train_logger.show(head=f"验证指标可视化失败: {str(e)}")
+    
     return
 
 
@@ -236,7 +253,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     TrackInstances.set_static_properties(use_spectral_decoder=get_model(model).decoder_spectral, decoder_spectral_weights_dim=8*decoder_spectral_clusters)
 
     for i, batch in enumerate(dataloader):
-        img_metas = batch["img_metas"][0][0]
+        img_metas = batch["img_metas"][0][0] #batch[keys][batches][sequentials] 
  
         iter_start_timestamp = time.time()
         tracks = TrackInstances.init_tracks(batch=batch,
@@ -249,12 +266,23 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                               num_classes=get_model(model).num_classes,
                               device=device, )
 
+        # 计算光流 [B, frames, 2, 3]
+        from utils.GMC import compute_gmc_sequence
+        batch_size = len(batch["imgs"])
+        seq_length = len(batch["imgs"][0])
+        batch_gmcs = []#List(List(ndarray))
+        for bs_index in range(batch_size):
+            batch_gmcs.append(compute_gmc_sequence(batch["imgs"][bs_index], method="sparseOptFlow", downscale=1))
+        batch_gmcs = torch.tensor(batch_gmcs, dtype=torch.float32).to(device)
+        batch_gmcs.requires_grad_(False)
+        assert batch_gmcs.shape == (batch_size, seq_length, 2, 3)
+
         for frame_idx in range(len(batch["imgs"][0])):
             if no_grad_frames is None or frame_idx >= no_grad_frames:
                 frame = [fs[frame_idx] for fs in batch["imgs"]]
                 for f in frame:
                     f.requires_grad_(False)
-                frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
+                frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device) #[B, C, H, W]
 
                 if 'heatmap' in batch["infos"][0][0]:
                     heatmap = [hs[frame_idx]['heatmap'] for hs in batch["infos"]]
@@ -264,7 +292,8 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 else:
                     heatmap = None
 
-                res = model(frame=frame, tracks=tracks, heatmap=heatmap)
+                gmc = batch_gmcs[:, frame_idx, :, :] # [B, 2, 3]
+                res = model(frame=frame, tracks=tracks, heatmap=heatmap, gmc=gmc)
                 previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                     model_outputs=res,
                     tracked_instances=tracks,
@@ -386,6 +415,7 @@ def get_param_groups(config: dict, model: nn.Module, logger: Logger = None) -> T
     dictionary_names = [] if "LR_DICTIONARY_NAMES" not in config else config["LR_DICTIONARY_NAMES"]
     _dictionary_scale = 1.0 if "LR_DICTIONARY_SCALE" not in config else config["LR_DICTIONARY_SCALE"]
 
+
     param_groups = [
         {   # backbone 学习率设置
             "params": [p for n, p in model.named_parameters() if match_keywords(n, backbone_keywords) and p.requires_grad and not match_keywords(n, dictionary_names)],
@@ -444,6 +474,18 @@ def get_param_groups(config: dict, model: nn.Module, logger: Logger = None) -> T
         }
     ]
     
+    #把所有参数的尺寸和requireds_grad,lr打印出来，提供debug
+    for p in model.named_parameters():
+        #通过param_names获得lr
+        lr = "Not set"
+        for param_group in param_names:
+            if p[0] in param_group["params"]:
+                lr = param_group.get("lr", "Not set")
+                break
+        logger.write(head=f'{p[0]}: {p[1].shape}, requires_grad={p[1].requires_grad}, lr={lr}', filename="log.txt", mode="a")
+        logger.show(head=f'{p[0]}: {p[1].shape}, requires_grad={p[1].requires_grad}, lr={lr}')
+    logger.flush_buffers()
+
     if logger is not None:
         logger.write(head=f"lr_dict param:, {param_names[3]['params']}", filename="log.txt", mode="a")
 

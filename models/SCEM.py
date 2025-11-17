@@ -213,7 +213,7 @@ def log_student_t_interval(z, mu, raw_log_scale, raw_nu=None,
 # =========================
 
 class MixBGFG(nn.Module):
-    def __init__(self, C, depth=4, width=0.5, student_t=True, use_cache=True, tau_mode="mean"):
+    def __init__(self, C, depth=4, width=0.5, with_foreground=True, use_cache=True, tau_mode="mean", prior_mode=None):
         super().__init__()
         ch = int(C * width)
         self.tau_mode  = tau_mode  # "mean" or "sqrt"
@@ -230,24 +230,28 @@ class MixBGFG(nn.Module):
         self.mu_b_head     = nn.Conv2d(ch, C, 3, 1, 1)
         self.logsig_b_head = nn.Conv2d(ch, C, 3, 1, 1)
 
-        self.student_t = student_t
-        if self.student_t:
+        self.with_foreground = with_foreground
+        if self.with_foreground:
             self.mu_f_head       = nn.Conv2d(ch, C, 3, 1, 1)
-            self.logscale_f_head = nn.Conv2d(ch, C, 3, 1, 1)
-            self.raw_nu          = nn.Parameter(torch.tensor(1.0))  # learnable ν
+            self.logsig_f_head = nn.Conv2d(ch, C, 3, 1, 1)
+            # self.logscale_f_head = nn.Conv2d(ch, C, 3, 1, 1)
+            # self.raw_nu          = nn.Parameter(torch.tensor(1.0))  # learnable ν
 
         self.pi_head = PIHead(in_ch=ch, use_cache=use_cache)
-
+        self.prior_mode = prior_mode.lower()
+        if self.prior_mode == "gate":
+            self.gate_head = nn.Sequential(nn.Conv2d(ch+1, ch//2, 3,1,1), GN(ch//2), nn.SiLU(),
+                                nn.Conv2d(ch//2, 1, 1,1,0))
 
         # 初始化方差头 bias 使 sigma≈1
         with torch.no_grad():
             nn.init.zeros_(self.logsig_b_head.weight)
             self.logsig_b_head.bias.fill_(1.313)
-            if self.student_t:
-                nn.init.zeros_(self.logscale_f_head.weight)
-                self.logscale_f_head.bias.fill_(1.313)
+            if self.with_foreground:
+                nn.init.zeros_(self.logsig_f_head.weight)
+                self.logsig_f_head.bias.fill_(1.313)
 
-    def forward(self, Z, valid_mask=None, interval_width: float = 1.0):
+    def forward(self, Z, valid_mask=None, interval_width: float = 1.0, prior_map = None):
         """
         Z: [B,C,H,W]
         valid_mask: [B,H,W] or [B,1,H,W], True=valid
@@ -267,17 +271,33 @@ class MixBGFG(nn.Module):
         )   # [B,1,H,W] <= 0
 
         # 前景区间 log prob
-        if self.student_t:
+        if self.with_foreground:
             mu_f       = self.mu_f_head(x)
-            log_scalef = self.logscale_f_head(x)
-            log_pf     = self.tau * log_student_t_interval(
-                Z, mu_f, log_scalef, self.raw_nu, width=interval_width
-            )   # [B,1,H,W] <= 0
+            log_sigf = self.logsig_f_head(x)
+            log_pf = self.tau * log_gaussian_interval(
+                Z, mu_f, log_sigf, width=interval_width
+            )
+            # log_pf     = self.tau * log_student_t_interval(
+            #     Z, mu_f, log_scalef, self.raw_nu, width=interval_width
+            # )   # [B,1,H,W] <= 0
         else:
             log_pf = torch.zeros_like(log_pb)
 
         # π 先验
-        pi = self.pi_head(x).clamp(1e-6, 1 - 1e-6)   # [B,1,H,W]
+        pi_net = self.pi_head(x).clamp(1e-6, 1 - 1e-6)   # [B,1,H,W]
+        if self.prior_mode is not None:
+            logit_net = torch.logit(pi_net)
+            prior_map = torch.clamp(prior_map, 1e-6, 1 - 1e-6)
+            logit_prior = torch.logit(prior_map.unsqueeze(1))
+            logit_prior_downscale = F.interpolate(logit_prior, size=pi_net.shape[-2:], mode="bilinear", align_corners=False)
+            g = torch.sigmoid(self.gate_head(torch.cat([x, logit_prior_downscale], dim=1)))
+            l = (1-g) * logit_net + g * logit_prior_downscale
+            # TODO 是否需要超参数tau
+            # pi = torch.sigmoid(l / max(self.tau, 1e-6))
+            pi = torch.sigmoid(l)
+        else:
+            pi = pi_net
+
 
         # 混合区间概率的 loglik
         a = torch.log1p(-pi) + log_pb        # log((1-π)·P_b)
@@ -322,18 +342,20 @@ class SCEM(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.cfg = dict(config)
-        self.student_t  = bool(self.cfg.get("STUDENT_T", False))
+        self.with_foreground  = bool(self.cfg.get("with_foreground", False))
         self.depth      = int(self.cfg.get("DEPTH", 1))
         self.width      = float(self.cfg.get("WIDTH", 0.5))
         self.use_cache  = bool(self.cfg.get("USE_CACHE", True))
         self.in_ch      = int(self.cfg.get("IN_CHANNELS", 256))
+        self.prior_mode = self.cfg.get("PRIOR_MODE", None)
         # self.lazy_built = False
         self.posterior = MixBGFG(
             C=self.in_ch,
             depth=self.depth,
             width=self.width,
-            student_t=self.student_t,
-            use_cache=self.use_cache
+            with_foreground=self.with_foreground,
+            use_cache=self.use_cache,
+            prior_mode=self.prior_mode
         )
 
         #打印所有参数及其大小
@@ -347,7 +369,7 @@ class SCEM(nn.Module):
         for m in masks:
             assert m.dtype == torch.bool and m.dim() == 3, "mask should be [B,H,W] bool"
 
-    def forward(self, features, masks):
+    def forward(self, features, masks, prior_map=None):
         """
         features: List[Tensor]   each [B, C_i, H_i, W_i]
         masks:    List[Bool]     each [B, H_i, W_i]  True=valid
@@ -365,7 +387,7 @@ class SCEM(nn.Module):
         mask0 = masks[0]  # [B,H0,W0] bool
 
 
-        out = self.posterior(feat0, valid_mask=mask0)
+        out = self.posterior(feat0, valid_mask=mask0, prior_map=prior_map)
         # gamma = out["gamma"]              # [B,1,H0,W0]
         # aux   = {"log_mix": out["log_mix"], "pi": out["pi"], "valid_mask": out["valid_mask"]}
 
@@ -377,7 +399,7 @@ class SCEM(nn.Module):
     # Posterior-based multi-scale enhancement
     # =========================
 
-    @torch.no_grad()
+    # @torch.no_grad()
     @staticmethod
     def _resize_posterior_to(feat: torch.Tensor, posterior: torch.Tensor):
         """

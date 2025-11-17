@@ -22,6 +22,9 @@ from data.seq_dataset import SeqDataset, SeqDataset_HeatmapGT
 from structures.track_instances import TrackInstances
 from hsmot.datasets.pipelines.channel import rotate_norm_boxes_to_boxes
 from hsmot.mmlab.hs_mmrotate import obb2poly
+from utils.GMC import compute_gmc_sequence
+import numpy as np 
+
 class Submitter:
     def __init__(self, dataset_name: str, split_dir: str, seq_name: str, outputs_dir: str, model: nn.Module,
                  det_score_thresh: float = 0.7, track_score_thresh: float = 0.6, result_score_thresh: float = 0.7,
@@ -63,14 +66,101 @@ class Submitter:
         if os.path.exists(os.path.join(self.predict_dir, f'{self.seq_name}.txt')):
             os.remove(os.path.join(self.predict_dir, f'{self.seq_name}.txt'))
         self.model.eval()
+
+        self.use_prior_map = False
+
+        #如果有scem_module在model中
+        if hasattr(get_model(self.model), 'scem_module'):
+            if get_model(self.model).scem_module.prior_mode is not None:
+                self.use_prior_map = True
         return
 
     @torch.no_grad()
     def run(self):
+
         if self.use_scem_gt:
             self._run_with_GT()
+        elif self.use_prior_map:
+            self._run_with_prior_map()
         else:
             self._run()
+
+    @torch.no_grad()
+    def _run_with_prior_map(self):
+        tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
+                                 num_classes=get_model(self.model).num_classes,
+                                 use_dab=self.use_dab,
+                                 ).to(self.device)]
+
+        txt_lines = []
+        prev_frame = None
+        for i, ((image, ori_image), info) in enumerate(tqdm(self.dataloader, desc=f"Submit seq: {self.seq_name}")):
+            # image: (1, C, H, W); ori_image: (1, H, W, C)
+            frame = tensor_list_to_nested_tensor([image[0]]).to(self.device)
+
+            if prev_frame is not None:
+                gmc = compute_gmc_sequence(images=[prev_frame[0], frame.tensors[0]], method='sparseOptFlow', downscale=1)[-1] # [2, 3]
+            else:
+                gmc = np.eye(2, 3, dtype=np.float32)
+            prev_frame = frame.tensors.detach().clone()
+            gmc = torch.tensor(gmc, dtype=torch.float32).unsqueeze(0).to(self.device) # [1, 2, 3]
+
+            res = self.model(frame=frame, tracks=tracks, gmc=gmc)
+            previous_tracks, new_tracks = self.tracker.update(
+                model_outputs=res,
+                tracks=tracks
+            )
+            tracks: List[TrackInstances] = get_model(self.model).postprocess_single_frame(previous_tracks, new_tracks, None)
+
+            # We do not use this...
+            # but I do not want to remove this part.
+            # WHAT IF it breaks down!!!
+            # of course not :)
+            if self.use_motion:
+                for _ in range(len(tracks[0])):
+                    if tracks[0].disappear_time[_].item() > 0:
+                        if len(self.tracker.motions[tracks[0].ids[_].item()]) >= \
+                               self.tracker.motions[tracks[0].ids[_].item()].min_record_length:
+                            tracks[0].ref_pts[_] = inverse_sigmoid(
+                                tracks[0].last_appear_boxes[_]
+                            ) + self.motion_lambda * self.tracker.motions[tracks[0].ids[_].item()].get_box_delta(
+                                miss_length=tracks[0].disappear_time[_].item()
+                            ).to(tracks[0].last_appear_boxes.device)
+
+            tracks_result = tracks[0].to(torch.device("cpu"))
+            ori_h, ori_w = ori_image.shape[1], ori_image.shape[2]
+            # box = [x, y, w, h]
+            tracks_result.area = tracks_result.boxes[:, 2] * ori_w * \
+                                 tracks_result.boxes[:, 3] * ori_h
+            tracks_result = self.filter_by_score(tracks_result, thresh=self.result_score_thresh)
+            tracks_result = self.filter_by_area(tracks_result)
+            # to xyxy:
+            # tracks_result.boxes = box_cxcywh_to_xyxy(tracks_result.boxes)
+            # tracks_result.boxes = (tracks_result.boxes * torch.as_tensor([ori_w, ori_h, ori_w, ori_h], dtype=torch.float))
+
+            # if self.dataset_name == "BDD100K":
+            #     self.update_results(tracks_result=tracks_result, frame_idx=i, results=bdd100k_results, img_path=info[0])
+            # else:
+            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (image.shape[2], image.shape[3]), version='le135')
+            boxes_xyxyxyxy = obb2poly(boxes_xyxyxyxy)
+
+            for _tracks, xyxyxyxy in zip(tracks_result, boxes_xyxyxyxy):
+                save_format = '{frame:6d},{id:6d},{x1:.3f},{y1:.3f},{x2:.3f},{y2:.3f},{x3:.3f},{y3:.3f},{x4:.3f},{y4:.3f},{conf:.3f},{label:2d},-1\n'
+                x1, y1, x2, y2, x3, y3, x4, y4 = xyxyxyxy.tolist()
+                obj_id = _tracks.ids.item()
+                conf = torch.max(_tracks.scores, dim=-1).values.item()
+                label = _tracks.labels.item()
+                line = save_format.format(frame=i + 1, id=obj_id, x1=x1, y1=y1, x2=x2, y2=y2, x3=x3, y3=y3, x4=x4, y4=y4, conf=conf, label=label)
+                txt_lines.append(line)
+
+            # save_path = os.path.join("/data3/litianhao/hsmot/paper/memotr3ch", self.seq_name)
+            # os.makedirs(save_path, exist_ok=True)
+            # #tracks[0].query_embed和tracks[0].ids保存下来
+            # torch.save(tracks[0].query_embed.cpu(), os.path.join(save_path, f"{i}_query_embed.pt"))
+            # torch.save(tracks[0].ids.cpu(), os.path.join(save_path, f"{i}_ids.pt"))
+            # print(f'save {i} query_embed and ids to {save_path}')
+        with open(os.path.join(self.predict_dir, f"{self.seq_name}.txt"), "w") as file:
+            file.writelines(txt_lines)
 
     @torch.no_grad()
     def _run_with_GT(self):

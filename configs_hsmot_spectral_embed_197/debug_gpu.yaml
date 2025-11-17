@@ -2,7 +2,7 @@
 # @Description  : Config for training DanceTrack.
 #                 We change some parameters compared with our paper, looking forward more stable training convergence.
 
-AVAILABLE_GPUS: 5,7
+AVAILABLE_GPUS: 5,6,7
 
 PARENT_CONFIG: ./default.yaml
 
@@ -13,7 +13,7 @@ CHECKPOINT_LEVEL: 2               # gradient checkpoint level.
                                   # As the number increases (from 1 to 4), the memory cost increases.
                                   # We have deleted many comments in this official code simplicity,
                                   # if you have any questions, feel free to contact with the author.
-SAMPLE_LENGTHS: [5, 3, 4, 5]
+SAMPLE_LENGTHS: [2, 3, 4, 5]
 # NUM_FEATURE_LEVELS: 3
 RESIZE: [1184]
 

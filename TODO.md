@@ -25,13 +25,25 @@ Q1
     scores
     area
     iou #匹配后计算
-    last_output #新生的由output_embed赋值
+    last_output #新生的由output_embed赋值，之后在scores>0.5的时候会由output_embed更新
     long_memory #新生的由query_embed赋值，之后不断更新
     last_appear_boxes #
 
     query_spectral_weights # 这一帧匹配的目标由["aux_outputs][-1]["queries"]
     pred_spectral_weights
 
+
+query_updater更新了什么？
+    但只在 is_pos=True 的轨迹上
+    tracks[b].ref_pts
+
+    tracks[b].long_memory
+
+    tracks[b].last_output
+
+    tracks[b].query_embed
+
+    （如果有）tracks[b].query_spectral_weights
 
 
 
