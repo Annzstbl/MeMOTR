@@ -238,7 +238,7 @@ class MixBGFG(nn.Module):
             # self.raw_nu          = nn.Parameter(torch.tensor(1.0))  # learnable ν
 
         self.pi_head = PIHead(in_ch=ch, use_cache=use_cache)
-        self.prior_mode = prior_mode.lower()
+        self.prior_mode = prior_mode.lower() if prior_mode is not None else None
         if self.prior_mode == "gate":
             self.gate_head = nn.Sequential(nn.Conv2d(ch+1, ch//2, 3,1,1), GN(ch//2), nn.SiLU(),
                                 nn.Conv2d(ch//2, 1, 1,1,0))
