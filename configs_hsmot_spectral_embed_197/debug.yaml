@@ -40,6 +40,13 @@ SCEM:
 LOSS_SCEM_NLL: 1
 LOSS_SCEM_BCE: 1
 LOSS_SCEM_DICE: 1
+LOSS_NLL_CONFIG:
+  TYPE: focal # focal or mean
+  ALPHA_POS: 1.0
+  ALPHA_NEG: 0.1
+  GAMMA_POS: 1.5
+  GAMMA_NEG: 0.0
+
 
 PRETRAINED_MODEL: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/debug_gpu/checkpoint_19.pth
 

@@ -29,7 +29,7 @@ from hsmot.util.dist import box_iou_rotated_norm_bboxes1
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
                  max_frame_length: int, n_aux: int, merge_det_track_layer: int = 0, aux_weights: List = None,
-                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = False, scem: bool = False):
+                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = False, scem: bool = False, loss_nll_config:dict = None):
         """
         Init a criterion function.
 
@@ -64,6 +64,7 @@ class ClipCriterion:
         self.kl_weight_eta = kl_weight_eta
         self.decoder_spectral_mse = decoder_spectral
         self.scem = scem
+        self.loss_nll_config = loss_nll_config
 
     def set_epoch(self, epoch: int):
         self.epoch = epoch
@@ -495,8 +496,16 @@ class ClipCriterion:
             heatmap = F.adaptive_avg_pool2d(heatmap, (gamma.shape[2], gamma.shape[3]))
             scem_bce_loss = focal_bce_loss(gamma, heatmap)
             scem_dice_loss = dice_loss(gamma, heatmap)
-            scem_nll_loss = -log_mix.mean()
- 
+            nll_type = self.loss_nll_config.get("TYPE", "mean")
+            if nll_type == "mean":
+                scem_nll_loss = -log_mix.mean()
+            elif nll_type == "focal":
+                alpha_pos = self.loss_nll_config.get("ALPHA_POS")
+                alpha_neg = self.loss_nll_config.get("ALPHA_NEG")
+                gamma_pos = self.loss_nll_config.get("GAMMA_POS")
+                gamma_neg = self.loss_nll_config.get("GAMMA_NEG")
+                scem_nll_loss = supervised_focal_nll_from_log_mix(log_mix, heatmap, alpha_pos, alpha_neg, gamma_pos, gamma_neg)
+
             self.loss["scem_bce_loss"] += scem_bce_loss * self.frame_weights[frame_idx]
             self.loss["scem_nll_loss"] += scem_nll_loss * self.frame_weights[frame_idx]
             self.loss["scem_dice_loss"] += scem_dice_loss * self.frame_weights[frame_idx]
@@ -608,6 +617,43 @@ class ClipCriterion:
         return loss_spectral_decoder_mse
 
     
+def supervised_focal_nll_from_log_mix(
+    log_mix: torch.Tensor,
+    y_soft: torch.Tensor,
+    alpha_pos: float = 1.0,
+    alpha_neg: float = 0.1,
+    gamma_pos: float = 1.0,
+    gamma_neg: float = 0.0,
+    valid_mask: torch.Tensor | None = None,
+    eps: float = 1e-8,
+):
+    """
+    log_mix : [B,1,H,W] = log(P_mix)
+    y_soft  : [B,1,H,W] in [0,1]  (Gaussian soft label)
+    """
+
+    # 1) 计算 supervised 权重 w(y)
+    #    w = alpha_pos * y^gamma_pos + alpha_neg * (1-y)^gamma_neg
+    y = y_soft.clamp(0.0, 1.0)
+    w_pos = (y + eps).pow(gamma_pos)
+    w_neg = (1.0 - y + eps).pow(gamma_neg)
+    w = alpha_pos * w_pos + alpha_neg * w_neg  # [B,1,H,W]
+
+    # 2) NLL = - log P_mix
+    #    加权后成为监督式 NLL
+    loss_map = - w * log_mix  # log_mix <= 0 -> loss >= 0
+
+    # 3) 可选：只在 valid 区域取平均
+    if valid_mask is not None:
+        if valid_mask.dim() == 3:
+            valid_mask = valid_mask.unsqueeze(1)
+        loss_valid = loss_map[~valid_mask]
+        if loss_valid.numel() == 0:
+            return log_mix.new_zeros(())
+        return loss_valid.mean()
+    else:
+        return loss_map.mean()
+
 def focal_bce_loss(pred, target, alpha=0.75, gamma=2.0):
     eps = 1e-6
     pred = pred.clamp(eps, 1-eps)
@@ -680,5 +726,6 @@ def build(config: dict):
         hidden_dim=config["HIDDEN_DIM"],
         use_dab=config["USE_DAB"],
         decoder_spectral=config["DECODER_SPECTRAL"],
-        scem = config["SCEM"]["ENABLE"]
+        scem = config["SCEM"]["ENABLE"],
+        loss_nll_config=config["LOSS_NLL_CONFIG"]
     )

@@ -342,7 +342,7 @@ class SCEM(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.cfg = dict(config)
-        self.with_foreground  = bool(self.cfg.get("with_foreground", False))
+        self.with_foreground  = bool(self.cfg.get("WITH_FOREGROUND", False))
         self.depth      = int(self.cfg.get("DEPTH", 1))
         self.width      = float(self.cfg.get("WIDTH", 0.5))
         self.use_cache  = bool(self.cfg.get("USE_CACHE", True))
@@ -412,7 +412,13 @@ class SCEM(nn.Module):
         assert posterior.shape[2] % feat.shape[2] == 0
         assert posterior.shape[3] % feat.shape[3] == 0
 
-        return F.interpolate(posterior, size=feat.shape[-2:], mode="bilinear", align_corners=False)
+        ratio_h = posterior.shape[2] / feat.shape[2]
+        ratio_w = posterior.shape[3] / feat.shape[3]
+        kernel_size = (int(ratio_h), int(ratio_w))
+        stride = (int(ratio_h), int(ratio_w))
+
+        return F.max_pool2d(posterior, kernel_size=kernel_size, stride=stride)
+        # return F.interpolate(posterior, size=feat.shape[-2:], mode="bilinear", align_corners=False)
 
     @staticmethod
     def apply_posterior_enhance(features, masks, scem_out, alpha: float = 0.5):
@@ -439,7 +445,8 @@ class SCEM(nn.Module):
         for xi, mi in zip(features, masks):
             # 1) 将 posterior 下采样到该尺度
             # gi = SCEM._resize_posterior_to(xi, scem_out).clamp_(0.0, 1.0)   # [B,1,Hi,Wi]
-            gi = SCEM._resize_posterior_to(xi, scem_out.detach()).clamp(0.0, 1.0)
+            # gi = SCEM._resize_posterior_to(xi, scem_out.detach()).clamp(0.0, 1.0)
+            gi = SCEM._resize_posterior_to(xi, scem_out).clamp(0.0, 1.0)
             # 2) mask 无效处置零
             if mi.dim() == 3:
                 gi = gi * (~mi).unsqueeze(1).float()
