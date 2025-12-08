@@ -1,0 +1,39 @@
+PROJECT: "加上了focal nll loss"
+
+PARENT_CONFIG: ./default99.yaml
+
+AVAILABLE_GPUS: 2,3  #if not set, will use all gpus
+
+USE_CHECKPOINT: True
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 5
+CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
+                                  # As the number increases (from 1 to 4), the memory cost increases.
+                                  # We have deleted many comments in this official code simplicity,
+                                  # if you have any questions, feel free to contact with the author.
+NUM_FEATURE_LEVELS: 4
+
+# SAMPLE_LENGTHS: [4, 3, 4, 5]
+
+OUTPUTS_DIR: /data/users/wangying01/lth/hsmot/workdir_2/memotr/spectralemb/20_1
+SUBMIT_DIR: /data/users/wangying01/lth/hsmot/workdir_2/memotr/spectralemb/20_1
+
+
+ENCODER_SPECTRAL: True
+
+TRAIN_HALF: True
+
+SCEM:
+  ENABLE: True
+  SOME_PARAMETRES: 1
+  WITH_FOREGROUND: True
+  PRIOR_MODE: gate
+  
+LOSS_SCEM_NLL: 1
+LOSS_SCEM_BCE: 1
+LOSS_SCEM_DICE: 1
+LOSS_NLL_CONFIG:
+  TYPE: focal # focal or mean
+  ALPHA_POS: 1.0
+  ALPHA_NEG: 0.1
+  GAMMA_POS: 1.0
+  GAMMA_NEG: 0.0

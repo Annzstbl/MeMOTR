@@ -411,7 +411,7 @@ class MeMOTR(nn.Module):
             res["inter_references"] = inter_references
             res["inter_queries"] = inter_queries
             res["init_reference"] = init_reference
-            res["outputs"] = outputs
+            res['all_outputs'] = outputs
             res["spectral_weights"] = spectral_weights
 
         if self.use_scem:

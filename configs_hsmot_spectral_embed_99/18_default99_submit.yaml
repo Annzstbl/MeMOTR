@@ -1,0 +1,9 @@
+PARENT_CONFIG: ./18_train_half_hsmot8ch_spectralembConv_fconv10lr_scem_priormap.yaml
+
+OUTPUTS_DIR: /data/users/wangying01/lth/hsmot/workdir_2/memotr/debug99_submit
+SUBMIT_DIR: /data/users/wangying01/lth/hsmot/workdir_2/memotr/debug99_submit
+
+MODE: submit
+SUBMIT_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/18_half_priormap_99/checkpoint_15.pth
+
+AVAILABLE_GPUS: 1,3  #if not set, will use all gpus
