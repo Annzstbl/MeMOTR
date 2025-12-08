@@ -67,6 +67,9 @@ class ClipCriterion:
         self.loss_nll_config = loss_nll_config
 
     def set_epoch(self, epoch: int):
+        '''
+            设置一些随epoch变化的损失权重
+        '''
         self.epoch = epoch
         if self.epoch >= self.kl_cos_scheduler_epoch:
             self.weight["spectral_kl_loss"] = self.kl_weight_eta
@@ -148,7 +151,9 @@ class ClipCriterion:
 
         return
 
-    def get_sum_loss_dict(self, loss_dict: dict):
+    def get_sum_loss_dict(self, loss_dict: dict, log_dict: dict):
+        
+
         def get_weight(loss_name):
             if "box_l1_loss" in loss_name:
                 return self.weight["box_l1_loss"]
@@ -167,10 +172,20 @@ class ClipCriterion:
             elif "scem_dice_loss" in loss_name:
                 return self.weight["scem_dice_loss"]
 
+        #== 预处理：当kl权重为0时，不再显示spectral_kl_loss
+        if get_weight("spectral_kl_loss") == 0:
+            pop_keys_log = [k for k in log_dict if "spectral_kl_loss" in k]
+            pop_keys_loss = [k for k in loss_dict if "spectral_kl_loss" in k]
+            for k in pop_keys_log:
+                log_dict.pop(k)
+            for k in pop_keys_loss:
+                loss_dict.pop(k)
+
         loss = sum([
             get_weight(k) * v for k, v in loss_dict.items()
         ])
-        return loss
+
+        return loss, log_dict
 
     def get_mean_by_n_gts(self) -> Tuple[Dict, Dict]:
         total_n_gts = sum(self.n_gts)
@@ -491,9 +506,9 @@ class ClipCriterion:
             log_mix = model_outputs["scem_log_mix"]
 
             heatmap = self.target_list[frame_idx][0]['heatmap'].unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-            # heatmap = gt_trackinstances[0].heatmap.unsqueeze(0)  # (1, 1, H, W)
             #降尺度
             heatmap = F.adaptive_avg_pool2d(heatmap, (gamma.shape[2], gamma.shape[3]))
+
             scem_bce_loss = focal_bce_loss(gamma, heatmap)
             scem_dice_loss = dice_loss(gamma, heatmap)
             nll_type = self.loss_nll_config.get("TYPE", "mean")
@@ -666,7 +681,6 @@ def dice_loss(pred, target, eps=1e-6):
     union = (pred * pred).sum() + (target * target).sum()
     return 1 - (2 * inter + eps) / (union + eps)
 
-
 def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
     """
     Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
@@ -693,7 +707,6 @@ def sigmoid_focal_loss(inputs, targets, alpha: float = 0.25, gamma: float = 2):
         loss = alpha_t * loss
 
     return loss.mean(1).sum()   # 在类别上计算平均
-
 
 def build(config: dict):
     dataset_num_classes = {

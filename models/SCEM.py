@@ -96,8 +96,6 @@ class CenterMaskedConv3x3(nn.Module):
     def forward(self, x):
         self.conv.weight.data = self.conv.weight.data * self.mask
         out = self.conv(x)
-        # w = self.conv.weight * self.mask
-        # out = F.conv2d(x, w, bias=None, stride=1, padding=1, groups=self.conv.groups)
         out = self.bn(out)
         out = self.act(out)
         return out
@@ -123,9 +121,46 @@ class ASPP(nn.Module):
         ys = [m(x) for m in self.branches]
         return self.proj(torch.cat(ys, dim=1))
 
+class SpectralPi(nn.Module):
+    def __init__(self, spectral_database_num=64, in_ch=8, eps=1e-6):
+        super().__init__()
+        self.K = spectral_database_num
+        self.C = in_ch
+        self.eps = eps
+        # 学习的光谱库 logits，先过 sigmoid 再用
+        self.spectral_db_logits = nn.Parameter(
+            torch.randn(self.K, self.C)
+        )
+
+    def forward(self, spec):
+        """
+        spec: [B, C, H, W]，假定已经在 [0,1] 区间
+        return: prior_sim [B, K, H, W]  余弦相似度先验图
+        """
+        B, C, H, W = spec.shape
+        assert C == self.C, f"SpectralPi expects {self.C} channels, got {C}"
+
+        # ----- 像素光谱：减自身均值再 L2 归一化 -----
+        s = spec.clamp(0.0, 1.0)                          # [B,C,H,W]
+        mu_s = s.mean(dim=1, keepdim=True)                # [B,1,H,W]
+        s_zero = s - mu_s                                 # 去均值
+        s_norm = s_zero / (s_zero.norm(dim=1, keepdim=True) + self.eps)  # [B,C,H,W]
+
+        # ----- 光谱库：sigmoid 后也减均值+归一 -----
+        db = torch.sigmoid(self.spectral_db_logits)       # [K,C] in (0,1)
+        mu_db = db.mean(dim=1, keepdim=True)              # [K,1]
+        db_zero = db - mu_db
+        db_norm = db_zero / (db_zero.norm(dim=1, keepdim=True) + self.eps)  # [K,C]
+
+        # ----- 1x1 conv 实现余弦相似度 -----
+        weight = db_norm.view(self.K, self.C, 1, 1)       # [K,C,1,1]
+        prior_sim = F.conv2d(s_norm, weight=weight, bias=None)  # [B,K,H,W]
+
+        # 现在 prior_sim 真正可以覆盖 [-1,1]，差异会大很多
+        return prior_sim
 
 class PIHead(nn.Module):
-    def __init__(self, in_ch, ch=128, use_cache=True):
+    def __init__(self, in_ch, ch=128, use_cache=True, use_spectral_pi=True, spectral_databse_num=64):
         super().__init__()
         self.coord = CoordConv(in_ch, ch // 2, use_cache=use_cache)  # +2 coords
         self.mask1 = CenterMaskedConv3x3(ch // 2)
@@ -142,15 +177,33 @@ class PIHead(nn.Module):
         )
         self.out = nn.Conv2d(ch, 1, 1, 1, 0)
 
-    def forward(self, x):
+        # 光谱相关
+        self.use_spectral_pi = use_spectral_pi
+        if use_spectral_pi:
+            self.spec_proj = nn.Sequential(
+                nn.Conv2d(spectral_databse_num, ch, 1, 1, 0, bias=False),
+                GN(ch),
+                nn.SiLU(inplace=False)
+            )
+            self.spec_pi = SpectralPi(spectral_databse_num)
+
+    def forward(self, x, spec=None):
         a = self.coord(x)
         a = self.mask1(a)
         a = self.aspp(a)
         g = self.global_fc(self.global_pool(a))
         g = g.expand_as(a).contiguous()
-        h = self.local_fuse(torch.cat([a, g], dim=1))
-        pi = torch.sigmoid(self.out(h))
-        return pi
+
+        f_space = torch.cat([a, g], dim=1)
+        if self.use_spectral_pi:
+            f_spec = self.spec_proj(self.spec_pi(spec))
+            h = self.local_fuse(f_space + f_spec)
+            pi = torch.sigmoid(self.out(h))
+            return pi
+        else:
+            h = self.local_fuse(f_space)
+            pi = torch.sigmoid(self.out(h))
+            return pi
 
 
 # =========================
@@ -213,7 +266,7 @@ def log_student_t_interval(z, mu, raw_log_scale, raw_nu=None,
 # =========================
 
 class MixBGFG(nn.Module):
-    def __init__(self, C, depth=4, width=0.5, with_foreground=True, use_cache=True, tau_mode="mean", prior_mode=None):
+    def __init__(self, C, depth=4, width=0.5, with_foreground=True, use_cache=True, tau_mode="mean", prior_mode=None, use_spectral_pi=False, spectral_databse_num=64):
         super().__init__()
         ch = int(C * width)
         self.tau_mode  = tau_mode  # "mean" or "sqrt"
@@ -237,7 +290,7 @@ class MixBGFG(nn.Module):
             # self.logscale_f_head = nn.Conv2d(ch, C, 3, 1, 1)
             # self.raw_nu          = nn.Parameter(torch.tensor(1.0))  # learnable ν
 
-        self.pi_head = PIHead(in_ch=ch, use_cache=use_cache)
+        self.pi_head = PIHead(in_ch=ch, use_cache=use_cache, use_spectral_pi=use_spectral_pi, spectral_databse_num=spectral_databse_num)
         self.prior_mode = prior_mode.lower() if prior_mode is not None else None
         if self.prior_mode == "gate":
             self.gate_head = nn.Sequential(nn.Conv2d(ch+1, ch//2, 3,1,1), GN(ch//2), nn.SiLU(),
@@ -251,7 +304,7 @@ class MixBGFG(nn.Module):
                 nn.init.zeros_(self.logsig_f_head.weight)
                 self.logsig_f_head.bias.fill_(1.313)
 
-    def forward(self, Z, valid_mask=None, interval_width: float = 1.0, prior_map = None):
+    def forward(self, Z, valid_mask=None, interval_width: float = 1.0, prior_map = None, spec=None):
         """
         Z: [B,C,H,W]
         valid_mask: [B,H,W] or [B,1,H,W], True=valid
@@ -284,7 +337,7 @@ class MixBGFG(nn.Module):
             log_pf = torch.zeros_like(log_pb)
 
         # π 先验
-        pi_net = self.pi_head(x).clamp(1e-6, 1 - 1e-6)   # [B,1,H,W]
+        pi_net = self.pi_head(x, spec).clamp(1e-6, 1 - 1e-6)   # [B,1,H,W]
         if self.prior_mode is not None:
             logit_net = torch.logit(pi_net)
             prior_map = torch.clamp(prior_map, 1e-6, 1 - 1e-6)
@@ -348,6 +401,9 @@ class SCEM(nn.Module):
         self.use_cache  = bool(self.cfg.get("USE_CACHE", True))
         self.in_ch      = int(self.cfg.get("IN_CHANNELS", 256))
         self.prior_mode = self.cfg.get("PRIOR_MODE", None)
+        self.use_spectral_pi = bool(self.cfg.get("USE_SPECTRAL_PI", False))
+        self.spectral_databse_num = int(self.cfg.get("SPECTRAL_DATABASE_NUM", 64))
+
         # self.lazy_built = False
         self.posterior = MixBGFG(
             C=self.in_ch,
@@ -355,12 +411,14 @@ class SCEM(nn.Module):
             width=self.width,
             with_foreground=self.with_foreground,
             use_cache=self.use_cache,
-            prior_mode=self.prior_mode
+            prior_mode=self.prior_mode,
+            use_spectral_pi=self.use_spectral_pi,
+            spectral_databse_num=self.spectral_databse_num
         )
 
         #打印所有参数及其大小
-        for name, param in self.named_parameters():
-            print(f"SCEM param: {name}, size: {param.size()}")
+        # for name, param in self.named_parameters():
+            # print(f"SCEM param: {name}, size: {param.size()}")
 
 
     @torch.no_grad()
@@ -369,7 +427,7 @@ class SCEM(nn.Module):
         for m in masks:
             assert m.dtype == torch.bool and m.dim() == 3, "mask should be [B,H,W] bool"
 
-    def forward(self, features, masks, prior_map=None):
+    def forward(self, features, masks, prior_map=None, specs=None):
         """
         features: List[Tensor]   each [B, C_i, H_i, W_i]
         masks:    List[Bool]     each [B, H_i, W_i]  True=valid
@@ -383,11 +441,16 @@ class SCEM(nn.Module):
         assert isinstance(features, (list, tuple)) and len(features) > 0
         self._check_masks(masks)
 
+        # TODO 多尺度特征融合
         feat0 = features[0]
         mask0 = masks[0]  # [B,H0,W0] bool
 
-
-        out = self.posterior(feat0, valid_mask=mask0, prior_map=prior_map)
+        if self.use_spectral_pi:
+            assert specs is not None
+            spec = specs[0]
+            out = self.posterior(feat0, valid_mask=mask0, prior_map=prior_map, spec=spec)
+        else:
+            out = self.posterior(feat0, valid_mask=mask0, prior_map=prior_map)
         # gamma = out["gamma"]              # [B,1,H0,W0]
         # aux   = {"log_mix": out["log_mix"], "pi": out["pi"], "valid_mask": out["valid_mask"]}
 
@@ -421,7 +484,7 @@ class SCEM(nn.Module):
         # return F.interpolate(posterior, size=feat.shape[-2:], mode="bilinear", align_corners=False)
 
     @staticmethod
-    def apply_posterior_enhance(features, masks, scem_out, alpha: float = 0.5):
+    def apply_posterior_enhance(features, masks, scem_out, alpha: float = 1.0):
         """
         使用后验概率(来自高分辨率 scem_out)对多尺度特征做门控增强：
         X_i' = X_i * (1 + alpha * γ_i)
@@ -444,8 +507,6 @@ class SCEM(nn.Module):
         enhanced = []
         for xi, mi in zip(features, masks):
             # 1) 将 posterior 下采样到该尺度
-            # gi = SCEM._resize_posterior_to(xi, scem_out).clamp_(0.0, 1.0)   # [B,1,Hi,Wi]
-            # gi = SCEM._resize_posterior_to(xi, scem_out.detach()).clamp(0.0, 1.0)
             gi = SCEM._resize_posterior_to(xi, scem_out).clamp(0.0, 1.0)
             # 2) mask 无效处置零
             if mi.dim() == 3:
@@ -454,14 +515,3 @@ class SCEM(nn.Module):
             xi_enh = xi * (1.0 + alpha * gi)
             enhanced.append(xi_enh)
         return enhanced
-
-# =========================
-# Losses
-# =========================
-
-def nll_loss_from_aux(aux):
-    log_mix = aux["log_mix"]                  # [B,1,H,W]
-    valid   = aux["valid_mask"].bool()        # [B,1,H,W]
-    if valid.sum() == 0:
-        return log_mix.new_zeros(())
-    return (-log_mix[valid]).mean() 

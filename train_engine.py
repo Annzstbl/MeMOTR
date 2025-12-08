@@ -320,7 +320,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                             previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1)
 
         loss_dict, log_dict = criterion.get_mean_by_n_gts()
-        loss = criterion.get_sum_loss_dict(loss_dict=loss_dict)
+        loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
 
         # Metrics log
         metric_log.update(name="total_loss", value=loss.item())
