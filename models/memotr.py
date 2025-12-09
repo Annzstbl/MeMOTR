@@ -103,10 +103,11 @@ class MeMOTR(nn.Module):
         # SCEM module
         self.scem_module = scem_module
         self.use_scem = self.scem_module is not None
+        self.use_scem_norm = self.scem_module.norm if self.scem_module is not None else False
         self.scem_use_gt = scem_use_gt
         
         # GroupNorm for SCEM enhanced features
-        if self.use_scem:
+        if self.use_scem_norm:
             self.scem_norms = nn.ModuleList([
                 nn.GroupNorm(num_groups=32, num_channels=self.hidden_dim)
                 for _ in range(self.n_feature_levels)
@@ -254,15 +255,17 @@ class MeMOTR(nn.Module):
             else:
                 gamma, log_mix = self.scem_module(srcs, masks)
             srcs = self.scem_module.apply_posterior_enhance(srcs, masks, gamma, alpha=1.0)
-            # Apply GroupNorm to SCEM enhanced features
-            srcs = [self.scem_norms[i](src) for i, src in enumerate(srcs)]
+            if self.use_scem_norm:
+                # Apply GroupNorm to SCEM enhanced features
+                srcs = [self.scem_norms[i](src) for i, src in enumerate(srcs)]
 
         if self.scem_use_gt:
             assert self.use_scem is False
             assert heatmap is not None
             srcs = SCEM.apply_posterior_enhance(srcs, masks, heatmap.unsqueeze(1), alpha=0.5)
-            # Apply GroupNorm to SCEM enhanced features
-            srcs = [self.scem_norms[i](src) for i, src in enumerate(srcs)]
+            if self.use_scem_norm:
+                # Apply GroupNorm to SCEM enhanced features
+                srcs = [self.scem_norms[i](src) for i, src in enumerate(srcs)]
 
         if self.encoder_global_token:
             # Generate global token by averaging over valid pixels

@@ -403,6 +403,7 @@ class SCEM(nn.Module):
         self.prior_mode = self.cfg.get("PRIOR_MODE", None)
         self.use_spectral_pi = bool(self.cfg.get("USE_SPECTRAL_PI", False))
         self.spectral_databse_num = int(self.cfg.get("SPECTRAL_DATABASE_NUM", 64))
+        self.norm       = bool(self.cfg.get("NORM", False))
 
         # self.lazy_built = False
         self.posterior = MixBGFG(

@@ -24,6 +24,8 @@ from hsmot.datasets.pipelines.channel import rotate_norm_boxes_to_boxes
 from hsmot.mmlab.hs_mmrotate import obb2poly
 from utils.GMC import compute_gmc_sequence
 import numpy as np 
+from hsmot.eval.validator import PredictValidator, val_folder
+
 
 class Submitter:
     def __init__(self, dataset_name: str, split_dir: str, seq_name: str, outputs_dir: str, model: nn.Module,
@@ -35,7 +37,8 @@ class Submitter:
                  visualize: bool = False,
                  npy2rgb: bool = False, 
                  decoder_spectral: bool = True,
-                 use_scem_gt: bool = False):
+                 use_scem_gt: bool = False,
+                 only_train_detr: bool = False):
         self.dataset_name = dataset_name
         self.seq_name = seq_name
         self.seq_dir = path.join(split_dir, seq_name)
@@ -61,6 +64,7 @@ class Submitter:
         self.use_motion = use_motion
         self.visualize = visualize
         self.decoder_spectral = decoder_spectral
+        self.only_train_detr = only_train_detr
         # 对路径进行一些操作
         os.makedirs(self.predict_dir, exist_ok=True)
         if os.path.exists(os.path.join(self.predict_dir, f'{self.seq_name}.txt')):
@@ -78,12 +82,66 @@ class Submitter:
     @torch.no_grad()
     def run(self):
 
-        if self.use_scem_gt:
+        if self.only_train_detr:#仍然可能Prior_map = True
+            self._run_with_only_train_detr()
+        elif self.use_scem_gt:
             self._run_with_GT()
         elif self.use_prior_map:
             self._run_with_prior_map()
         else:
             self._run()
+
+    @torch.no_grad()
+    def _run_with_only_train_detr(self):
+
+
+        txt_lines = []
+        for i, ((image, ori_image), info) in enumerate(tqdm(self.dataloader, desc=f"Submit seq: {self.seq_name}")):
+            # 单帧图像
+            tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
+                                    num_classes=get_model(self.model).num_classes,
+                                    use_dab=self.use_dab,
+                                    ).to(self.device)]
+
+            # image: (1, C, H, W); ori_image: (1, H, W, C)
+            frame = tensor_list_to_nested_tensor([image[0]]).to(self.device)
+
+            res = self.model(frame=frame, tracks=tracks)
+            previous_tracks, new_tracks = self.tracker.update(
+                model_outputs=res,
+                tracks=tracks
+            )
+            # tracks: List[TrackInstances] = get_model(self.model).postprocess_single_frame(previous_tracks, new_tracks, None)
+            tracks = new_tracks
+            tracks_result = tracks[0].to(torch.device("cpu"))
+            ori_h, ori_w = ori_image.shape[1], ori_image.shape[2]
+            # box = [x, y, w, h]
+            tracks_result.area = tracks_result.boxes[:, 2] * ori_w * \
+                                 tracks_result.boxes[:, 3] * ori_h
+            tracks_result = self.filter_by_score(tracks_result, thresh=self.result_score_thresh)
+            tracks_result = self.filter_by_area(tracks_result)
+            # to xyxy:
+            # tracks_result.boxes = box_cxcywh_to_xyxy(tracks_result.boxes)
+            # tracks_result.boxes = (tracks_result.boxes * torch.as_tensor([ori_w, ori_h, ori_w, ori_h], dtype=torch.float))
+
+            # if self.dataset_name == "BDD100K":
+            #     self.update_results(tracks_result=tracks_result, frame_idx=i, results=bdd100k_results, img_path=info[0])
+            # else:
+            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (image.shape[2], image.shape[3]), version='le135')
+            boxes_xyxyxyxy = obb2poly(boxes_xyxyxyxy)
+
+            for _tracks, xyxyxyxy in zip(tracks_result, boxes_xyxyxyxy):
+                save_format = '{frame:6d},{id:6d},{x1:.3f},{y1:.3f},{x2:.3f},{y2:.3f},{x3:.3f},{y3:.3f},{x4:.3f},{y4:.3f},{conf:.3f},{label:2d},-1\n'
+                x1, y1, x2, y2, x3, y3, x4, y4 = xyxyxyxy.tolist()
+                obj_id = _tracks.ids.item()
+                conf = torch.max(_tracks.scores, dim=-1).values.item()
+                label = _tracks.labels.item()
+                line = save_format.format(frame=i + 1, id=obj_id, x1=x1, y1=y1, x2=x2, y2=y2, x3=x3, y3=y3, x4=x4, y4=y4, conf=conf, label=label)
+                txt_lines.append(line)
+
+        with open(os.path.join(self.predict_dir, f"{self.seq_name}.txt"), "w") as file:
+            file.writelines(txt_lines)
+
 
     @torch.no_grad()
     def _run_with_prior_map(self):
@@ -442,7 +500,7 @@ def submit(config: dict):
         submitter.run()
     return
 
-def submit_during_train(config: dict, epoch: int, model: nn.Module):
+def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_detr: bool = False):
 
     model.eval()
 
@@ -499,7 +557,8 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module):
             miss_tolerance=miss_tolerance,
             npy2rgb = config["NPY2RGB"],
             decoder_spectral= config["DECODER_SPECTRAL"],
-            use_scem_gt=config["SCEM"]["USE_GT"]
+            use_scem_gt=config["SCEM"]["USE_GT"],
+            only_train_detr=only_train_detr
         )
         submitter.run()
 
@@ -508,24 +567,36 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module):
         torch.distributed.barrier()
 
     if distributed_rank() == 0:
-        gt_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'mot')
-        # 把outputs_dir分为parent和folderName 分给tracker_dir和trackers_name
-        tracker_dir = submit_dir
-        trackers_name = outputs_dir.split('/')[-1]
-        trackers_subfolder = 'tracker'
-        img_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'npy')
-        current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        os_flag = os.system(
-            f"{sys.executable} {current_file_dir}/../TrackEval/scripts/run_hsmot_8ch.py " 
-            f"--USE_PARALLEL False "
-            f"--METRICS HOTA CLEAR Identity " 
-            f"--GT_FOLDER {gt_dir} "
-            f"--TRACKERS_FOLDER {tracker_dir} "
-            f"--TRACKERS_TO_EVAL {trackers_name} "
-            f"--TRACKER_SUB_FOLDER {trackers_subfolder} "
-            f"--IMG_FOLDER {img_dir} "
-        )
-        assert os_flag == 0, "TrackEval failed to run."
+        if only_train_detr:
+            gt_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'mot')
+            # 把outputs_dir分为parent和folderName 分给tracker_dir和trackers_name
+            tracker_dir = submit_dir
+            trackers_name = outputs_dir.split('/')[-1]
+            trackers_subfolder = 'tracker'
+            img_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'npy')
+            current_file_dir = os.path.dirname(os.path.abspath(__file__))
+            val_lines = val_folder(gt_folder=gt_dir, pred_folder=os.path.join(tracker_dir, trackers_name, trackers_subfolder))
+            submit_logger.show(head="Validation Results:", log='\n'.join(val_lines))
+            submit_logger.write('\n'.join(val_lines))
+        else:
+            gt_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'mot')
+            # 把outputs_dir分为parent和folderName 分给tracker_dir和trackers_name
+            tracker_dir = submit_dir
+            trackers_name = outputs_dir.split('/')[-1]
+            trackers_subfolder = 'tracker'
+            img_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'npy')
+            current_file_dir = os.path.dirname(os.path.abspath(__file__))
+            os_flag = os.system(
+                f"{sys.executable} {current_file_dir}/../TrackEval/scripts/run_hsmot_8ch.py " 
+                f"--USE_PARALLEL False "
+                f"--METRICS HOTA CLEAR Identity " 
+                f"--GT_FOLDER {gt_dir} "
+                f"--TRACKERS_FOLDER {tracker_dir} "
+                f"--TRACKERS_TO_EVAL {trackers_name} "
+                f"--TRACKER_SUB_FOLDER {trackers_subfolder} "
+                f"--IMG_FOLDER {img_dir} "
+            )
+            assert os_flag == 0, "TrackEval failed to run."
 
     if is_distributed():
         torch.distributed.barrier()

@@ -156,7 +156,8 @@ def train(config: dict):
             multi_checkpoint=multi_checkpoint,
             no_grad_frames=no_grad_frames,
             decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
-            dynamic_use_checkpoint=dynamic_use_checkpoint and use_checkpoint
+            dynamic_use_checkpoint=dynamic_use_checkpoint and use_checkpoint,
+            only_train_detr=config["ONLY_TRAIN_DETR"]
         )
         scheduler.step()
         train_states["start_epoch"] += 1
@@ -177,7 +178,7 @@ def train(config: dict):
         # 同时，最后5轮全部验证
         if ("EVALUATE_PER_EPOCH" in config and config["EVALUATE_PER_EPOCH"] > 0 and (epoch+1) % config["EVALUATE_PER_EPOCH"] == 0) or (epoch >= config["EPOCHS"] - 5):
             from submit_engine import submit_during_train
-            submit_during_train(config=config, epoch=epoch, model=model)
+            submit_during_train(config=config, epoch=epoch, model=model, only_train_detr=config["ONLY_TRAIN_DETR"])
 
         train_logger.flush_buffers()
     # log记录结束时间
@@ -209,7 +210,8 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     multi_checkpoint: bool = False,
                     no_grad_frames: int | None = None,
                     decoder_spectral_clusters: int=1,
-                    dynamic_use_checkpoint: bool = False):
+                    dynamic_use_checkpoint: bool = False,
+                    only_train_detr: bool = False):
     """
     Args:
         model: Model.
@@ -252,130 +254,237 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     
     TrackInstances.set_static_properties(use_spectral_decoder=get_model(model).decoder_spectral, decoder_spectral_weights_dim=8*decoder_spectral_clusters)
 
-    for i, batch in enumerate(dataloader):
-        img_metas = batch["img_metas"][0][0] #batch[keys][batches][sequentials] 
- 
-        iter_start_timestamp = time.time()
-        tracks = TrackInstances.init_tracks(batch=batch,
-                                            hidden_dim=get_model(model).hidden_dim,
-                                            num_classes=get_model(model).num_classes,
-                                            device=device, use_dab=use_dab,
-                                            )
-        criterion.init_a_clip(batch=batch,
-                              hidden_dim=get_model(model).hidden_dim,
-                              num_classes=get_model(model).num_classes,
-                              device=device, )
+    if only_train_detr:
+        for i, batch in enumerate(dataloader):
+            img_metas = batch["img_metas"][0][0] #batch[keys][batches][sequentials] 
+    
+            iter_start_timestamp = time.time()
+            tracks = TrackInstances.init_tracks(batch=batch,
+                                                hidden_dim=get_model(model).hidden_dim,
+                                                num_classes=get_model(model).num_classes,
+                                                device=device, use_dab=use_dab,
+                                                )
+            criterion.init_a_clip(batch=batch,
+                                hidden_dim=get_model(model).hidden_dim,
+                                num_classes=get_model(model).num_classes,
+                                device=device, )
 
-        # 计算光流 [B, frames, 2, 3]
-        from utils.GMC import compute_gmc_sequence
-        batch_size = len(batch["imgs"])
-        seq_length = len(batch["imgs"][0])
-        batch_gmcs = []#List(List(ndarray))
-        for bs_index in range(batch_size):
-            batch_gmcs.append(compute_gmc_sequence(batch["imgs"][bs_index], method="sparseOptFlow", downscale=1))
-        batch_gmcs = torch.tensor(batch_gmcs, dtype=torch.float32).to(device)
-        batch_gmcs.requires_grad_(False)
-        assert batch_gmcs.shape == (batch_size, seq_length, 2, 3)
-
-        for frame_idx in range(len(batch["imgs"][0])):
-            if no_grad_frames is None or frame_idx >= no_grad_frames:
-                frame = [fs[frame_idx] for fs in batch["imgs"]]
-                for f in frame:
-                    f.requires_grad_(False)
-                frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device) #[B, C, H, W]
-
-                if 'heatmap' in batch["infos"][0][0]:
-                    heatmap = [hs[frame_idx]['heatmap'] for hs in batch["infos"]]
-                    for h in heatmap:
-                        h.requires_grad_(False)
-                    heatmap = torch.stack(heatmap, dim=0).to(device)
-                else:
-                    heatmap = None
-
-                gmc = batch_gmcs[:, frame_idx, :, :] # [B, 2, 3]
-                res = model(frame=frame, tracks=tracks, heatmap=heatmap, gmc=gmc)
-                previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
-                    model_outputs=res,
-                    tracked_instances=tracks,
-                    frame_idx=frame_idx,
-                    img_metas=img_metas
-                )
-                if frame_idx < len(batch["imgs"][0]) - 1:
-                    tracks = get_model(model).postprocess_single_frame(
-                        previous_tracks, new_tracks, unmatched_dets)
-            else:
-                with torch.no_grad():
+            for frame_idx in range(len(batch["imgs"][0])):
+                if no_grad_frames is None or frame_idx >= no_grad_frames:
                     frame = [fs[frame_idx] for fs in batch["imgs"]]
                     for f in frame:
                         f.requires_grad_(False)
-                    frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
+                    frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device) #[B, C, H, W]
+
+                  
                     res = model(frame=frame, tracks=tracks)
                     previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                         model_outputs=res,
                         tracked_instances=tracks,
-                        frame_idx=frame_idx
+                        frame_idx=frame_idx,
+                        img_metas=img_metas
                     )
                     if frame_idx < len(batch["imgs"][0]) - 1:
                         tracks = get_model(model).postprocess_single_frame(
-                            previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1)
+                            previous_tracks, new_tracks, unmatched_dets)
+                else:
+                    with torch.no_grad():
+                        frame = [fs[frame_idx] for fs in batch["imgs"]]
+                        for f in frame:
+                            f.requires_grad_(False)
+                        frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
+                        res = model(frame=frame, tracks=tracks)
+                        previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
+                            model_outputs=res,
+                            tracked_instances=tracks,
+                            frame_idx=frame_idx
+                        )
+                        if frame_idx < len(batch["imgs"][0]) - 1:
+                            tracks = get_model(model).postprocess_single_frame(
+                                previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1)
 
-        loss_dict, log_dict = criterion.get_mean_by_n_gts()
-        loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
+            loss_dict, log_dict = criterion.get_mean_by_n_gts()
+            loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
 
-        # Metrics log
-        metric_log.update(name="total_loss", value=loss.item())
-        loss = loss / accumulation_steps
-        loss.backward()
+            # Metrics log
+            metric_log.update(name="total_loss", value=loss.item())
+            loss = loss / accumulation_steps
+            loss.backward()
 
-        if (i + 1) % accumulation_steps == 0:
-            if max_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
-            else:
-                pass
-            optimizer.step()
-            optimizer.zero_grad()
+            if (i + 1) % accumulation_steps == 0:
+                if max_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+                else:
+                    pass
+                optimizer.step()
+                optimizer.zero_grad()
 
-        # For logging
-        for log_k in log_dict:
-            metric_log.update(name=log_k, value=log_dict[log_k][0])
-        iter_end_timestamp = time.time()
-        metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
-        metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
-        data_start_timestamp = time.time()
-        # Outputs logs - 减少同步频率以避免NCCL超时
-        if i % 2 == 0:  # 改为每10个iteration同步一次，而不是每次
-            metric_log.sync()
-            # 修复：只获取当前GPU的内存使用情况，避免跨进程访问
-            max_memory = torch.cuda.max_memory_allocated() // (1024**2)
-            second_per_iter = metric_log.metrics["time per iter"].avg
-            second_per_data = metric_log.metrics["time per data"].avg
-            logger.show(head=f"--[Epoch={epoch}, Iter={i}, "
-                             f"{second_per_iter:.2f}s/iter, "
-                             f"{second_per_data:.2f}s/data, "
-                             f"{i}/{dataloader_len} iters, "
-                             f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
-                             f"Max Memory={max_memory}MB]",
-                        log=metric_log)
+            # For logging
+            for log_k in log_dict:
+                metric_log.update(name=log_k, value=log_dict[log_k][0])
+            iter_end_timestamp = time.time()
+            metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
+            metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
+            data_start_timestamp = time.time()
+            # Outputs logs - 减少同步频率以避免NCCL超时
+            if i % 2 == 0:  # 改为每10个iteration同步一次，而不是每次
+                metric_log.sync()
+                # 修复：只获取当前GPU的内存使用情况，避免跨进程访问
+                max_memory = torch.cuda.max_memory_allocated() // (1024**2)
+                second_per_iter = metric_log.metrics["time per iter"].avg
+                second_per_data = metric_log.metrics["time per data"].avg
+                logger.show(head=f"--[Epoch={epoch}, Iter={i}, "
+                                f"{second_per_iter:.2f}s/iter, "
+                                f"{second_per_data:.2f}s/data, "
+                                f"{i}/{dataloader_len} iters, "
+                                f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
+                                f"Max Memory={max_memory}MB]",
+                            log=metric_log)
 
-            logger.write(head=f"--[Epoch={epoch}, Iter={i}, "
-                             f"{second_per_iter:.2f}s/iter, "
-                             f"{second_per_data:.2f}s/data, "
-                             f"{i}/{dataloader_len} iters, "
-                             f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
-                             f"Max Memory={max_memory}MB]",
-                        log=metric_log, filename="log.txt", mode="a")
-            # logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
-                        #  log=metric_log, filename="log.txt", mode="a")
-            logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
+                logger.write(head=f"--[Epoch={epoch}, Iter={i}, "
+                                f"{second_per_iter:.2f}s/iter, "
+                                f"{second_per_data:.2f}s/data, "
+                                f"{i}/{dataloader_len} iters, "
+                                f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
+                                f"Max Memory={max_memory}MB]",
+                            log=metric_log, filename="log.txt", mode="a")
+                # logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
+                            #  log=metric_log, filename="log.txt", mode="a")
+                logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
 
-        if multi_checkpoint:
-            if i % 1 == 0 and is_main_process():
-                save_checkpoint(
-                    model=model,
-                    path=os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
-                )
+            if multi_checkpoint:
+                if i % 1 == 0 and is_main_process():
+                    save_checkpoint(
+                        model=model,
+                        path=os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
+                    )
 
-        train_states["global_iters"] += 1
+            train_states["global_iters"] += 1
+    else:
+        for i, batch in enumerate(dataloader):
+            img_metas = batch["img_metas"][0][0] #batch[keys][batches][sequentials] 
+    
+            iter_start_timestamp = time.time()
+            tracks = TrackInstances.init_tracks(batch=batch,
+                                                hidden_dim=get_model(model).hidden_dim,
+                                                num_classes=get_model(model).num_classes,
+                                                device=device, use_dab=use_dab,
+                                                )
+            criterion.init_a_clip(batch=batch,
+                                hidden_dim=get_model(model).hidden_dim,
+                                num_classes=get_model(model).num_classes,
+                                device=device, )
+
+            # 计算光流 [B, frames, 2, 3]
+            from utils.GMC import compute_gmc_sequence
+            batch_size = len(batch["imgs"])
+            seq_length = len(batch["imgs"][0])
+            batch_gmcs = []#List(List(ndarray))
+            for bs_index in range(batch_size):
+                batch_gmcs.append(compute_gmc_sequence(batch["imgs"][bs_index], method="sparseOptFlow", downscale=1))
+            batch_gmcs = torch.tensor(batch_gmcs, dtype=torch.float32).to(device)
+            batch_gmcs.requires_grad_(False)
+            assert batch_gmcs.shape == (batch_size, seq_length, 2, 3)
+
+            for frame_idx in range(len(batch["imgs"][0])):
+                if no_grad_frames is None or frame_idx >= no_grad_frames:
+                    frame = [fs[frame_idx] for fs in batch["imgs"]]
+                    for f in frame:
+                        f.requires_grad_(False)
+                    frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device) #[B, C, H, W]
+
+                    if 'heatmap' in batch["infos"][0][0]:
+                        heatmap = [hs[frame_idx]['heatmap'] for hs in batch["infos"]]
+                        for h in heatmap:
+                            h.requires_grad_(False)
+                        heatmap = torch.stack(heatmap, dim=0).to(device)
+                    else:
+                        heatmap = None
+
+                    gmc = batch_gmcs[:, frame_idx, :, :] # [B, 2, 3]
+                    res = model(frame=frame, tracks=tracks, heatmap=heatmap, gmc=gmc)
+                    previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
+                        model_outputs=res,
+                        tracked_instances=tracks,
+                        frame_idx=frame_idx,
+                        img_metas=img_metas
+                    )
+                    if frame_idx < len(batch["imgs"][0]) - 1:
+                        tracks = get_model(model).postprocess_single_frame(
+                            previous_tracks, new_tracks, unmatched_dets)
+                else:
+                    with torch.no_grad():
+                        frame = [fs[frame_idx] for fs in batch["imgs"]]
+                        for f in frame:
+                            f.requires_grad_(False)
+                        frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
+                        res = model(frame=frame, tracks=tracks)
+                        previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
+                            model_outputs=res,
+                            tracked_instances=tracks,
+                            frame_idx=frame_idx
+                        )
+                        if frame_idx < len(batch["imgs"][0]) - 1:
+                            tracks = get_model(model).postprocess_single_frame(
+                                previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1)
+
+            loss_dict, log_dict = criterion.get_mean_by_n_gts()
+            loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
+
+            # Metrics log
+            metric_log.update(name="total_loss", value=loss.item())
+            loss = loss / accumulation_steps
+            loss.backward()
+
+            if (i + 1) % accumulation_steps == 0:
+                if max_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+                else:
+                    pass
+                optimizer.step()
+                optimizer.zero_grad()
+
+            # For logging
+            for log_k in log_dict:
+                metric_log.update(name=log_k, value=log_dict[log_k][0])
+            iter_end_timestamp = time.time()
+            metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
+            metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
+            data_start_timestamp = time.time()
+            # Outputs logs - 减少同步频率以避免NCCL超时
+            if i % 2 == 0:  # 改为每10个iteration同步一次，而不是每次
+                metric_log.sync()
+                # 修复：只获取当前GPU的内存使用情况，避免跨进程访问
+                max_memory = torch.cuda.max_memory_allocated() // (1024**2)
+                second_per_iter = metric_log.metrics["time per iter"].avg
+                second_per_data = metric_log.metrics["time per data"].avg
+                logger.show(head=f"--[Epoch={epoch}, Iter={i}, "
+                                f"{second_per_iter:.2f}s/iter, "
+                                f"{second_per_data:.2f}s/data, "
+                                f"{i}/{dataloader_len} iters, "
+                                f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
+                                f"Max Memory={max_memory}MB]",
+                            log=metric_log)
+
+                logger.write(head=f"--[Epoch={epoch}, Iter={i}, "
+                                f"{second_per_iter:.2f}s/iter, "
+                                f"{second_per_data:.2f}s/data, "
+                                f"{i}/{dataloader_len} iters, "
+                                f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
+                                f"Max Memory={max_memory}MB]",
+                            log=metric_log, filename="log.txt", mode="a")
+                # logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
+                            #  log=metric_log, filename="log.txt", mode="a")
+                logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
+
+            if multi_checkpoint:
+                if i % 1 == 0 and is_main_process():
+                    save_checkpoint(
+                        model=model,
+                        path=os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
+                    )
+
+            train_states["global_iters"] += 1
 
     # Epoch end
     metric_log.sync()

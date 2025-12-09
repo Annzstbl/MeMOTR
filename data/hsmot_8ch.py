@@ -136,7 +136,10 @@ class hsmot_8ch(MOTDataset):
         return len(self.sample_begin_frames)
 
     def sample_frames_idx(self, vid: int, begin_frame: int) -> list[int]:
-        if self.sample_mode == "random_interval":
+        if self.sample_length == 1:
+            return [begin_frame]
+
+        elif self.sample_mode == "random_interval":
             assert self.sample_length > 1, "Sample length is less than 2."
             remain_frames = self.sample_vid_tmax[vid] - begin_frame
             max_interval = floor(remain_frames / (self.sample_length - 1))

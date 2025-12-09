@@ -47,7 +47,7 @@ class RuntimeTracker:
         # tracks[0].query_spectral_weights = model_outputs["last_query_spectral_weights"][0][n_dets:]
 
         for i in range(len(tracks[0])):
-            if tracks[0].scores[i][tracks[0].labels[i]] < self.track_score_thresh:
+            if tracks[0].scores[i][tracks[0].labels[i]] < self.track_score_thresh: #如果低于阈值，则增加该目标的消失时间，但保留id
                 tracks[0].disappear_time[i] += 1
             else:
                 if self.use_motion and tracks[0].disappear_time[i] > 0:
@@ -56,7 +56,7 @@ class RuntimeTracker:
                 if self.use_motion:
                     self.motions[tracks[0].ids[i].item()].add_box(tracks[0].boxes[i].cpu())
                     tracks[0].last_appear_boxes[i] = tracks[0].boxes[i]
-            if tracks[0].disappear_time[i] >= self.miss_tolerance:
+            if tracks[0].disappear_time[i] >= self.miss_tolerance: #如果消失时间大于了设定阈值，则将该目标id设置为-1，在后处理的时候会删掉
                 tracks[0].ids[i] = -1
 
         # Add newborn targets.

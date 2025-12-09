@@ -297,6 +297,7 @@ class DeformableDecoderLayer(nn.Module):
         """
         if merge_det_track is False:
             track_tgt = tgt[:, self.n_det_queries:, :]      # (B, Nq_track, C)
+            # 剥离track部分
             tgt = tgt[:, :self.n_det_queries, :]            # (B, Nq_det, C)
             query_pos = query_pos[:, :self.n_det_queries, :]
             reference_points = reference_points[:, :self.n_det_queries, :, :]

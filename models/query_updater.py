@@ -285,6 +285,8 @@ class QueryUpdater(nn.Module):
 
 
 def build(config: dict):
+    if config["ONLY_TRAIN_DETR"] is True:
+        return None
     return QueryUpdater(
             hidden_dim=config["HIDDEN_DIM"],
             ffn_dim=config["FFN_DIM"],
