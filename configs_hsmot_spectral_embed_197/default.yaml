@@ -177,3 +177,4 @@ SCEM:
   
 
 ONLY_TRAIN_DETR: False
+EDGE_SWAP: False

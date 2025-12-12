@@ -25,11 +25,12 @@ from utils.utils import is_distributed, distributed_world_size
 
 from hsmot.loss.loss import l1_loss_rotate, loss_rotated_iou_norm_bboxes1
 from hsmot.util.dist import box_iou_rotated_norm_bboxes1
+from utils.edge_swap import EdgeSwap
 
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
                  max_frame_length: int, n_aux: int, merge_det_track_layer: int = 0, aux_weights: List = None,
-                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = False, scem: bool = False, loss_nll_config:dict = None):
+                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = False, scem: bool = False, loss_nll_config:dict = None, edge_swap: bool = False):
         """
         Init a criterion function.
 
@@ -53,7 +54,7 @@ class ClipCriterion:
         self.aux_weights = aux_weights                      # different weights for different DETR layers
         self.hidden_dim = hidden_dim
         self.merge_det_track_layer = merge_det_track_layer
-
+        self.edge_swap = edge_swap
         self.gt_trackinstances_list: None | List[List[TrackInstances]] = None     # (clip_size, B)
         self.target_list: None | List[List[Dict]] = None
         self.loss = {}
@@ -358,7 +359,7 @@ class ClipCriterion:
         # 9. Compute the bounding box loss.
         loss_l1, loss_giou = self.get_loss_box(outputs=model_outputs,
                                                gt_trackinstances=gt_trackinstances,
-                                               idx_to_gts_idx=outputs_idx_to_gts_idx, img_metas=img_metas)
+                                               idx_to_gts_idx=outputs_idx_to_gts_idx, img_metas=img_metas, edge_swap=self.edge_swap)
 
         if self.decoder_spectral_mse:
             # compute spectral decoder mse loss
@@ -422,7 +423,7 @@ class ClipCriterion:
                                                      idx_to_gts_idx=aux_idx_to_gts_idx)
                 aux_loss_l1, aux_loss_giou = self.get_loss_box(outputs=model_outputs["aux_outputs"][i],
                                                                gt_trackinstances=gt_trackinstances,
-                                                               idx_to_gts_idx=aux_idx_to_gts_idx, img_metas=img_metas)
+                                                               idx_to_gts_idx=aux_idx_to_gts_idx, img_metas=img_metas, edge_swap=self.edge_swap)
 
                 if self.decoder_spectral_mse:
                     aux_loss_spectral_decoder_mse = self.get_loss_spectral_decoder_mse(outputs=model_outputs["aux_outputs"][i], gt_trackinstances=gt_trackinstances, idx_to_gts_idx=aux_idx_to_gts_idx)
@@ -581,7 +582,7 @@ class ClipCriterion:
         return loss
 
     @staticmethod
-    def get_loss_box(outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx, img_metas):
+    def get_loss_box(outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx, img_metas, edge_swap):
         """
         Computer the bounding box loss, l1 and giou.
         """
@@ -598,6 +599,40 @@ class ClipCriterion:
             for b in range(len(gt_trackinstances))
         ]
         matched_pred_boxes = torch.cat(matched_pred_boxes)
+        if edge_swap:
+            matched_pred_boxes = EdgeSwap.edge_swap(matched_pred_boxes, img_metas['version'])
+        gt_boxes = torch.cat(gt_boxes).to(matched_pred_boxes.device)
+        norm_gt_boxes = torch.cat(norm_gt_boxes).to(matched_pred_boxes.device)
+
+        loss_l1 = l1_loss_rotate(matched_pred_boxes, norm_gt_boxes).sum()
+        if(matched_pred_boxes.size(0) == 0):
+            loss_giou = torch.zeros_like(loss_l1)
+        else:
+            loss_giou = (1-loss_rotated_iou_norm_bboxes1(matched_pred_boxes,  gt_boxes, img_metas['img_shape'], img_metas['version'])).sum()
+
+
+        return loss_l1, loss_giou
+
+
+    def get_loss_box_debug(outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx, img_metas, edge_swap, ):
+        """
+        Computer the bounding box loss, l1 and giou.
+        """
+        matched_pred_boxes = [
+            boxes[outputs_idx[0][outputs_idx[1] >= 0]]
+            for boxes, outputs_idx in zip(outputs["pred_bboxes"], idx_to_gts_idx)
+        ]
+        gt_boxes = [
+            gt_trackinstances[b].boxes[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
+            for b in range(len(gt_trackinstances))
+        ]
+        norm_gt_boxes = [
+            gt_trackinstances[b].norm_boxes[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
+            for b in range(len(gt_trackinstances))
+        ]
+        matched_pred_boxes = torch.cat(matched_pred_boxes)
+        if edge_swap:
+            matched_pred_boxes = EdgeSwap.edge_swap(matched_pred_boxes, img_metas['version'])
         gt_boxes = torch.cat(gt_boxes).to(matched_pred_boxes.device)
         norm_gt_boxes = torch.cat(norm_gt_boxes).to(matched_pred_boxes.device)
 

@@ -20,6 +20,8 @@ from hsmot.util.dist import l1_dist_rotate, box_iou_rotated_norm_bboxes1
 import torch.nn.functional as F
 import math
 import itertools
+from utils.edge_swap import EdgeSwap
+
 class HungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
 
@@ -44,7 +46,8 @@ class HungarianMatcher(nn.Module):
                  cost_class: float = 1,
                  cost_bbox: float = 1,
                  cost_giou: float = 1,
-                 cost_spectral_decoder_mse: float = 1):
+                 cost_spectral_decoder_mse: float = 1,
+                 edge_swap: bool = False):
         """Creates the matcher
 
         Params:
@@ -57,6 +60,7 @@ class HungarianMatcher(nn.Module):
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
         self.cost_spectral_decoder_mse = cost_spectral_decoder_mse
+        self.edge_swap = edge_swap
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0 or cost_spectral_decoder_mse != 0, "all costs cant be 0"
 
     def forward(self, outputs, targets, use_focal=True, img_metas=None):
@@ -108,6 +112,9 @@ class HungarianMatcher(nn.Module):
                 out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
             out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
+            if self.edge_swap:
+                out_bbox = EdgeSwap.edge_swap(out_bbox, img_metas['version'])
+
             # Also concat the target labels and boxes
             if isinstance(targets[0], Instances):
                 tgt_ids = torch.cat([gt_per_img.labels for gt_per_img in targets])
@@ -141,9 +148,6 @@ class HungarianMatcher(nn.Module):
                 cost_giou = torch.zeros_like(cost_bbox)
             else:
                 cost_giou = -box_iou_rotated_norm_bboxes1(out_bbox, tgt_bbox, img_shape=img_metas['img_shape'], version = img_metas['version'])
-
-
-
 
             # Final cost matrix
             C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
@@ -284,5 +288,6 @@ def build(config: dict):
         cost_class=config["MATCH_COST_CLASS"],
         cost_bbox=config["MATCH_COST_BBOX"],
         cost_giou=config["MATCH_COST_GIOU"],
-        cost_spectral_decoder_mse=cost_spectral_decoder_mse
+        cost_spectral_decoder_mse=cost_spectral_decoder_mse,
+        edge_swap=config["EDGE_SWAP"]
     )
