@@ -9,7 +9,7 @@ DYNAMIC_USE_CHECKPOINT_THRESHOLD: 5
 CHECKPOINT_LEVEL: 3 
 SAMPLE_LENGTHS: [1,1,1,1]
 
-OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/22_6_197_only_detr_edgeswap_lrdrop_newtransforms
+OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/22_6_197_only_detr_edgeswap_lrdrop_newtransforms_noscem
 SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/22_6_197_only_detr_edgeswap_lrdrop_newtransforms_noscem
 
 

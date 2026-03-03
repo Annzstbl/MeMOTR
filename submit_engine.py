@@ -49,6 +49,7 @@ class Submitter:
         self.seq_dir = path.join(split_dir, seq_name)
         self.outputs_dir = outputs_dir
         self.predict_dir = path.join(self.outputs_dir, "tracker")
+        self.predict_det_dir = path.join(self.outputs_dir, "det")
         self.model = model
         self.tracker = RuntimeTracker(det_score_thresh=det_score_thresh, track_score_thresh=track_score_thresh,
                                       miss_tolerance=miss_tolerance,
@@ -77,6 +78,9 @@ class Submitter:
         os.makedirs(self.predict_dir, exist_ok=True)
         if os.path.exists(os.path.join(self.predict_dir, f'{self.seq_name}.txt')):
             os.remove(os.path.join(self.predict_dir, f'{self.seq_name}.txt'))
+        os.makedirs(self.predict_det_dir, exist_ok=True)
+        if os.path.exists(os.path.join(self.predict_det_dir, f'{self.seq_name}_det.txt')):
+            os.remove(os.path.join(self.predict_det_dir, f'{self.seq_name}_det.txt'))
         self.model.eval()
 
         self.use_prior_map = False
@@ -173,7 +177,7 @@ class Submitter:
             file.writelines(txt_lines)
 
         # 保存检测结果
-        with open(os.path.join(self.predict_dir, f"{self.seq_name}_det.txt"), "w") as file:
+        with open(os.path.join(self.predict_det_dir, f"{self.seq_name}_det.txt"), "w") as file:
             file.writelines(det_txt_lines)
 
         # 保存画图
