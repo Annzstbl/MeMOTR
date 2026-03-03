@@ -25,7 +25,7 @@ from hsmot.datasets.pipelines.formatting import MotCollect, MotDefaultFormatBund
 
 
 class hsmot_8ch(MOTDataset):
-    def __init__(self, config: dict, split: str, transform, version='le135', logger=None):
+    def __init__(self, config: dict, split: str, transform, version='le135', logger=None, dataset_version=None):
         super(hsmot_8ch, self).__init__(config=config, split=split, transform=transform)
 
         self.config = config
@@ -52,16 +52,23 @@ class hsmot_8ch(MOTDataset):
         self.gts = defaultdict(lambda: defaultdict(list))
         self.vid_idx = dict()
         self.idx_vid = dict()
+        self.dataset_version = dataset_version
 
-        self.split_dir = os.path.join(config["DATA_ROOT"], self.dataset_name, split, "npy")
+        # 构造基础数据集目录，若提供 version，则路径变为 DATASET/version
+        base_dataset_dir = os.path.join(config["DATA_ROOT"], self.dataset_name)
+        if self.dataset_version is not None:
+            base_dataset_dir = os.path.join(base_dataset_dir, self.dataset_version)
+
+        self.split_dir = os.path.join(base_dataset_dir, split, "npy")
         assert os.path.exists(self.split_dir), f"Dir {self.split_dir} is not exist."
-        self.labels_dir = os.path.join(config["DATA_ROOT"], self.dataset_name, split, "mot")
+        self.labels_dir = os.path.join(base_dataset_dir, split, "mot")
 
         vid_white_list = config["VID_WHITE_LIST"] if "VID_WHITE_LIST" in config else None
         self.train_half = config["TRAIN_HALF"] if "TRAIN_HALF" in config else False
         if self.train_half:
             self.train_half_list = set()
-            self.train_half_file = os.path.join(config["DATA_ROOT"], self.dataset_name, "train_half.txt")
+            self.train_half_file = os.path.join(base_dataset_dir, "train_half.txt")
+            assert os.path.exists(self.train_half_file), f"File {self.train_half_file} is not exist."
             with open(self.train_half_file, 'r') as f:
                 for line in f:
                     self.train_half_list.add(line.strip())
@@ -230,35 +237,43 @@ class hsmot_8ch(MOTDataset):
         return [self.get_single_frame(vid=vid, idx=i) for i in idxs]
 
 
-def transfroms_for_train(use_cache=True, cache_path=None, coco_size: bool = False, overflow_bbox: bool = False, reverse_clip: bool = False, spectral_method=None, spectral_n_clusters=None, get_spectral_weights=True, resize=None):
+def transfroms_for_train(use_cache=True, cache_path=None, spectral_method=None, spectral_n_clusters=None,
+                         get_spectral_weights=True, transform_config=None):
     mean = [0.27358221, 0.28804452, 0.28133921, 0.26906377, 0.28309119, 0.26928305, 0.28372527, 0.27149373]
     std = [0.19756629, 0.17432339, 0.16413284, 0.17581682, 0.18366176, 0.1536845, 0.15964683, 0.16557951]
     mean = [_*255 for _ in mean]
     std = [_*255 for _ in std]
 
-    if resize is not None:
-        scales_w = resize
-        scales_h = [int(w/4*3) for w in scales_w]
-        scales = list(zip(scales_h, scales_w))
-    else:
-        scales_w = [608, 640, 672, 704, 736, 768, 800, 832, 864, 896, 928, 960, 992, 1024, 1056, 1088, 1120, 1152, 1184]
-        scales_h = [ int(w/4*3) for w in scales_w ]
-        scales = list(zip(scales_h, scales_w))
-    
+    assert transform_config["RESIZE"] is not None 
+    if transform_config["RESIZE"] is not None:
+        resize = transform_config["RESIZE"]
+    scale_w = resize
+    scale_h = [int(w/4*3) for w in scale_w]
+    scales = list(zip(scale_h, scale_w))
+
+    crop_size = tuple(transform_config["CROP_SIZE"])
+    flip_ratio = transform_config["FLIP_RATIO"]
+
+
+
     return MotCompose([
                 MotipToMmrotate(),
                 MotLoadMultichannelImageFromNpy(),
                 MotLoadAnnotations(poly2mask=False),
-                MotRRandomFlip(direction=['horizontal'], flip_ratio=[0.5], version='le135'),
-                MotRandomChoice(transforms=[
-                    [
-                        MotRRsize(multiscale_mode='value', img_scale=scales, bbox_clip_border=False),
-                        ],
-                    [
-                        MotRRandomCrop(crop_size=(800, 1200), crop_type='absolute_range', version='le135', allow_negative_crop=True, iof_thr=0.5),
-                        MotRRsize(multiscale_mode='value', img_scale=scales, bbox_clip_border=False),
-                        ]
-                ]),                
+                MotRRandomFlip(direction=['horizontal'], flip_ratio=[flip_ratio], version='le135'),
+                # MotRandomChoice(transforms=[
+                #     [
+                #         MotRRsize(multiscale_mode='value', img_scale=scales, bbox_clip_border=False),
+                #         ],
+                #     [
+                #         MotRRandomCrop(crop_size=(800, 1200), crop_type='absolute_range', version='le135', allow_negative_crop=True, iof_thr=0.5),
+                #         MotRRsize(multiscale_mode='value', img_scale=scales, bbox_clip_border=False),
+                #         ]
+                # ]),         
+
+                MotRRandomCrop(crop_size=crop_size, crop_type='absolute_range', version='le135', allow_negative_crop=True, iof_thr=0.5),
+                MotRRsize(multiscale_mode='value', img_scale=scales, bbox_clip_border=False),       
+
                 # 缺少一个颜色预训练
                 MotNormalize(mean=mean, std=std, to_rgb=False),
                 MotPad(size_divisor=64),
@@ -288,18 +303,16 @@ def build(config: dict, split: str, logger):
             split=split,
             transform=transfroms_for_train(
                 cache_path=os.path.join(config["DATA_ROOT"], config["DATASET"].replace("_8ch", "")),
-                coco_size=config["COCO_SIZE"],
-                overflow_bbox=config["OVERFLOW_BBOX"],
-                reverse_clip=config["REVERSE_CLIP"],
                 get_spectral_weights=config["DECODER_SPECTRAL_REFINE"],
                 use_cache=config["DECODER_SPECTRAL_USE_CACHE"],
                 spectral_n_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
                 spectral_method=config["DECODER_SPECTRAL_METHOD"],
-                resize=resize
+                transform_config= config["TRANSFORMS_CONFIG"]
             ),
-            logger = logger
+            logger = logger,
+            dataset_version=config["DATASET_VERSION"]
         )
     elif split == "test":
-        return hsmot_8ch(config=config, split=split, transform=transforms_for_eval())
+        return hsmot_8ch(config=config, split=split, transform=transforms_for_eval(), dataset_version=config["DATASET_VERSION"])
     else:
         raise ValueError(f"Data split {split} is not supported for DanceTrack dataset.")

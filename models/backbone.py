@@ -1,6 +1,4 @@
-# @Author       : Ruopeng Gao
-# @Date         : 2022/9/4
-# @Description  : 用于 backbone 的设计和搭建
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -86,7 +84,7 @@ class Backbone(nn.Module):
             self.strides = [8, 16, 32]
             self.num_channels = [512, 1024, 2048]
         else:
-            return_layers = {"layer4", "0"}
+            return_layers = {"layer4": "0"}
             self.strides = [32]
             self.num_channels = [2048]
 

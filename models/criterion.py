@@ -154,7 +154,9 @@ class ClipCriterion:
 
     def get_sum_loss_dict(self, loss_dict: dict, log_dict: dict):
         
-
+        '''
+            把每个损失乘上权重
+        '''
         def get_weight(loss_name):
             if "box_l1_loss" in loss_name:
                 return self.weight["box_l1_loss"]
@@ -189,6 +191,10 @@ class ClipCriterion:
         return loss, log_dict
 
     def get_mean_by_n_gts(self) -> Tuple[Dict, Dict]:
+        '''
+            把所有帧的损失加到一起，除以总的gt数，得到平均损失
+            scem损失不需要除以总的gt数
+        '''
         total_n_gts = sum(self.n_gts)
         total_n_gts = torch.as_tensor(total_n_gts, dtype=torch.float, device=self.device)
         n_gts = torch.as_tensor(self.n_gts, dtype=torch.float, device=self.device)
@@ -209,7 +215,12 @@ class ClipCriterion:
             for i in range(len(n_gts)):
                 if f"frame{i}" in k:
                     if "scem" not in k:
-                        log[k] = (self.log[k] / n_gts[i], 1)
+                        # 对于按类统计的损失（*_class_*），self.log[k] 已经是 per-class mean，
+                        # 不再按总 GT 数做归一化；其它损失仍按该帧总 GT 数归一化。
+                        if "_class_" in k:
+                            log[k] = (self.log[k], 1)
+                        else:
+                            log[k] = (self.log[k] / n_gts[i], 1)
                     else:
                         log[k] = (self.log[k], 1)
                     break
@@ -357,7 +368,7 @@ class ClipCriterion:
                                          idx_to_gts_idx=outputs_idx_to_gts_idx)
 
         # 9. Compute the bounding box loss.
-        loss_l1, loss_giou = self.get_loss_box(outputs=model_outputs,
+        loss_l1, loss_giou, loss_by_class = self.get_loss_box(outputs=model_outputs,
                                                gt_trackinstances=gt_trackinstances,
                                                idx_to_gts_idx=outputs_idx_to_gts_idx, img_metas=img_metas, edge_swap=self.edge_swap)
 
@@ -380,6 +391,13 @@ class ClipCriterion:
         self.log[f"frame{frame_idx}_label_focal_loss"] = loss_label.item()
         if self.decoder_spectral_mse:
             self.log[f"frame{frame_idx}_spectral_decoder_mse_loss"] = loss_spectral_decoder_mse.item()
+        
+        # 记录按类别统计的损失
+        for label, l1_loss_val in loss_by_class['loss_l1_by_class'].items():
+            self.log[f"frame{frame_idx}_box_l1_loss_class_{label}"] = l1_loss_val
+        for label, giou_loss_val in loss_by_class['loss_giou_by_class'].items():
+            self.log[f"frame{frame_idx}_box_giou_loss_class_{label}"] = giou_loss_val
+        
         self.n_gts.append(n_gts)
 
         # 11. Compute aux loss.
@@ -421,7 +439,7 @@ class ClipCriterion:
                 aux_loss_label = self.get_loss_label(outputs=model_outputs["aux_outputs"][i],
                                                      gt_trackinstances=gt_trackinstances,
                                                      idx_to_gts_idx=aux_idx_to_gts_idx)
-                aux_loss_l1, aux_loss_giou = self.get_loss_box(outputs=model_outputs["aux_outputs"][i],
+                aux_loss_l1, aux_loss_giou, aux_loss_by_class = self.get_loss_box(outputs=model_outputs["aux_outputs"][i],
                                                                gt_trackinstances=gt_trackinstances,
                                                                idx_to_gts_idx=aux_idx_to_gts_idx, img_metas=img_metas, edge_swap=self.edge_swap)
 
@@ -433,6 +451,19 @@ class ClipCriterion:
                 self.loss["aux_label_focal_loss"] += aux_loss_label * self.frame_weights[frame_idx] * self.aux_weights[i]
                 if self.decoder_spectral_mse:
                     self.loss["aux_spectral_decoder_mse_loss"] += aux_loss_spectral_decoder_mse * self.frame_weights[frame_idx] * self.aux_weights[i]
+                
+                # 记录辅助损失的日志
+                self.log[f"frame{frame_idx}_aux_layer{i}_box_l1_loss"] = aux_loss_l1.item()
+                self.log[f"frame{frame_idx}_aux_layer{i}_box_giou_loss"] = aux_loss_giou.item()
+                self.log[f"frame{frame_idx}_aux_layer{i}_label_focal_loss"] = aux_loss_label.item()
+                if self.decoder_spectral_mse:
+                    self.log[f"frame{frame_idx}_aux_layer{i}_spectral_decoder_mse_loss"] = aux_loss_spectral_decoder_mse.item()
+                
+                # 记录辅助损失按类别统计的损失
+                for label, l1_loss_val in aux_loss_by_class['loss_l1_by_class'].items():
+                    self.log[f"frame{frame_idx}_aux_layer{i}_box_l1_loss_class_{label}"] = l1_loss_val
+                for label, giou_loss_val in aux_loss_by_class['loss_giou_by_class'].items():
+                    self.log[f"frame{frame_idx}_aux_layer{i}_box_giou_loss_class_{label}"] = giou_loss_val
 
         # Prepare the unmatched detection results.
         unmatched_detections = []
@@ -585,6 +616,7 @@ class ClipCriterion:
     def get_loss_box(outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx, img_metas, edge_swap):
         """
         Computer the bounding box loss, l1 and giou.
+        按类别统计损失。
         """
         matched_pred_boxes = [
             boxes[outputs_idx[0][outputs_idx[1] >= 0]]
@@ -598,51 +630,62 @@ class ClipCriterion:
             gt_trackinstances[b].norm_boxes[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
             for b in range(len(gt_trackinstances))
         ]
-        matched_pred_boxes = torch.cat(matched_pred_boxes)
-        if edge_swap:
-            matched_pred_boxes = EdgeSwap.edge_swap(matched_pred_boxes, img_metas['version'])
-        gt_boxes = torch.cat(gt_boxes).to(matched_pred_boxes.device)
-        norm_gt_boxes = torch.cat(norm_gt_boxes).to(matched_pred_boxes.device)
-
-        loss_l1 = l1_loss_rotate(matched_pred_boxes, norm_gt_boxes).sum()
-        if(matched_pred_boxes.size(0) == 0):
-            loss_giou = torch.zeros_like(loss_l1)
-        else:
-            loss_giou = (1-loss_rotated_iou_norm_bboxes1(matched_pred_boxes,  gt_boxes, img_metas['img_shape'], img_metas['version'])).sum()
-
-
-        return loss_l1, loss_giou
-
-
-    def get_loss_box_debug(outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx, img_metas, edge_swap, ):
-        """
-        Computer the bounding box loss, l1 and giou.
-        """
-        matched_pred_boxes = [
-            boxes[outputs_idx[0][outputs_idx[1] >= 0]]
-            for boxes, outputs_idx in zip(outputs["pred_bboxes"], idx_to_gts_idx)
-        ]
-        gt_boxes = [
-            gt_trackinstances[b].boxes[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
+        # 获取对应的 gt_labels
+        gt_labels = [
+            gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
             for b in range(len(gt_trackinstances))
         ]
-        norm_gt_boxes = [
-            gt_trackinstances[b].norm_boxes[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
-            for b in range(len(gt_trackinstances))
-        ]
+        
         matched_pred_boxes = torch.cat(matched_pred_boxes)
         if edge_swap:
-            matched_pred_boxes = EdgeSwap.edge_swap(matched_pred_boxes, img_metas['version'])
+            matched_pred_boxes = EdgeSwap.edge_swap(matched_pred_boxes, img_metas['version'], img_metas['img_shape'])
         gt_boxes = torch.cat(gt_boxes).to(matched_pred_boxes.device)
         norm_gt_boxes = torch.cat(norm_gt_boxes).to(matched_pred_boxes.device)
+        gt_labels = torch.cat(gt_labels).to(matched_pred_boxes.device)
 
-        loss_l1 = l1_loss_rotate(matched_pred_boxes, norm_gt_boxes).sum()
+
+        # 
+        h_img, w_img = img_metas['img_shape']
+        min_img_shape = min(h_img, w_img)
+        l1_weight = torch.as_tensor([w_img / min_img_shape, h_img / min_img_shape, w_img / min_img_shape, h_img / min_img_shape, 1.0], dtype=matched_pred_boxes.dtype, device=matched_pred_boxes.device)#[5,]
+
+        loss_l1 = l1_loss_rotate(matched_pred_boxes, norm_gt_boxes, weight=l1_weight).sum()
         if(matched_pred_boxes.size(0) == 0):
             loss_giou = torch.zeros_like(loss_l1)
+            loss_by_class = {
+                'loss_l1_by_class': {},
+                'loss_giou_by_class': {}
+            }
         else:
             loss_giou = (1-loss_rotated_iou_norm_bboxes1(matched_pred_boxes,  gt_boxes, img_metas['img_shape'], img_metas['version'])).sum()
+            
+            # 按类别统计损失
+            loss_by_class = {
+                'loss_l1_by_class': {},
+                'loss_giou_by_class': {}
+            }
+            
+            # 计算每个样本的损失（不求和）
+            loss_l1_per_sample = l1_loss_rotate(matched_pred_boxes, norm_gt_boxes, weight=l1_weight)  # [N, 5] or [N]
+            if loss_l1_per_sample.dim() == 2:
+                loss_l1_per_sample = loss_l1_per_sample.sum(dim=1)  # [N]
+            
+            ious = loss_rotated_iou_norm_bboxes1(matched_pred_boxes, gt_boxes, img_metas['img_shape'], img_metas['version'])
+            loss_giou_per_sample = 1 - ious  # [N]
+            
+            # 获取所有类别
+            unique_labels = torch.unique(gt_labels)
+            
+            # 按类别统计
+            for label in unique_labels:
+                label_mask = (gt_labels == label)
+                if label_mask.sum() > 0:
+                    # 计算每个类别内部的平均损失（per-class mean），而不是总和
+                    loss_by_class['loss_l1_by_class'][label.item()] = loss_l1_per_sample[label_mask].mean().item()
+                    loss_by_class['loss_giou_by_class'][label.item()] = loss_giou_per_sample[label_mask].mean().item()
 
-        return loss_l1, loss_giou
+        return loss_l1, loss_giou, loss_by_class
+
 
     @staticmethod
     def get_loss_spectral_decoder_mse(outputs, gt_trackinstances, idx_to_gts_idx):

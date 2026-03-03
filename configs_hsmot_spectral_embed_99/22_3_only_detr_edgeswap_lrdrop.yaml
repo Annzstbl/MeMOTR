@@ -1,40 +1,30 @@
-
-
-AVAILABLE_GPUS: "2,3"
+PROJECT: "lrdrop调整到12和24"
 
 PARENT_CONFIG: ./default99.yaml
 
+AVAILABLE_GPUS: 0,1  #if not set, will use all gpus
+
 USE_CHECKPOINT: False
-DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 5
 CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
                                   # As the number increases (from 1 to 4), the memory cost increases.
                                   # We have deleted many comments in this official code simplicity,
                                   # if you have any questions, feel free to contact with the author.
 SAMPLE_LENGTHS: [1,1,1,1]
-# NUM_FEATURE_LEVELS: 3
-RESIZE: [1184]
+
+OUTPUTS_DIR: /data/users/wangying01/lth/hsmot/workdir_2/memotr/spectralemb/22_3_only_detr_edgeswap_lrdrop
+SUBMIT_DIR: /data/users/wangying01/lth/hsmot/workdir_2/memotr/spectralemb/22_3_only_detr_edgeswap_lrdrop
+
 
 ENCODER_SPECTRAL: True
-ENCODER_GLOBAL_TOKEN: False
-ROPE_POS: False
-TRAIN_HALF: False
-VID_WHITE_LIST: ["data39-1"]
-# resume
-# RESUME: /data4/litianhao/hsmot/memotr/spectralemb/12_global/checkpoint_19.pth
-# RESUME_SCHEDULER: True
-# PRETRAINED_MODEL: 
-# EPOCHS: 25
-# ONLY_TRAIN_QUERY_UPDATER_AFTER: 20
-# LR_DROP_RATE: 0.1
-# LR_DROP_MILESTONES: [12]
 
-EVALUATE_PER_EPOCH: 1
+TRAIN_HALF: True
+
 SCEM:
   ENABLE: True
-  USE_GT: False
+  WITH_FOREGROUND: False
   PRIOR_MODE: gate
   USE_SPECTRAL_PI: True
-  SPECTRAL_DATABASE_NUM: 128
 
 LOSS_SCEM_NLL: 1
 LOSS_SCEM_BCE: 1
@@ -46,12 +36,12 @@ LOSS_NLL_CONFIG:
   GAMMA_POS: 2.0
   GAMMA_NEG: 0.0
 
-
-BATCH_SIZE: 4
-
 ONLY_TRAIN_DETR: True
 
-EDGE_SWAP: True
-# PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/14_train_half/checkpoint_19.pth
+BATCH_SIZE: 3
+EPOCHS: 40
 
-DATASET_VERSION: OnePic
+EDGE_SWAP: True
+
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [12, 24]

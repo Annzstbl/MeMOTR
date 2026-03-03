@@ -48,6 +48,8 @@ COLOR_PALETTE = generate_color_palette(100)
 
 def get_color_by_id(track_id):
     """根据track_id获取颜色，循环使用颜色表"""
+    if track_id == None:
+        return (255, 0, 0)
     return COLOR_PALETTE[track_id % len(COLOR_PALETTE)]
 
 
@@ -90,7 +92,7 @@ def parse_txt_file(txt_path):
     return track_dict
 
 
-def draw_rotated_bbox(img, track_id, x1, y1, x2, y2, x3, y3, x4, y4, score, thickness=2, font_scale=0.6):
+def draw_rotated_bbox(img, track_id: int|None, x1, y1, x2, y2, x3, y3, x4, y4, score, thickness=2, font_scale=0.6, color=None):
     """
     在图像上绘制旋转框
     
@@ -103,7 +105,8 @@ def draw_rotated_bbox(img, track_id, x1, y1, x2, y2, x3, y3, x4, y4, score, thic
         font_scale: 字体大小
     """
     # 获取颜色
-    color = get_color_by_id(track_id)
+    if color is None:
+        color = get_color_by_id(track_id)
     
     # 将坐标转换为整数
     pts = np.array([
@@ -120,28 +123,29 @@ def draw_rotated_bbox(img, track_id, x1, y1, x2, y2, x3, y3, x4, y4, score, thic
     cv2.line(img, tuple(pts[3]), tuple(pts[0]), color, thickness)
     
     # 绘制ID和分数文本
-    label_text = f'{track_id}|{score:.2f}'
+    label_text = f'{track_id}|{score:.2f}' if track_id is not None else f'{score:.2f}'
     text_pos = (int(x1), int(y1) - 5)
     if text_pos[1] < 0:
         text_pos = (int(x1), int(y1) + 20)
     
-    # 绘制文本背景（提高可读性）
-    (text_width, text_height), baseline = cv2.getTextSize(
-        label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1
-    )
-    cv2.rectangle(
-        img,
-        (text_pos[0], text_pos[1] - text_height - baseline),
-        (text_pos[0] + text_width, text_pos[1] + baseline),
-        (0, 0, 0),
-        -1
-    )
-    
-    # 绘制文本
-    cv2.putText(
-        img, label_text, text_pos,
-        cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 1, cv2.LINE_AA
-    )
+    if font_scale > 0:
+        # 绘制文本背景（提高可读性）
+        (text_width, text_height), baseline = cv2.getTextSize(
+            label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1
+        )
+        cv2.rectangle(
+            img,
+            (text_pos[0], text_pos[1] - text_height - baseline),
+            (text_pos[0] + text_width, text_pos[1] + baseline),
+            (0, 0, 0),
+            -1
+        )
+        
+        # 绘制文本
+        cv2.putText(
+            img, label_text, text_pos,
+            cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 1, cv2.LINE_AA
+        )
 
 
 def visualize_tracking_result(txt_path, img_dir, output_path, fps=20):

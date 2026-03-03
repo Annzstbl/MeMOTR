@@ -58,3 +58,34 @@ def tensor_list_to_nested_tensor(tensor_list: List[torch.Tensor], size_divisibil
         mask[: input_tensor.shape[1], : input_tensor.shape[2]] = False
     return NestedTensor(tensors=tensors, masks=masks)
 
+def tensor_list_to_nested_tensor_already_padded(tensor_list: List[torch.Tensor], padding_meta) -> NestedTensor:
+    # C, H, W
+    assert tensor_list[0].dim() == 3, f"Tensor should have 3 dimensions, but get {tensor_list[0].dim()}"
+
+    ori_img_shape = padding_meta[0]["transform_metas"].data["img_shape"]# H, W, C
+    padding_shape = padding_meta[0]["transform_metas"].data["pad_shape"]# H, W, C
+
+    final_b = len(tensor_list)
+    final_c = ori_img_shape[2]
+    final_h = padding_shape[0]
+    final_w = padding_shape[1]
+
+    masks = torch.ones((final_b, final_h, final_w), dtype=torch.bool, device=tensor_list[0].device)
+
+    masks[:, :ori_img_shape[0], :ori_img_shape[1]] = False
+    tensors = torch.stack(tensor_list, dim=0)
+    return NestedTensor(tensors=tensors, masks=masks)
+
+def tensor_list_to_nested_tensor_already_padded_shape(tensor_list: List[torch.Tensor], ori_shape, pad_shape) -> NestedTensor:
+    #ori shape: tuple(H, W, C)
+    #pad shape: tuple(H, W, C)
+
+    final_b = len(tensor_list)
+    final_c = ori_shape[2]
+    final_h = pad_shape[0]
+    final_w = pad_shape[1]
+
+    masks = torch.ones((final_b, final_h, final_w), dtype=torch.bool, device=tensor_list[0].device)
+    masks[:, :ori_shape[0], :ori_shape[1]] = False
+    tensors = torch.stack(tensor_list, dim=0)
+    return NestedTensor(tensors=tensors, masks=masks)

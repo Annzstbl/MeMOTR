@@ -49,6 +49,7 @@ EVAL_DATA_SPLIT: val
 
 # About data processing
 DATASET: hsmot_8ch
+DATASET_VERSION: # one_picture
 USE_MOTSYNTH:
 USE_CROWDHUMAN:
 MOTSYNTH_RATE:
@@ -178,3 +179,11 @@ SCEM:
 
 ONLY_TRAIN_DETR: False
 EDGE_SWAP: False
+
+
+TRANSFORMS_CONFIG:
+  RESIZE: [608, 640, 672, 704, 736, 768, 800, 832, 864, 896, 928, 960, 992, 1024, 1056, 1088, 1120, 1152, 1184] # for w
+  CROP_SIZE: [800, 1200] #absolute range for w and h both side
+  FLIP_RATIO: 0.5
+
+SAVE_CHECKPOINT: True

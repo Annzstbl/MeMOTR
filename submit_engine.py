@@ -15,7 +15,7 @@ from models import build_model
 from models.utils import load_checkpoint, get_model
 from models.runtime_tracker import RuntimeTracker
 from utils.utils import yaml_to_dict, is_distributed, distributed_world_size, distributed_rank, inverse_sigmoid
-from utils.nested_tensor import tensor_list_to_nested_tensor
+from utils.nested_tensor import tensor_list_to_nested_tensor_already_padded_shape
 from utils.box_ops import box_cxcywh_to_xyxy
 from log.logger import Logger
 from data.seq_dataset import SeqDataset, SeqDataset_HeatmapGT
@@ -25,6 +25,8 @@ from hsmot.mmlab.hs_mmrotate import obb2poly
 from utils.GMC import compute_gmc_sequence
 import numpy as np 
 from hsmot.eval.validator import PredictValidator, val_folder
+from utils.batch_vis_result import draw_rotated_bbox
+import cv2
 
 
 class Submitter:
@@ -38,7 +40,9 @@ class Submitter:
                  npy2rgb: bool = False, 
                  decoder_spectral: bool = True,
                  use_scem_gt: bool = False,
-                 only_train_detr: bool = False):
+                 only_train_detr: bool = False,
+                 epoch: int = None,
+                 draw_pic_dir: str = None):
         self.dataset_name = dataset_name
         self.seq_name = seq_name
         self.seq_dir = path.join(split_dir, seq_name)
@@ -65,6 +69,9 @@ class Submitter:
         self.visualize = visualize
         self.decoder_spectral = decoder_spectral
         self.only_train_detr = only_train_detr
+        self.draw_pic_dir = draw_pic_dir
+        self.epoch = epoch
+
         # 对路径进行一些操作
         os.makedirs(self.predict_dir, exist_ok=True)
         if os.path.exists(os.path.join(self.predict_dir, f'{self.seq_name}.txt')):
@@ -74,9 +81,8 @@ class Submitter:
         self.use_prior_map = False
 
         #如果有scem_module在model中
-        if hasattr(get_model(self.model), 'scem_module'):
-            if get_model(self.model).scem_module.prior_mode is not None:
-                self.use_prior_map = True
+        if hasattr(get_model(self.model), 'scem_module') and get_model(self.model).scem_module is not None and get_model(self.model).scem_module.prior_mode is not None:
+            self.use_prior_map = True
         return
 
     @torch.no_grad()
@@ -104,7 +110,11 @@ class Submitter:
                                     ).to(self.device)]
 
             # image: (1, C, H, W); ori_image: (1, H, W, C)
-            frame = tensor_list_to_nested_tensor([image[0]]).to(self.device)
+            ori_img_shape = ori_image.shape[1:4]#(H, W, C)
+            pad_shape = image[0].shape
+            pad_shape = (pad_shape[1], pad_shape[2], pad_shape[0])
+            frame = tensor_list_to_nested_tensor_already_padded_shape([image[0]], ori_img_shape, pad_shape).to(self.device)
+            # frame = tensor_list_to_nested_tensor([image[0]]).to(self.device)
 
             res = self.model(frame=frame, tracks=tracks)
             previous_tracks, new_tracks = self.tracker.update(
@@ -138,10 +148,45 @@ class Submitter:
                 label = _tracks.labels.item()
                 line = save_format.format(frame=i + 1, id=obj_id, x1=x1, y1=y1, x2=x2, y2=y2, x3=x3, y3=y3, x4=x4, y4=y4, conf=conf, label=label)
                 txt_lines.append(line)
+            
+            # 整理检测结果，包括所有得分的检测框
+            # scores = model_outputs["scores"]#经过了logits_to_scores处理
+            # boxes = model_outputs["pred_bboxes"][0]
+            # frame_id = i+1
+            # label = torch.max(new_tracks.scores, dim=-1).indices
+            # save_format = '{frame:6d},{id:6d},{x1:.3f},{y1:.3f},{x2:.3f},{y2:.3f},{x3:.3f},{y3:.3f},{x4:.3f},{y4:.3f},{conf:.3f},{label:2d},-1\n'
+            det_txt_lines = []
+            det_boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(res["pred_bboxes"][0].cpu(), (image.shape[2], image.shape[3]), version='le135')
+            det_boxes_xyxyxyxy = obb2poly(det_boxes_xyxyxyxy)
+            det_scores = res["scores"][0].cpu()
+            det_labels = torch.max(det_scores, dim=-1).indices
+            det_confs = torch.max(det_scores, dim=-1).values
+            for i, (det_box, det_conf, det_label) in enumerate(zip(det_boxes_xyxyxyxy, det_confs, det_labels)):
+                save_format = '{frame:6d},{x1:.3f},{y1:.3f},{x2:.3f},{y2:.3f},{x3:.3f},{y3:.3f},{x4:.3f},{y4:.3f},{conf:.3f},{label:2d},-1\n'
+                x1, y1, x2, y2, x3, y3, x4, y4 = det_box.tolist()
+                conf = det_conf.item()
+                label = det_label.item()
+                line = save_format.format(frame=i + 1, x1=x1, y1=y1, x2=x2, y2=y2, x3=x3, y3=y3, x4=x4, y4=y4, conf=conf, label=label)
+                det_txt_lines.append(line)
 
+        # 保存跟踪结果
         with open(os.path.join(self.predict_dir, f"{self.seq_name}.txt"), "w") as file:
             file.writelines(txt_lines)
 
+        # 保存检测结果
+        with open(os.path.join(self.predict_dir, f"{self.seq_name}_det.txt"), "w") as file:
+            file.writelines(det_txt_lines)
+
+        # 保存画图
+        if self.draw_pic_dir is not None:
+            save_pic = os.path.join(self.draw_pic_dir, f"ep{self.epoch}_{self.seq_name}_det.jpg")
+            img = np.ascontiguousarray(ori_image[0].cpu().numpy()[:,:,[4,2,1]])
+            for boxes, confs in zip (det_boxes_xyxyxyxy, det_confs):
+                if confs < 0.1:
+                    draw_rotated_bbox(img, None, boxes[0], boxes[1], boxes[2], boxes[3], boxes[4], boxes[5], boxes[6], boxes[7], confs, thickness=1, font_scale=0, color=(128,0,0))
+                else:
+                    draw_rotated_bbox(img, None, boxes[0], boxes[1], boxes[2], boxes[3], boxes[4], boxes[5], boxes[6], boxes[7], confs,color=(0,0,255))
+            cv2.imwrite(save_pic, img)
 
     @torch.no_grad()
     def _run_with_prior_map(self):
@@ -500,23 +545,25 @@ def submit(config: dict):
         submitter.run()
     return
 
-def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_detr: bool = False):
+def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_detr: bool = False, train_logger: Logger = None):
 
     model.eval()
 
     assert config["SUBMIT_DIR"] is not None, f"'--submit-dir' must not be None for submit process."
     assert config["SUBMIT_DATA_SPLIT"] is not None, f"'--submit-data-split' must not be None for submit process."
 
+    draw_pic_dir = os.path.join(config["SUBMIT_DIR"], "draw_pic")
+    os.makedirs(draw_pic_dir, exist_ok=True)
 
-    submit_dir = os.path.join(config["SUBMIT_DIR"], f"epoch_{epoch}")
-    submit_logger = Logger(logdir=os.path.join(submit_dir, config["SUBMIT_DATA_SPLIT"]), only_main=True)
+    submit_dir_epoch = os.path.join(config["SUBMIT_DIR"], f"epoch_{epoch}")
+    submit_logger = Logger(logdir=os.path.join(submit_dir_epoch, config["SUBMIT_DATA_SPLIT"]), only_main=True)
     submit_logger.show(head="Configs:", log=config)
     submit_logger.write(log=config, filename="config.yaml", mode="w")
 
     data_root = config["DATA_ROOT"]
     dataset_name = config["DATASET"]
     dataset_split = config["SUBMIT_DATA_SPLIT"]
-    outputs_dir = path.join(submit_dir, dataset_split)
+    outputs_dir = path.join(submit_dir_epoch, dataset_split)
     use_dab = config["USE_DAB"]
     det_score_thresh = config["DET_SCORE_THRESH"]
     track_score_thresh = config["TRACK_SCORE_THRESH"]
@@ -526,9 +573,14 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_d
     motion_max_length = config["MOTION_MAX_LENGTH"]
     motion_lambda = config["MOTION_LAMBDA"]
     miss_tolerance = config["MISS_TOLERANCE"]
-
+    dataset_version = config["DATASET_VERSION"]
+    
+    # 构造带 version 的数据集根目录
     if "hsmot" in dataset_name:
-        data_split_dir = path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'npy')
+        dataset_root = path.join(data_root, dataset_name.replace("_8ch", ""))
+        if dataset_version is not None:
+            dataset_root = path.join(dataset_root, dataset_version)
+        data_split_dir = path.join(dataset_root, dataset_split, 'npy')
     seq_names = os.listdir(data_split_dir)
 
     if is_distributed():
@@ -558,7 +610,9 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_d
             npy2rgb = config["NPY2RGB"],
             decoder_spectral= config["DECODER_SPECTRAL"],
             use_scem_gt=config["SCEM"]["USE_GT"],
-            only_train_detr=only_train_detr
+            only_train_detr=only_train_detr,
+            epoch=epoch,
+            draw_pic_dir=draw_pic_dir,
         )
         submitter.run()
 
@@ -567,25 +621,23 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_d
         torch.distributed.barrier()
 
     if distributed_rank() == 0:
+        # 评估阶段同样复用 dataset_root
+
+        gt_dir = os.path.join(dataset_root, dataset_split, 'mot')
+        img_dir = os.path.join(dataset_root, dataset_split, 'npy')
+
+        tracker_dir = submit_dir_epoch
+        trackers_name = outputs_dir.split('/')[-1]
+        trackers_subfolder = 'tracker'
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+
         if only_train_detr:
-            gt_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'mot')
-            # 把outputs_dir分为parent和folderName 分给tracker_dir和trackers_name
-            tracker_dir = submit_dir
-            trackers_name = outputs_dir.split('/')[-1]
-            trackers_subfolder = 'tracker'
-            img_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'npy')
-            current_file_dir = os.path.dirname(os.path.abspath(__file__))
             val_lines = val_folder(gt_folder=gt_dir, pred_folder=os.path.join(tracker_dir, trackers_name, trackers_subfolder))
             submit_logger.show(head="Validation Results:", log='\n'.join(val_lines))
-            submit_logger.write('\n'.join(val_lines))
+            submit_logger.write(head="Validation Results:", log='\n'.join(val_lines), filename="log.txt", mode="a")
+            if train_logger is not None:
+                train_logger.write(head="Validation Results:", log='\n'.join(val_lines), filename="log.txt", mode="a")
         else:
-            gt_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'mot')
-            # 把outputs_dir分为parent和folderName 分给tracker_dir和trackers_name
-            tracker_dir = submit_dir
-            trackers_name = outputs_dir.split('/')[-1]
-            trackers_subfolder = 'tracker'
-            img_dir = os.path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'npy')
-            current_file_dir = os.path.dirname(os.path.abspath(__file__))
             os_flag = os.system(
                 f"{sys.executable} {current_file_dir}/../TrackEval/scripts/run_hsmot_8ch.py " 
                 f"--USE_PARALLEL False "

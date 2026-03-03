@@ -14,7 +14,7 @@ from models import build_model
 from data import build_dataset, build_sampler, build_dataloader
 from utils.utils import labels_to_one_hot, is_distributed, distributed_rank, set_seed, is_main_process, \
     distributed_world_size
-from utils.nested_tensor import tensor_list_to_nested_tensor
+from utils.nested_tensor import tensor_list_to_nested_tensor_already_padded
 from models.memotr import MeMOTR
 from structures.track_instances import TrackInstances
 from models.criterion import build as build_criterion, ClipCriterion
@@ -163,7 +163,7 @@ def train(config: dict):
         train_states["start_epoch"] += 1
         if multi_checkpoint is True:
             pass
-        else:
+        elif config["SAVE_CHECKPOINT"] is True:
             if config["DATASET"] == "DanceTrack" or config["EPOCHS"] < 100 or (epoch + 1) % 5 == 0:
                 save_checkpoint(
                     model=model,
@@ -172,13 +172,17 @@ def train(config: dict):
                     optimizer=optimizer,
                     scheduler=scheduler
                 )
+        else:
+            # warning
+            train_logger.show(head="No checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml")
+            train_logger.write(head="No checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml", filename="log.txt", mode="a")
 
         # 添加evaluate_one_epoch
         # 在以EVALUATE_PER_EPOCH为间隔的epoch结束后进行一次验证
         # 同时，最后5轮全部验证
         if ("EVALUATE_PER_EPOCH" in config and config["EVALUATE_PER_EPOCH"] > 0 and (epoch+1) % config["EVALUATE_PER_EPOCH"] == 0) or (epoch >= config["EPOCHS"] - 5):
             from submit_engine import submit_during_train
-            submit_during_train(config=config, epoch=epoch, model=model, only_train_detr=config["ONLY_TRAIN_DETR"])
+            submit_during_train(config=config, epoch=epoch, model=model, only_train_detr=config["ONLY_TRAIN_DETR"], train_logger=train_logger)
 
         train_logger.flush_buffers()
     # log记录结束时间
@@ -272,10 +276,11 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             for frame_idx in range(len(batch["imgs"][0])):
                 if no_grad_frames is None or frame_idx >= no_grad_frames:
                     frame = [fs[frame_idx] for fs in batch["imgs"]]
+                    padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
                     for f in frame:
                         f.requires_grad_(False)
-                    frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device) #[B, C, H, W]
-
+                    frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, padding_meta=padding_img_metas).to(device)
+                    # frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device) #[B, C, H, W]
                   
                     res = model(frame=frame, tracks=tracks)
                     previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
@@ -288,6 +293,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                         tracks = get_model(model).postprocess_single_frame(
                             previous_tracks, new_tracks, unmatched_dets)
                 else:
+                    raise NotImplementedError("No grad frames is not implemented yet. Function tensor_list_to_nested_tensor is wrong now!")
                     with torch.no_grad():
                         frame = [fs[frame_idx] for fs in batch["imgs"]]
                         for f in frame:
@@ -320,8 +326,10 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 optimizer.zero_grad()
 
             # For logging
-            for log_k in log_dict:
-                metric_log.update(name=log_k, value=log_dict[log_k][0])
+            # 主损失：所有不带 "aux" 和 "class" 的损失；写入 metric_log 以便统计 / TensorBoard
+            for log_k, (val, _) in log_dict.items():
+                if ("aux" not in log_k) and ("class" not in log_k):
+                    metric_log.update(name=log_k, value=val)
             iter_end_timestamp = time.time()
             metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
             metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
@@ -340,7 +348,6 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                                 f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
                                 f"Max Memory={max_memory}MB]",
                             log=metric_log)
-
                 logger.write(head=f"--[Epoch={epoch}, Iter={i}, "
                                 f"{second_per_iter:.2f}s/iter, "
                                 f"{second_per_data:.2f}s/data, "
@@ -348,10 +355,14 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                                 f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
                                 f"Max Memory={max_memory}MB]",
                             log=metric_log, filename="log.txt", mode="a")
+                # 同步输出并记录所有损失（包括 aux 和 class）到日志文件
+                if is_main_process():
+                    detail_items = ", ".join([f"{k}:{v[0]:.4f}" for k, v in log_dict.items()])
+                    logger.show(head="detail_loss", log=detail_items)
+                    logger.write(head="detail_loss", log=detail_items, filename="log.txt", mode="a")
                 # logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
                             #  log=metric_log, filename="log.txt", mode="a")
                 logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
-
             if multi_checkpoint:
                 if i % 1 == 0 and is_main_process():
                     save_checkpoint(
@@ -445,8 +456,10 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 optimizer.zero_grad()
 
             # For logging
-            for log_k in log_dict:
-                metric_log.update(name=log_k, value=log_dict[log_k][0])
+            # 主损失：所有不带 "aux" 和 "class" 的损失；写入 metric_log
+            for log_k, (val, _) in log_dict.items():
+                if ("aux" not in log_k) and ("class" not in log_k):
+                    metric_log.update(name=log_k, value=val)
             iter_end_timestamp = time.time()
             metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
             metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
@@ -476,6 +489,12 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 # logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
                             #  log=metric_log, filename="log.txt", mode="a")
                 logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
+
+                # 同步输出并记录所有损失（包括 aux 和 class）到日志文件
+                if is_main_process():
+                    detail_items = ", ".join([f"{k}:{v[0]:.4f}" for k, v in log_dict.items()])
+                    logger.show(head="detail_loss", log=detail_items)
+                    logger.write(head="detail_loss", log=detail_items, filename="log.txt", mode="a")
 
             if multi_checkpoint:
                 if i % 1 == 0 and is_main_process():

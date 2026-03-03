@@ -1,8 +1,8 @@
-PROJECT: "只训练DETR+EdgeSwap"
+PROJECT: "只训练DETR+EdgeSwap+修正gt的flip计算+l1损失计算权重"
 
 PARENT_CONFIG: ./default99.yaml
 
-AVAILABLE_GPUS: 0,1,2,3  #if not set, will use all gpus
+AVAILABLE_GPUS: 2,3  #if not set, will use all gpus
 
 USE_CHECKPOINT: False
 DYNAMIC_USE_CHECKPOINT_THRESHOLD: 5
@@ -40,3 +40,5 @@ ONLY_TRAIN_DETR: True
 
 BATCH_SIZE: 3
 EPOCHS: 40
+
+EDGE_SWAP: True

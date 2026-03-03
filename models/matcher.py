@@ -113,7 +113,7 @@ class HungarianMatcher(nn.Module):
             out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
             if self.edge_swap:
-                out_bbox = EdgeSwap.edge_swap(out_bbox, img_metas['version'])
+                out_bbox = EdgeSwap.edge_swap(out_bbox, img_metas['version'], img_metas['img_shape'])
 
             # Also concat the target labels and boxes
             if isinstance(targets[0], Instances):
@@ -142,7 +142,14 @@ class HungarianMatcher(nn.Module):
                 cost_class = -out_prob[:, tgt_ids]
 
             # Compute the L1 cost between boxes
-            cost_bbox = l1_dist_rotate(out_bbox, norm_tgt_bbox, aligned=False)
+            cost_bbox = l1_dist_rotate(out_bbox, norm_tgt_bbox, aligned=False, cal_sum=False)
+            # 计算weight
+            h_img, w_img = img_metas['img_shape']
+            min_img_shape = min(h_img, w_img)
+            l1_weight = torch.as_tensor([w_img / min_img_shape, h_img / min_img_shape, w_img / min_img_shape, h_img / min_img_shape, 1.0], dtype=out_bbox.dtype, device=out_bbox.device)#[5,]
+            cost_bbox = cost_bbox * l1_weight
+            cost_bbox = cost_bbox.sum(dim=-1)
+
             # 如果tgt_bbox是空
             if tgt_bbox.size(0) == 0:
                 cost_giou = torch.zeros_like(cost_bbox)

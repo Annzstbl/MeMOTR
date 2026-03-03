@@ -106,8 +106,37 @@ class MetricLog:
         return
 
     def sync(self):
-        for name, value in self.metrics.items():
-            value.sync()
+        """
+        分布式场景下先统一所有 rank 的 metric key，再逐个同步，避免因为不同 rank
+        上的指标集合不一致导致 barrier/all_gather 卡住。
+        """
+        if is_distributed():
+            try:
+                # 1) 收集每个 rank 当前已有的 metric 名称
+                local_keys = list(self.metrics.keys())
+                keys_gather = [None] * distributed_world_size()
+                torch.distributed.all_gather_object(keys_gather, local_keys)
+
+                # 2) 计算全局并集，并保证每个 rank 都包含相同的 key
+                merged_keys = set()
+                for ks in keys_gather:
+                    if ks is not None:
+                        merged_keys.update(ks)
+                for k in merged_keys:
+                    if k not in self.metrics:
+                        self.metrics[k] = Value()
+
+                # 3) 统一顺序逐个同步，确保 barrier 次数一致
+                for name in sorted(merged_keys):
+                    self.metrics[name].sync()
+            except Exception as e:
+                print(f"Warning: MetricLog sync failed to align keys: {e}")
+                # 回落到逐个同步，至少不阻塞
+                for _, value in self.metrics.items():
+                    value.sync()
+        else:
+            for _, value in self.metrics.items():
+                value.sync()
         return
 
     def get(self, name: str, mode: str):
