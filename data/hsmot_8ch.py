@@ -1,5 +1,3 @@
-# @Author       : Ruopeng Gao
-# @Date         : 2022/8/30
 import os
 from math import floor
 from random import randint
@@ -63,60 +61,69 @@ class hsmot_8ch(MOTDataset):
         assert os.path.exists(self.split_dir), f"Dir {self.split_dir} is not exist."
         self.labels_dir = os.path.join(base_dataset_dir, split, "mot")
 
-        vid_white_list = config["VID_WHITE_LIST"] if "VID_WHITE_LIST" in config else None
-        self.train_half = config["TRAIN_HALF"] if "TRAIN_HALF" in config else False
+        def _log(msg: str):
+            if logger is not None:
+                logger.show(head=msg)
+                logger.write(head=msg, filename="log.txt", mode="a")
+
+        # 过滤优先级规则：
+        # 1) dataset_version 只决定 base_dataset_dir（已在上方处理）
+        # 2) VID_WHITE_LIST 和 TRAIN_HALF 都是“过滤器”，最终取交集
+        # 3) TRAIN_HALF 仅在 train split 生效
+        vid_white_list_cfg = config.get("VID_WHITE_LIST")
+        vid_white_list = set(vid_white_list_cfg) if vid_white_list_cfg is not None else None
+
+        self.train_half = bool(config.get("TRAIN_HALF", False)) and split == "train"
+        self.train_half_list = None
         if self.train_half:
             self.train_half_list = set()
             self.train_half_file = os.path.join(base_dataset_dir, "train_half.txt")
             assert os.path.exists(self.train_half_file), f"File {self.train_half_file} is not exist."
             with open(self.train_half_file, 'r') as f:
                 for line in f:
-                    self.train_half_list.add(line.strip())
-            if logger is not None:
-                logger.show(head=f"Usetrain half list from {self.train_half_file}, total {len(self.train_half_list)} vids.")
-                logger.write(head=f"Usetrain half list from {self.train_half_file}, total {len(self.train_half_list)} vids.", filename="log.txt", mode="a")
-            self.vid_white_list = None
+                    line = line.strip()
+                    if line:
+                        self.train_half_list.add(line)
+            _log(f"Use train half list from {self.train_half_file}, total {len(self.train_half_list)} vids.")
+        elif bool(config.get("TRAIN_HALF", False)) and split != "train":
+            _log("TRAIN_HALF is enabled but split is not train, ignore TRAIN_HALF.")
 
         self.labels_full = defaultdict(lambda: defaultdict(list))
+        total_vids = 0
+        kept_vids = 0
+        skipped_by_whitelist = 0
+        skipped_by_train_half = 0
         for vid in os.listdir(self.labels_dir):
-            # 过滤视频序列
-            if vid_white_list is not None and os.path.splitext(vid)[0] not in vid_white_list:
-                print(f'skip vid {vid}')
+            if not vid.endswith(".txt"):
                 continue
-            if self.train_half and os.path.splitext(vid)[0] not in self.train_half_list:
-                logger.write(head=f'skip vid {vid} not in train half list', filename="log.txt", mode="a")
-                continue
-            # else:
-                # print(f'loading vid {vid}')
+            total_vids += 1
+            vid_name = os.path.splitext(vid)[0]
 
+            if vid_white_list is not None and vid_name not in vid_white_list:
+                skipped_by_whitelist += 1
+                continue
+            if self.train_half and (self.train_half_list is not None) and vid_name not in self.train_half_list:
+                skipped_by_train_half += 1
+                continue
+
+            kept_vids += 1
             gt_path = os.path.join(self.labels_dir, vid)
-            for l in open(gt_path):
-                t, i, *x0y0x1y1x2y2x3y3, _, cls, trunc = l.strip().split(',')[:13] 
-                t, i, cls = map(int, (t, i, cls))
-                x0, y0, x1, y1, x2, y2, x3, y3 = map(float, (x0y0x1y1x2y2x3y3))
-                self.labels_full[vid][t].append(np.array([x0, y0, x1, y1, x2, y2, x3, y3, i, cls], dtype=np.float32))
+            with open(gt_path, "r") as f:
+                for l in f:
+                    t, i, *x0y0x1y1x2y2x3y3, _, cls, trunc = l.strip().split(',')[:13]
+                    t, i, cls = map(int, (t, i, cls))
+                    x0, y0, x1, y1, x2, y2, x3, y3 = map(float, (x0y0x1y1x2y2x3y3))
+                    self.labels_full[vid][t].append(np.array([x0, y0, x1, y1, x2, y2, x3, y3, i, cls], dtype=np.float32))
+
+        _log(
+            f"Video filtering done: total={total_vids}, kept={kept_vids}, "
+            f"skip_whitelist={skipped_by_whitelist}, skip_train_half={skipped_by_train_half}"
+        )
         vid_files = list(self.labels_full.keys())
 
         for vid in vid_files:
             self.vid_idx[vid] = len(self.vid_idx)
             self.idx_vid[self.vid_idx[vid]] = vid
-
-        # for vid in os.listdir(self.split_dir):
-        #     gt_path = os.path.join(self.split_dir, vid, "gt", "gt.txt")
-        #     for line in open(gt_path):
-        #         # gt per line: <frame>, <id>, <bb_left>, <bb_top>, <bb_width>, <bb_height>, 1, 1, 1
-        #         # https://github.com/DanceTrack/DanceTrack
-        #         t, i, *xywh, a, b, c = line.strip().split(",")[:9]
-        #         t, i, a, b, c = map(int, (t, i, a, b, c))
-        #         x, y, w, h = map(float, xywh)
-        #         assert a == b == c == 1, f"Check Digit ERROR!"
-        #         self.gts[vid][t].append([i, x, y, w, h])
-
-        # vids = list(self.gts.keys())
-
-        # for vid in vids:
-        #     self.vid_idx[vid] = len(self.vid_idx)
-        #     self.idx_vid[self.vid_idx[vid]] = vid
 
         self.set_epoch(0)
 
@@ -126,7 +133,6 @@ class hsmot_8ch(MOTDataset):
         vid, begin_frame = self.sample_begin_frames[item]
         frame_idxs = self.sample_frames_idx(vid=vid, begin_frame=begin_frame)
         data_info = self.get_multi_frames(vid=vid, idxs=frame_idxs)
-        assert self.transform is not None
         results = self.transform(data_info)
         if self.npy2rgb:
             images = [img[[1,2,4],...] for img in results[0]]
@@ -237,7 +243,7 @@ class hsmot_8ch(MOTDataset):
         return [self.get_single_frame(vid=vid, idx=i) for i in idxs]
 
 
-def transfroms_for_train(use_cache=True, cache_path=None, spectral_method=None, spectral_n_clusters=None,
+def transforms_for_train(use_cache=True, cache_path=None, spectral_method=None, spectral_n_clusters=None,
                          get_spectral_weights=True, transform_config=None):
     mean = [0.27358221, 0.28804452, 0.28133921, 0.26906377, 0.28309119, 0.26928305, 0.28372527, 0.27149373]
     std = [0.19756629, 0.17432339, 0.16413284, 0.17581682, 0.18366176, 0.1536845, 0.15964683, 0.16557951]
@@ -254,45 +260,24 @@ def transfroms_for_train(use_cache=True, cache_path=None, spectral_method=None, 
     crop_size = tuple(transform_config["CROP_SIZE"])
     flip_ratio = transform_config["FLIP_RATIO"]
 
-
-
     return MotCompose([
                 MotipToMmrotate(),
                 MotLoadMultichannelImageFromNpy(),
                 MotLoadAnnotations(poly2mask=False),
                 MotRRandomFlip(direction=['horizontal'], flip_ratio=[flip_ratio], version='le135'),
-                # MotRandomChoice(transforms=[
-                #     [
-                #         MotRRsize(multiscale_mode='value', img_scale=scales, bbox_clip_border=False),
-                #         ],
-                #     [
-                #         MotRRandomCrop(crop_size=(800, 1200), crop_type='absolute_range', version='le135', allow_negative_crop=True, iof_thr=0.5),
-                #         MotRRsize(multiscale_mode='value', img_scale=scales, bbox_clip_border=False),
-                #         ]
-                # ]),         
-
-                MotRRandomCrop(crop_size=crop_size, crop_type='absolute_range', version='le135', allow_negative_crop=True, iof_thr=0.5),
+                MotRRandomCrop(crop_size=crop_size, crop_type='absolute_w_range', version='le135',
+                               allow_negative_crop=False, iof_thr=0.5, keep_ratio=True),
                 MotRRsize(multiscale_mode='value', img_scale=scales, bbox_clip_border=False),       
-
                 # 缺少一个颜色预训练
                 MotNormalize(mean=mean, std=std, to_rgb=False),
                 MotPad(size_divisor=64),
+                # MotShow(save_path='/data4/litianhao/hsmot/memotr/debug99/debug_img', version='le135', mean=mean, std=std, img_name_tail='2026_3_3', show_proposals=False, to_bgr=False),
                 MotDefaultFormatBundle(),
                 MotCollect(keys=['img', 'gt_bboxes', 'gt_labels', 'gt_trackids']),
                 MmrotateToMemotr(use_cache=use_cache, cache_path=cache_path, spectral_method=spectral_method, spectral_n_clusters=spectral_n_clusters, mean=mean, std=std, get_spectral_weights=get_spectral_weights)
                 #TODO 缺少一个reverse clip 但实际参数是0所以暂不实现
+
             ])
-
-
-def transforms_for_eval():
-    #TODO 推理transform
-    return T.MultiCompose([
-        T.MultiRandomResize(sizes=[800], max_size=1333),
-        T.MultiCompose([
-            T.MultiToTensor(),
-            T.MultiNormalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-    ])
 
 
 def build(config: dict, split: str, logger):
@@ -301,7 +286,7 @@ def build(config: dict, split: str, logger):
         return hsmot_8ch(
             config=config,
             split=split,
-            transform=transfroms_for_train(
+            transform=transforms_for_train(
                 cache_path=os.path.join(config["DATA_ROOT"], config["DATASET"].replace("_8ch", "")),
                 get_spectral_weights=config["DECODER_SPECTRAL_REFINE"],
                 use_cache=config["DECODER_SPECTRAL_USE_CACHE"],
@@ -312,7 +297,5 @@ def build(config: dict, split: str, logger):
             logger = logger,
             dataset_version=config["DATASET_VERSION"]
         )
-    elif split == "test":
-        return hsmot_8ch(config=config, split=split, transform=transforms_for_eval(), dataset_version=config["DATASET_VERSION"])
     else:
-        raise ValueError(f"Data split {split} is not supported for DanceTrack dataset.")
+        raise ValueError(f"Data split {split} is not supported.")

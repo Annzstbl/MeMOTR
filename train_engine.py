@@ -273,13 +273,13 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                                 num_classes=get_model(model).num_classes,
                                 device=device, )
 
-            for frame_idx in range(len(batch["imgs"][0])):
+            for frame_idx in range(len(batch["imgs"][0])):#所有batch的第frame_idx帧
                 if no_grad_frames is None or frame_idx >= no_grad_frames:
                     frame = [fs[frame_idx] for fs in batch["imgs"]]
                     padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
                     for f in frame:
                         f.requires_grad_(False)
-                    frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, padding_meta=padding_img_metas).to(device)
+                    frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
                     # frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device) #[B, C, H, W]
                   
                     res = model(frame=frame, tracks=tracks)
@@ -294,20 +294,20 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                             previous_tracks, new_tracks, unmatched_dets)
                 else:
                     raise NotImplementedError("No grad frames is not implemented yet. Function tensor_list_to_nested_tensor is wrong now!")
-                    with torch.no_grad():
-                        frame = [fs[frame_idx] for fs in batch["imgs"]]
-                        for f in frame:
-                            f.requires_grad_(False)
-                        frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
-                        res = model(frame=frame, tracks=tracks)
-                        previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
-                            model_outputs=res,
-                            tracked_instances=tracks,
-                            frame_idx=frame_idx
-                        )
-                        if frame_idx < len(batch["imgs"][0]) - 1:
-                            tracks = get_model(model).postprocess_single_frame(
-                                previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1)
+                    # with torch.no_grad():
+                    #     frame = [fs[frame_idx] for fs in batch["imgs"]]
+                    #     for f in frame:
+                    #         f.requires_grad_(False)
+                    #     frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
+                    #     res = model(frame=frame, tracks=tracks)
+                    #     previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
+                    #         model_outputs=res,
+                    #         tracked_instances=tracks,
+                    #         frame_idx=frame_idx
+                    #     )
+                    #     if frame_idx < len(batch["imgs"][0]) - 1:
+                    #         tracks = get_model(model).postprocess_single_frame(
+                    #             previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1)
 
             loss_dict, log_dict = criterion.get_mean_by_n_gts()
             loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
@@ -400,9 +400,10 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             for frame_idx in range(len(batch["imgs"][0])):
                 if no_grad_frames is None or frame_idx >= no_grad_frames:
                     frame = [fs[frame_idx] for fs in batch["imgs"]]
+                    padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
                     for f in frame:
                         f.requires_grad_(False)
-                    frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device) #[B, C, H, W]
+                    frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
 
                     if 'heatmap' in batch["infos"][0][0]:
                         heatmap = [hs[frame_idx]['heatmap'] for hs in batch["infos"]]
@@ -426,14 +427,16 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 else:
                     with torch.no_grad():
                         frame = [fs[frame_idx] for fs in batch["imgs"]]
+                        padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
                         for f in frame:
                             f.requires_grad_(False)
-                        frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
+                        frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
                         res = model(frame=frame, tracks=tracks)
                         previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                             model_outputs=res,
                             tracked_instances=tracks,
-                            frame_idx=frame_idx
+                            frame_idx=frame_idx,
+                            img_metas=img_metas
                         )
                         if frame_idx < len(batch["imgs"][0]) - 1:
                             tracks = get_model(model).postprocess_single_frame(

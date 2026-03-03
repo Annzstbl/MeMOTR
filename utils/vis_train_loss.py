@@ -540,7 +540,7 @@ def plot_class_losses_curves(data, output_dir):
 
 
 def plot_layer5_class_losses(data, output_dir):
-    """绘制layer5按类别区分的l1和giou损失，分开绘制，每个类别一个子图"""
+    """绘制layer5按类别区分的l1和giou损失，每个类别一个子图，每个子图同时显示l1和giou"""
     # 只处理layer5的数据
     layer_name = 'layer5'
     

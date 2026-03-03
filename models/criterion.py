@@ -518,7 +518,6 @@ class ClipCriterion:
                 gt_trackinstances[b][tracked_instances[b][tracked_instances[b].matched_idx >= 0].matched_idx].boxes,
                 img_shape=img_metas['img_shape'], version=img_metas['version'], aligned=True
             )
-            pass
 
         # 12 calculate spectral kl loss
         spectral_weights_list = model_outputs["spectral_weights"]

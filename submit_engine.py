@@ -15,7 +15,7 @@ from models import build_model
 from models.utils import load_checkpoint, get_model
 from models.runtime_tracker import RuntimeTracker
 from utils.utils import yaml_to_dict, is_distributed, distributed_world_size, distributed_rank, inverse_sigmoid
-from utils.nested_tensor import tensor_list_to_nested_tensor_already_padded_shape
+from utils.nested_tensor import tensor_list_to_nested_tensor_with_shared_shapes
 from utils.box_ops import box_cxcywh_to_xyxy
 from log.logger import Logger
 from data.seq_dataset import SeqDataset, SeqDataset_HeatmapGT
@@ -30,6 +30,7 @@ import cv2
 
 
 class Submitter:
+    """Run MeMOTR inference on a single HSMOT sequence and dump tracking/detection results."""
     def __init__(self, dataset_name: str, split_dir: str, seq_name: str, outputs_dir: str, model: nn.Module,
                  det_score_thresh: float = 0.7, track_score_thresh: float = 0.6, result_score_thresh: float = 0.7,
                  miss_tolerance: int = 5,
@@ -85,9 +86,14 @@ class Submitter:
             self.use_prior_map = True
         return
 
+    @staticmethod
+    def _effective_hw(ori_image):
+        """Get effective (pre-pad) image size from original frame."""
+        return int(ori_image.shape[1]), int(ori_image.shape[2])
+
     @torch.no_grad()
     def run(self):
-
+        """Entry point: choose the specific run mode based on config flags."""
         if self.only_train_detr:#仍然可能Prior_map = True
             self._run_with_only_train_detr()
         elif self.use_scem_gt:
@@ -99,9 +105,9 @@ class Submitter:
 
     @torch.no_grad()
     def _run_with_only_train_detr(self):
-
-
+        """Inference path when only DETR is trained (no motion, no prior map, no SCEM)."""
         txt_lines = []
+        det_txt_lines = []
         for i, ((image, ori_image), info) in enumerate(tqdm(self.dataloader, desc=f"Submit seq: {self.seq_name}")):
             # 单帧图像
             tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
@@ -109,35 +115,29 @@ class Submitter:
                                     use_dab=self.use_dab,
                                     ).to(self.device)]
 
-            # image: (1, C, H, W); ori_image: (1, H, W, C)
-            ori_img_shape = ori_image.shape[1:4]#(H, W, C)
-            pad_shape = image[0].shape
-            pad_shape = (pad_shape[1], pad_shape[2], pad_shape[0])
-            frame = tensor_list_to_nested_tensor_already_padded_shape([image[0]], ori_img_shape, pad_shape).to(self.device)
-            # frame = tensor_list_to_nested_tensor([image[0]]).to(self.device)
+            effective_img_shape = ori_image.shape[1:4]  # (H, W, C), pre-pad valid area
+            padded_img_shape = image[0].shape
+            padded_img_shape = (padded_img_shape[1], padded_img_shape[2], padded_img_shape[0])
+            frame = tensor_list_to_nested_tensor_with_shared_shapes(
+                [image[0]],
+                effective_img_shape=effective_img_shape,
+                padded_img_shape=padded_img_shape
+            ).to(self.device)
 
             res = self.model(frame=frame, tracks=tracks)
             previous_tracks, new_tracks = self.tracker.update(
                 model_outputs=res,
                 tracks=tracks
             )
-            # tracks: List[TrackInstances] = get_model(self.model).postprocess_single_frame(previous_tracks, new_tracks, None)
             tracks = new_tracks
             tracks_result = tracks[0].to(torch.device("cpu"))
             ori_h, ori_w = ori_image.shape[1], ori_image.shape[2]
-            # box = [x, y, w, h]
             tracks_result.area = tracks_result.boxes[:, 2] * ori_w * \
                                  tracks_result.boxes[:, 3] * ori_h
             tracks_result = self.filter_by_score(tracks_result, thresh=self.result_score_thresh)
             tracks_result = self.filter_by_area(tracks_result)
-            # to xyxy:
-            # tracks_result.boxes = box_cxcywh_to_xyxy(tracks_result.boxes)
-            # tracks_result.boxes = (tracks_result.boxes * torch.as_tensor([ori_w, ori_h, ori_w, ori_h], dtype=torch.float))
-
-            # if self.dataset_name == "BDD100K":
-            #     self.update_results(tracks_result=tracks_result, frame_idx=i, results=bdd100k_results, img_path=info[0])
-            # else:
-            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (image.shape[2], image.shape[3]), version='le135')
+            eff_h, eff_w = self._effective_hw(ori_image)
+            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (eff_h, eff_w), version='le135')
             boxes_xyxyxyxy = obb2poly(boxes_xyxyxyxy)
 
             for _tracks, xyxyxyxy in zip(tracks_result, boxes_xyxyxyxy):
@@ -155,13 +155,12 @@ class Submitter:
             # frame_id = i+1
             # label = torch.max(new_tracks.scores, dim=-1).indices
             # save_format = '{frame:6d},{id:6d},{x1:.3f},{y1:.3f},{x2:.3f},{y2:.3f},{x3:.3f},{y3:.3f},{x4:.3f},{y4:.3f},{conf:.3f},{label:2d},-1\n'
-            det_txt_lines = []
-            det_boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(res["pred_bboxes"][0].cpu(), (image.shape[2], image.shape[3]), version='le135')
+            det_boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(res["pred_bboxes"][0].cpu(), (eff_h, eff_w), version='le135')
             det_boxes_xyxyxyxy = obb2poly(det_boxes_xyxyxyxy)
             det_scores = res["scores"][0].cpu()
             det_labels = torch.max(det_scores, dim=-1).indices
             det_confs = torch.max(det_scores, dim=-1).values
-            for i, (det_box, det_conf, det_label) in enumerate(zip(det_boxes_xyxyxyxy, det_confs, det_labels)):
+            for det_box, det_conf, det_label in zip(det_boxes_xyxyxyxy, det_confs, det_labels):
                 save_format = '{frame:6d},{x1:.3f},{y1:.3f},{x2:.3f},{y2:.3f},{x3:.3f},{y3:.3f},{x4:.3f},{y4:.3f},{conf:.3f},{label:2d},-1\n'
                 x1, y1, x2, y2, x3, y3, x4, y4 = det_box.tolist()
                 conf = det_conf.item()
@@ -181,15 +180,27 @@ class Submitter:
         if self.draw_pic_dir is not None:
             save_pic = os.path.join(self.draw_pic_dir, f"ep{self.epoch}_{self.seq_name}_det.jpg")
             img = np.ascontiguousarray(ori_image[0].cpu().numpy()[:,:,[4,2,1]])
-            for boxes, confs in zip (det_boxes_xyxyxyxy, det_confs):
+            for boxes, confs in zip(det_boxes_xyxyxyxy, det_confs):
                 if confs < 0.1:
-                    draw_rotated_bbox(img, None, boxes[0], boxes[1], boxes[2], boxes[3], boxes[4], boxes[5], boxes[6], boxes[7], confs, thickness=1, font_scale=0, color=(128,0,0))
+                    color = (128, 0, 0)   # 深红，极低置信度
+                elif confs < 0.5:
+                    color = (0, 255, 255) # 黄ish，低中置信度（BGR: 青-黄系）
                 else:
-                    draw_rotated_bbox(img, None, boxes[0], boxes[1], boxes[2], boxes[3], boxes[4], boxes[5], boxes[6], boxes[7], confs,color=(0,0,255))
+                    color = (0, 0, 255)   # 亮红，高置信度
+                draw_rotated_bbox(
+                    img, None,
+                    boxes[0], boxes[1], boxes[2], boxes[3],
+                    boxes[4], boxes[5], boxes[6], boxes[7],
+                    confs,
+                    thickness=1,
+                    font_scale=0,
+                    color=color
+                )
             cv2.imwrite(save_pic, img)
 
     @torch.no_grad()
     def _run_with_prior_map(self):
+        """Inference path using learned prior map (SCEM prior_mode != None)."""
         tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
                                  num_classes=get_model(self.model).num_classes,
                                  use_dab=self.use_dab,
@@ -198,8 +209,14 @@ class Submitter:
         txt_lines = []
         prev_frame = None
         for i, ((image, ori_image), info) in enumerate(tqdm(self.dataloader, desc=f"Submit seq: {self.seq_name}")):
-            # image: (1, C, H, W); ori_image: (1, H, W, C)
-            frame = tensor_list_to_nested_tensor([image[0]]).to(self.device)
+            effective_img_shape = ori_image.shape[1:4]  # (H, W, C), pre-pad valid area
+            padded_img_shape = image[0].shape
+            padded_img_shape = (padded_img_shape[1], padded_img_shape[2], padded_img_shape[0])
+            frame = tensor_list_to_nested_tensor_with_shared_shapes(
+                [image[0]],
+                effective_img_shape=effective_img_shape,
+                padded_img_shape=padded_img_shape
+            ).to(self.device)
 
             if prev_frame is not None:
                 gmc = compute_gmc_sequence(images=[prev_frame[0], frame.tensors[0]], method='sparseOptFlow', downscale=1)[-1] # [2, 3]
@@ -215,10 +232,6 @@ class Submitter:
             )
             tracks: List[TrackInstances] = get_model(self.model).postprocess_single_frame(previous_tracks, new_tracks, None)
 
-            # We do not use this...
-            # but I do not want to remove this part.
-            # WHAT IF it breaks down!!!
-            # of course not :)
             if self.use_motion:
                 for _ in range(len(tracks[0])):
                     if tracks[0].disappear_time[_].item() > 0:
@@ -232,19 +245,12 @@ class Submitter:
 
             tracks_result = tracks[0].to(torch.device("cpu"))
             ori_h, ori_w = ori_image.shape[1], ori_image.shape[2]
-            # box = [x, y, w, h]
             tracks_result.area = tracks_result.boxes[:, 2] * ori_w * \
                                  tracks_result.boxes[:, 3] * ori_h
             tracks_result = self.filter_by_score(tracks_result, thresh=self.result_score_thresh)
             tracks_result = self.filter_by_area(tracks_result)
-            # to xyxy:
-            # tracks_result.boxes = box_cxcywh_to_xyxy(tracks_result.boxes)
-            # tracks_result.boxes = (tracks_result.boxes * torch.as_tensor([ori_w, ori_h, ori_w, ori_h], dtype=torch.float))
-
-            # if self.dataset_name == "BDD100K":
-            #     self.update_results(tracks_result=tracks_result, frame_idx=i, results=bdd100k_results, img_path=info[0])
-            # else:
-            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (image.shape[2], image.shape[3]), version='le135')
+            eff_h, eff_w = self._effective_hw(ori_image)
+            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (eff_h, eff_w), version='le135')
             boxes_xyxyxyxy = obb2poly(boxes_xyxyxyxy)
 
             for _tracks, xyxyxyxy in zip(tracks_result, boxes_xyxyxyxy):
@@ -256,17 +262,12 @@ class Submitter:
                 line = save_format.format(frame=i + 1, id=obj_id, x1=x1, y1=y1, x2=x2, y2=y2, x3=x3, y3=y3, x4=x4, y4=y4, conf=conf, label=label)
                 txt_lines.append(line)
 
-            # save_path = os.path.join("/data3/litianhao/hsmot/paper/memotr3ch", self.seq_name)
-            # os.makedirs(save_path, exist_ok=True)
-            # #tracks[0].query_embed和tracks[0].ids保存下来
-            # torch.save(tracks[0].query_embed.cpu(), os.path.join(save_path, f"{i}_query_embed.pt"))
-            # torch.save(tracks[0].ids.cpu(), os.path.join(save_path, f"{i}_ids.pt"))
-            # print(f'save {i} query_embed and ids to {save_path}')
         with open(os.path.join(self.predict_dir, f"{self.seq_name}.txt"), "w") as file:
             file.writelines(txt_lines)
 
     @torch.no_grad()
     def _run_with_GT(self):
+        """Inference path that consumes GT heatmap as SCEM supervision (debug/eval)."""
         tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
                                  num_classes=get_model(self.model).num_classes,
                                  use_dab=self.use_dab,
@@ -274,8 +275,14 @@ class Submitter:
 
         txt_lines = []
         for i, ((image, ori_image), info, heatmap) in enumerate(tqdm(self.dataloader, desc=f"Submit seq: {self.seq_name}")):
-            # image: (1, C, H, W); ori_image: (1, H, W, C)
-            frame = tensor_list_to_nested_tensor([image[0]]).to(self.device)
+            effective_img_shape = ori_image.shape[1:4]  # (H, W, C), pre-pad valid area
+            padded_img_shape = image[0].shape
+            padded_img_shape = (padded_img_shape[1], padded_img_shape[2], padded_img_shape[0])
+            frame = tensor_list_to_nested_tensor_with_shared_shapes(
+                [image[0]],
+                effective_img_shape=effective_img_shape,
+                padded_img_shape=padded_img_shape
+            ).to(self.device)
             heatmap = heatmap.to(self.device)
             res = self.model(frame=frame, tracks=tracks, heatmap=heatmap)
             previous_tracks, new_tracks = self.tracker.update(
@@ -284,10 +291,6 @@ class Submitter:
             )
             tracks: List[TrackInstances] = get_model(self.model).postprocess_single_frame(previous_tracks, new_tracks, None)
 
-            # We do not use this...
-            # but I do not want to remove this part.
-            # WHAT IF it breaks down!!!
-            # of course not :)
             if self.use_motion:
                 for _ in range(len(tracks[0])):
                     if tracks[0].disappear_time[_].item() > 0:
@@ -301,12 +304,12 @@ class Submitter:
 
             tracks_result = tracks[0].to(torch.device("cpu"))
             ori_h, ori_w = ori_image.shape[1], ori_image.shape[2]
-            # box = [x, y, w, h]
             tracks_result.area = tracks_result.boxes[:, 2] * ori_w * \
                                  tracks_result.boxes[:, 3] * ori_h
             tracks_result = self.filter_by_score(tracks_result, thresh=self.result_score_thresh)
             tracks_result = self.filter_by_area(tracks_result)
-            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (image.shape[2], image.shape[3]), version='le135')
+            eff_h, eff_w = self._effective_hw(ori_image)
+            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (eff_h, eff_w), version='le135')
             boxes_xyxyxyxy = obb2poly(boxes_xyxyxyxy)
 
             for _tracks, xyxyxyxy in zip(tracks_result, boxes_xyxyxyxy):
@@ -324,16 +327,22 @@ class Submitter:
 
     @torch.no_grad()
     def _run(self):
+        """Default inference path: no prior map, optional motion compensation."""
         tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
                                  num_classes=get_model(self.model).num_classes,
                                  use_dab=self.use_dab,
                                  ).to(self.device)]
-        # bdd100k_results = []    # for bdd100k, will be converted into json file, different from other datasets.
 
         txt_lines = []
         for i, ((image, ori_image), info) in enumerate(tqdm(self.dataloader, desc=f"Submit seq: {self.seq_name}")):
-            # image: (1, C, H, W); ori_image: (1, H, W, C)
-            frame = tensor_list_to_nested_tensor([image[0]]).to(self.device)
+            effective_img_shape = ori_image.shape[1:4]  # (H, W, C), pre-pad valid area
+            padded_img_shape = image[0].shape
+            padded_img_shape = (padded_img_shape[1], padded_img_shape[2], padded_img_shape[0])
+            frame = tensor_list_to_nested_tensor_with_shared_shapes(
+                [image[0]],
+                effective_img_shape=effective_img_shape,
+                padded_img_shape=padded_img_shape
+            ).to(self.device)
             res = self.model(frame=frame, tracks=tracks)
             previous_tracks, new_tracks = self.tracker.update(
                 model_outputs=res,
@@ -341,10 +350,6 @@ class Submitter:
             )
             tracks: List[TrackInstances] = get_model(self.model).postprocess_single_frame(previous_tracks, new_tracks, None)
 
-            # We do not use this...
-            # but I do not want to remove this part.
-            # WHAT IF it breaks down!!!
-            # of course not :)
             if self.use_motion:
                 for _ in range(len(tracks[0])):
                     if tracks[0].disappear_time[_].item() > 0:
@@ -358,19 +363,12 @@ class Submitter:
 
             tracks_result = tracks[0].to(torch.device("cpu"))
             ori_h, ori_w = ori_image.shape[1], ori_image.shape[2]
-            # box = [x, y, w, h]
             tracks_result.area = tracks_result.boxes[:, 2] * ori_w * \
                                  tracks_result.boxes[:, 3] * ori_h
             tracks_result = self.filter_by_score(tracks_result, thresh=self.result_score_thresh)
             tracks_result = self.filter_by_area(tracks_result)
-            # to xyxy:
-            # tracks_result.boxes = box_cxcywh_to_xyxy(tracks_result.boxes)
-            # tracks_result.boxes = (tracks_result.boxes * torch.as_tensor([ori_w, ori_h, ori_w, ori_h], dtype=torch.float))
-
-            # if self.dataset_name == "BDD100K":
-            #     self.update_results(tracks_result=tracks_result, frame_idx=i, results=bdd100k_results, img_path=info[0])
-            # else:
-            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (image.shape[2], image.shape[3]), version='le135')
+            eff_h, eff_w = self._effective_hw(ori_image)
+            boxes_xyxyxyxy = rotate_norm_boxes_to_boxes(tracks_result.boxes.cpu(), (eff_h, eff_w), version='le135')
             boxes_xyxyxyxy = obb2poly(boxes_xyxyxyxy)
 
             for _tracks, xyxyxyxy in zip(tracks_result, boxes_xyxyxyxy):
@@ -382,29 +380,8 @@ class Submitter:
                 line = save_format.format(frame=i + 1, id=obj_id, x1=x1, y1=y1, x2=x2, y2=y2, x3=x3, y3=y3, x4=x4, y4=y4, conf=conf, label=label)
                 txt_lines.append(line)
 
-            # save_path = os.path.join("/data3/litianhao/hsmot/paper/memotr3ch", self.seq_name)
-            # os.makedirs(save_path, exist_ok=True)
-            # #tracks[0].query_embed和tracks[0].ids保存下来
-            # torch.save(tracks[0].query_embed.cpu(), os.path.join(save_path, f"{i}_query_embed.pt"))
-            # torch.save(tracks[0].ids.cpu(), os.path.join(save_path, f"{i}_ids.pt"))
-            # print(f'save {i} query_embed and ids to {save_path}')
         with open(os.path.join(self.predict_dir, f"{self.seq_name}.txt"), "w") as file:
             file.writelines(txt_lines)
-            # if self.visualize:
-            #     os.makedirs(f"./outputs/visualize_tmp/frame_{i+1}/", exist_ok=False)
-            #     os.system(f"mv ./outputs/visualize_tmp/query_updater/ ./outputs/visualize_tmp/frame_{i+1}/")
-            #     os.system(f"mv ./outputs/visualize_tmp/decoder/ ./outputs/visualize_tmp/frame_{i+1}/")
-            #     os.system(f"mv ./outputs/visualize_tmp/memotr/ ./outputs/visualize_tmp/frame_{i+1}/")
-            #     os.system(f"mv ./outputs/visualize_tmp/runtime_tracker/ ./outputs/visualize_tmp/frame_{i+1}/")
-
-        # if self.visualize:
-        #     visualize_save_dir = os.path.join("./outputs/visualize/", self.seq_name)
-        #     os.makedirs(visualize_save_dir, exist_ok=True)
-        #     os.system(f"mv ./outputs/visualize_tmp/* {visualize_save_dir}")
-
-        # if self.dataset_name == "BDD100K":
-        #     with open(os.path.join(self.predict_dir, '{}.json'.format(self.seq_name)), 'w', encoding='utf-8') as f:
-        #         json.dump(bdd100k_results, f)
 
         return
 
@@ -420,7 +397,7 @@ class Submitter:
         return tracks[keep]
 
     def update_results(self, tracks_result: TrackInstances, frame_idx: int, results: list, img_path: str):
-        # Only be used for BDD100K:
+        """Helper to convert tracks into BDD100K json-style result for a single frame."""
         bdd_cls2label = {
             1: "pedestrian",
             2: "rider",
