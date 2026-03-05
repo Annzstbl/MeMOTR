@@ -1,0 +1,52 @@
+PROJECT: "使用全新的数据预处理代码2026-03-05 197服务器 调难crop大小"
+
+PARENT_CONFIG: ./default.yaml
+
+AVAILABLE_GPUS: 6,7  #if not set, will use all gpus
+
+USE_CHECKPOINT: False
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 5
+CHECKPOINT_LEVEL: 3 
+SAMPLE_LENGTHS: [1,1,1,1]
+
+OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/22_6_3_197_only_detr_edgeswap_lrdrop_newtransforms_noscem
+SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/22_6_3_197_only_detr_edgeswap_lrdrop_newtransforms_noscem
+
+
+ENCODER_SPECTRAL: True
+
+TRAIN_HALF: True
+
+SCEM:
+  ENABLE: False
+  WITH_FOREGROUND: False
+  PRIOR_MODE: gate
+  USE_SPECTRAL_PI: False
+
+LOSS_SCEM_NLL: 1
+LOSS_SCEM_BCE: 1
+LOSS_SCEM_DICE: 1
+LOSS_NLL_CONFIG:
+  TYPE: focal # focal or mean
+  ALPHA_POS: 1.0
+  ALPHA_NEG: 0.1
+  GAMMA_POS: 2.0
+  GAMMA_NEG: 0.0
+
+ONLY_TRAIN_DETR: True
+
+BATCH_SIZE: 3
+EPOCHS: 40
+
+EDGE_SWAP: True
+
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [12, 24]
+
+
+TRANSFORMS_CONFIG:
+  RESIZE: [1120, 1200, 1280]
+  CROP_SIZE: [700, 1200]
+  FLIP_RATIO: 0.5
+
+SAVE_CHECKPOINT: True

@@ -1,6 +1,6 @@
 
 
-AVAILABLE_GPUS: "7"
+AVAILABLE_GPUS: "6,7"
 
 PARENT_CONFIG: ./default.yaml
 
