@@ -6,6 +6,8 @@
 用法示例:
     # 处理单个日志文件
     python MeMOTR/utils/vis_train_loss.py --log_file /path/to/log.txt --output_dir /path/to/output
+    python MeMOTR/utils/vis_train_loss.py --log_file /data4/litianhao/hsmot/memotr/spectralemb/22_7_only_detr_edgeswap_lrdrop_newtransforms_noscem_noiou/train/log.txt --output_dir /data4/litianhao/hsmot/memotr/spectralemb/22_7_only_detr_edgeswap_lrdrop_newtransforms_noscem_noiou/train/vis_loss
+
     
     # 处理实验目录（自动查找log.txt）
     python MeMOTR/utils/vis_train_loss.py --exp_dir /path/to/experiment --output_dir /path/to/output
