@@ -121,6 +121,117 @@ class ASPP(nn.Module):
         ys = [m(x) for m in self.branches]
         return self.proj(torch.cat(ys, dim=1))
 
+
+class SpectralManifold(nn.Module):
+    """
+    Spectral Manifold Learning Module
+
+    输入:
+        spec: [B, C, H, W]   原始光谱
+
+    输出:
+        embed: [B, C+1, H, W]
+
+        前 C 个通道:
+            spectral reconstruction embedding
+
+        最后 1 个通道:
+            reconstruction error (spectral deviation)
+    """
+
+    def __init__(self,
+                 spectral_channels: int = 8,
+                 num_prototypes: int = 64,
+                 hidden_ratio: float = 2.0,
+                 eps: float = 1e-6):
+
+        super().__init__()
+
+        C = spectral_channels
+        K = num_prototypes
+        hidden = int(C * hidden_ratio)
+
+        self.C = C
+        self.K = K
+        self.eps = eps
+
+        # ---------- spectral encoder ----------
+        self.encoder = nn.Sequential(
+            nn.Conv2d(C, hidden, 1, bias=False),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden, C, 1, bias=False)
+        )
+
+        # ---------- spectral prototypes ----------
+        self.prototypes = nn.Parameter(torch.randn(K, C))
+        nn.init.normal_(self.prototypes, std=0.02)
+
+    def forward(self, spec):
+
+        B, C, H, W = spec.shape
+        assert C == self.C
+
+        # -------------------------------------------------
+        # 1. spectral encoder
+        # -------------------------------------------------
+
+        s_enc = self.encoder(spec)        # [B,C,H,W]
+
+        # -------------------------------------------------
+        # 2. spectral shape normalization
+        # -------------------------------------------------
+
+        s_norm = s_enc - s_enc.mean(dim=1, keepdim=True)
+        s_norm = F.normalize(s_norm, dim=1)
+
+        # -------------------------------------------------
+        # 3. normalized prototypes (for similarity)
+        # -------------------------------------------------
+
+        proto = self.prototypes                        # raw prototypes
+        proto_norm = proto - proto.mean(dim=1, keepdim=True)
+        proto_norm = F.normalize(proto_norm, dim=1)
+
+        # -------------------------------------------------
+        # 4. cosine similarity
+        # -------------------------------------------------
+
+        sim = F.conv2d(
+            s_norm,
+            proto_norm.view(self.K, self.C, 1, 1)
+        )  # [B,K,H,W]
+
+        # -------------------------------------------------
+        # 5. soft spectral assignment
+        # -------------------------------------------------
+
+        weight = F.softmax(sim, dim=1)  # [B,K,H,W]
+
+        # -------------------------------------------------
+        # 6. spectral reconstruction (raw spectral space)
+        # -------------------------------------------------
+
+        recon = torch.einsum(
+            "bkhw,kc->bchw",
+            weight,
+            proto
+        )  # [B,C,H,W]
+
+        # -------------------------------------------------
+        # 7. reconstruction error (original spectral space)
+        # -------------------------------------------------
+
+        error = (spec - recon).pow(2).sum(dim=1, keepdim=True)
+
+        # -------------------------------------------------
+        # 8. spectral embedding
+        # -------------------------------------------------
+
+        embed = torch.cat([recon, error], dim=1)
+
+        return embed
+
+
 class SpectralPi(nn.Module):
     def __init__(self, spectral_database_num=64, in_ch=8, eps=1e-6):
         super().__init__()
@@ -159,8 +270,140 @@ class SpectralPi(nn.Module):
         # 现在 prior_sim 真正可以覆盖 [-1,1]，差异会大很多
         return prior_sim
 
+
+class SpectralGraphDictionaryPrior(nn.Module):
+    """
+    Spectral Graph Dictionary Prior
+
+    输入:
+        spec: [B, C, H, W]   光谱 (0~1)
+
+    输出:
+        pi_spec: [B,1,H,W]   spectral foreground probability
+    """
+
+    def __init__(self,
+                 spectral_channels=8,
+                 num_prototypes=64,
+                 tau=1.0):
+
+        super().__init__()
+
+        C = spectral_channels
+        K = num_prototypes
+
+        self.C = C
+        self.K = K
+        self.tau = tau
+
+        # ----- spectral prototypes -----
+        self.prototypes = nn.Parameter(
+            torch.randn(K, C)
+        )
+
+        nn.init.normal_(self.prototypes, std=0.02)
+
+        # ----- prototype objectness -----
+        self.proto_obj = nn.Parameter(
+            torch.full((K,), 0.0)   # 初始 objectness 
+        )
+
+        # self.proto_obj.requires_grad = False
+
+    # ---------------------------------------------------------
+    # prototype diversity regularization
+    # ---------------------------------------------------------
+    def diversity_loss(self):
+
+        P = F.normalize(self.prototypes, dim=1)
+
+        gram = torch.matmul(P, P.t())
+
+        I = torch.eye(self.K, device=P.device)
+
+        return ((gram - I) ** 2).mean()
+
+    # ---------------------------------------------------------
+    # forward
+    # ---------------------------------------------------------
+    def forward(self, spec):
+
+        B, C, H, W = spec.shape
+        K = self.K
+
+        # -----------------------------------------------------
+        # 1 spectral shape normalization
+        # -----------------------------------------------------
+
+        s = spec - spec.mean(dim=1, keepdim=True)
+
+        s = F.normalize(s, dim=1)
+
+        # -----------------------------------------------------
+        # 2 prototype normalization
+        # -----------------------------------------------------
+
+        proto = self.prototypes
+
+        proto_norm = proto - proto.mean(dim=1, keepdim=True)
+
+        proto_norm = F.normalize(proto_norm, dim=1)
+
+        # -----------------------------------------------------
+        # 3 similarity
+        # -----------------------------------------------------
+
+        sim = F.conv2d(
+            s,
+            proto_norm.view(K, C, 1, 1)
+        )                          # [B,K,H,W]
+
+        # -----------------------------------------------------
+        # 4 spectral coordinate
+        # -----------------------------------------------------
+
+        w = F.softmax(sim / self.tau, dim=1)
+
+        # -----------------------------------------------------
+        # 5 prototype graph reasoning
+        # -----------------------------------------------------
+
+        A = torch.matmul(proto_norm, proto_norm.t())
+
+        A = F.softmax(A, dim=1)
+
+        w_flat = w.view(B, K, -1)
+
+        w_graph = torch.matmul(A, w_flat)
+
+        w_graph = w_graph.view(B, K, H, W)
+
+        # -----------------------------------------------------
+        # 6 similarity-conditioned objectness
+        # -----------------------------------------------------
+
+        obj = self.proto_obj.view(1, K, 1, 1)
+
+        # score = obj
+        # score = torch.sigmoid(obj * sim)
+        score = torch.sigmoid(obj)
+
+        # -----------------------------------------------------
+        # 7 dictionary voting
+        # -----------------------------------------------------
+
+        # pi_spec = torch.sum(
+        #     w_graph * score,
+        #     dim=1,
+        #     keepdim=True
+        # )
+        pi_spec = w_graph * score
+
+        return pi_spec
+
+
 class PIHead(nn.Module):
-    def __init__(self, in_ch, ch=128, use_cache=True, use_spectral_pi=True, spectral_databse_num=64):
+    def __init__(self, in_ch, ch=128, use_cache=True, spectral_type=None, spectral_databse_num=64):
         super().__init__()
         self.coord = CoordConv(in_ch, ch // 2, use_cache=use_cache)  # +2 coords
         self.mask1 = CenterMaskedConv3x3(ch // 2)
@@ -178,15 +421,31 @@ class PIHead(nn.Module):
         self.out = nn.Conv2d(ch, 1, 1, 1, 0)
 
         # 光谱相关
-        self.use_spectral_pi = use_spectral_pi
-        if use_spectral_pi:
+
+        self.spectral_type = spectral_type.lower()
+        if self.spectral_type == "pi":
             self.spec_proj = nn.Sequential(
                 nn.Conv2d(spectral_databse_num, ch, 1, 1, 0, bias=False),
                 GN(ch),
                 nn.SiLU(inplace=False)
             )
             self.spec_pi = SpectralPi(spectral_databse_num)
-
+        elif self.spectral_type == "manifold":
+            self.spec_proj = nn.Sequential(
+                nn.Conv2d(8+1, ch, 1, 1, 0, bias=False),
+                GN(ch),
+                nn.SiLU(inplace=False)
+            )
+            self.spec_manifold = SpectralManifold(num_prototypes=spectral_databse_num)
+        elif self.spectral_type == "graph_dictionary":
+            self.spec_proj = nn.Sequential(
+                nn.Conv2d(spectral_databse_num, ch, 1, 1, 0, bias=False),
+                GN(ch),
+                nn.SiLU(inplace=False)
+            )
+            self.spec_graph_dictionary = SpectralGraphDictionaryPrior(num_prototypes=spectral_databse_num)
+        else:
+            raise ValueError(f"Invalid spectral method: {self.spectral_type}")
     def forward(self, x, spec=None):
         a = self.coord(x)
         a = self.mask1(a)
@@ -195,8 +454,18 @@ class PIHead(nn.Module):
         g = g.expand_as(a).contiguous()
 
         f_space = torch.cat([a, g], dim=1)
-        if self.use_spectral_pi:
+        if self.spectral_type == "pi":
             f_spec = self.spec_proj(self.spec_pi(spec))
+            h = self.local_fuse(f_space + f_spec)
+            pi = torch.sigmoid(self.out(h))
+            return pi
+        elif self.spectral_type == "manifold":
+            f_spec = self.spec_proj(self.spec_manifold(spec))
+            h = self.local_fuse(f_space + f_spec)
+            pi = torch.sigmoid(self.out(h))
+            return pi
+        elif self.spectral_type == "graph_dictionary":
+            f_spec = self.spec_proj(self.spec_graph_dictionary(spec))
             h = self.local_fuse(f_space + f_spec)
             pi = torch.sigmoid(self.out(h))
             return pi
@@ -266,7 +535,7 @@ def log_student_t_interval(z, mu, raw_log_scale, raw_nu=None,
 # =========================
 
 class MixBGFG(nn.Module):
-    def __init__(self, C, depth=4, width=0.5, with_foreground=True, use_cache=True, tau_mode="mean", prior_mode=None, use_spectral_pi=False, spectral_databse_num=64):
+    def __init__(self, C, depth=4, width=0.5, with_foreground=True, use_cache=True, tau_mode="mean", prior_mode=None, spectral_type=None, spectral_databse_num=64):
         super().__init__()
         ch = int(C * width)
         self.tau_mode  = tau_mode  # "mean" or "sqrt"
@@ -290,7 +559,7 @@ class MixBGFG(nn.Module):
             # self.logscale_f_head = nn.Conv2d(ch, C, 3, 1, 1)
             # self.raw_nu          = nn.Parameter(torch.tensor(1.0))  # learnable ν
 
-        self.pi_head = PIHead(in_ch=ch, use_cache=use_cache, use_spectral_pi=use_spectral_pi, spectral_databse_num=spectral_databse_num)
+        self.pi_head = PIHead(in_ch=ch, use_cache=use_cache, spectral_type=spectral_type, spectral_databse_num=spectral_databse_num)
         self.prior_mode = prior_mode.lower() if prior_mode is not None else None
         if self.prior_mode == "gate":
             self.gate_head = nn.Sequential(nn.Conv2d(ch+1, ch//2, 3,1,1), GN(ch//2), nn.SiLU(),
@@ -312,6 +581,8 @@ class MixBGFG(nn.Module):
         """
         if valid_mask is not None and valid_mask.dim() == 3:
             valid_mask = valid_mask.unsqueeze(1)  # [B,1,H,W]
+            #特征在mask的地方归零
+            Z = Z * valid_mask
 
         # x = self.trunk(self.stem(Z))
         x = self.stem(Z)
@@ -401,9 +672,9 @@ class SCEM(nn.Module):
         self.use_cache  = bool(self.cfg.get("USE_CACHE", True))
         self.in_ch      = int(self.cfg.get("IN_CHANNELS", 256))
         self.prior_mode = self.cfg.get("PRIOR_MODE", None)
-        self.use_spectral_pi = bool(self.cfg.get("USE_SPECTRAL_PI", False))
         self.spectral_databse_num = int(self.cfg.get("SPECTRAL_DATABASE_NUM", 64))
-        self.norm       = bool(self.cfg.get("NORM", False))
+        self.norm       = bool(self.cfg.get("NORM", False))#在外部调用
+        self.spectral_type = self.cfg.get("SPECTRAL_TYPE", "pi").lower()
 
         # self.lazy_built = False
         self.posterior = MixBGFG(
@@ -413,8 +684,8 @@ class SCEM(nn.Module):
             with_foreground=self.with_foreground,
             use_cache=self.use_cache,
             prior_mode=self.prior_mode,
-            use_spectral_pi=self.use_spectral_pi,
-            spectral_databse_num=self.spectral_databse_num
+            spectral_databse_num=self.spectral_databse_num,
+            spectral_type=self.spectral_type
         )
 
         #打印所有参数及其大小
@@ -446,7 +717,7 @@ class SCEM(nn.Module):
         feat0 = features[0]
         mask0 = masks[0]  # [B,H0,W0] bool
 
-        if self.use_spectral_pi:
+        if self.spectral_type is not None:
             assert specs is not None
             spec = specs[0]
             out = self.posterior(feat0, valid_mask=mask0, prior_map=prior_map, spec=spec)
@@ -481,7 +752,8 @@ class SCEM(nn.Module):
         kernel_size = (int(ratio_h), int(ratio_w))
         stride = (int(ratio_h), int(ratio_w))
 
-        return F.max_pool2d(posterior, kernel_size=kernel_size, stride=stride)
+        # return F.max_pool2d(posterior, kernel_size=kernel_size, stride=stride)
+        return F.avg_pool2d(posterior, kernel_size=kernel_size, stride=stride)
         # return F.interpolate(posterior, size=feat.shape[-2:], mode="bilinear", align_corners=False)
 
     @staticmethod

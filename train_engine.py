@@ -173,6 +173,15 @@ def train(config: dict):
                     scheduler=scheduler
                 )
         else:
+            #只保留最后一个epoch
+            if epoch == config["EPOCHS"] - 1:
+                save_checkpoint(
+                    model=model,
+                    path=os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth"),
+                    states=train_states,
+                    optimizer=optimizer,
+                    scheduler=scheduler
+                )
             # warning
             train_logger.show(head="No checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml")
             train_logger.write(head="No checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml", filename="log.txt", mode="a")
