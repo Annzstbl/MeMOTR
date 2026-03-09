@@ -1,0 +1,60 @@
+PROJECT: "只训练一张图片,不使用SCEM"
+
+PARENT_CONFIG: ./default99.yaml
+
+AVAILABLE_GPUS: 1,3  #if not set, will use all gpus
+
+USE_CHECKPOINT: False
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 5
+CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
+                                  # As the number increases (from 1 to 4), the memory cost increases.
+                                  # We have deleted many comments in this official code simplicity,
+                                  # if you have any questions, feel free to contact with the author.
+SAMPLE_LENGTHS: [1,1,1,1]
+
+OUTPUTS_DIR: /data/users/wangying01/lth/hsmot/workdir_2/memotr/spectralemb/22_4_2_only_detr_edgeswap_lrdrop_one_picture_probiou
+SUBMIT_DIR: /data/users/wangying01/lth/hsmot/workdir_2/memotr/spectralemb/22_4_2_only_detr_edgeswap_lrdrop_one_picture_probiou
+
+
+ENCODER_SPECTRAL: True
+
+TRAIN_HALF: False
+
+SCEM:
+  ENABLE: False
+  WITH_FOREGROUND: False
+  PRIOR_MODE: gate
+  USE_SPECTRAL_PI: True
+
+LOSS_SCEM_NLL: 1
+LOSS_SCEM_BCE: 1
+LOSS_SCEM_DICE: 1
+LOSS_NLL_CONFIG:
+  TYPE: focal # focal or mean
+  ALPHA_POS: 1.0
+  ALPHA_NEG: 0.1
+  GAMMA_POS: 2.0
+  GAMMA_NEG: 0.0
+
+ONLY_TRAIN_DETR: True
+
+BATCH_SIZE: 1
+EPOCHS: 40
+
+EDGE_SWAP: True
+
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [12, 24]
+
+# About data processing
+DATASET_VERSION: OnePic
+
+SAVE_CHECKPOINT: False
+BATCH_SIZE: 3
+
+TRANSFORMS_CONFIG:
+  # RESIZE: [1088, 1120, 1152, 1184] # for w
+  RESIZE: [1120, 1200, 1280]
+
+  CROP_SIZE: [900, 1200]
+  FLIP_RATIO: 0.0
