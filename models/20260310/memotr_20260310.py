@@ -22,8 +22,7 @@ from ..ffn import FFN
 from ..mlp import MLP
 from ..position_embedding_rope_nd import build as build_rope_pos
 from ..query_updater import build as build_query_updater
-from ..SCEM import SCEM
-from ..SCEM import build as build_scem
+from .SCEM_20260310 import build as build_scem
 from ..utils import get_clones, logits_to_scores, pos_to_pos_embed
 
 
@@ -213,20 +212,12 @@ class MeMOTR20260310(nn.Module):
         # Generate prior map from tracks
         # TODO 期待输出  gamma [multilevel?]
         prior_map = self.get_prior_map(tracks=tracks, gmcs=gmc, frame=frame)
-        gamma, log_mix = self.scem_module(srcs, masks, prior_map=prior_map, specs=spectral_weights)
+        gamma, log_mix, gamma_list = self.scem_module(srcs, masks, prior_map=prior_map, specs=spectral_weights)
         srcs = self.scem_module.apply_posterior_enhance(srcs, masks, gamma, alpha=1.0)
         srcs = [self.scem_norms[i](src) for i, src in enumerate(srcs)]
 
-        # TODO: 目前 SCEM 尚未完全接入，这里先构造一个简单的 prior_map 便于调试：
-        
-        #       使用 mask 的非填充区域作为前景权重，形状为 n_feature_levels * [B, 1, H, W]
-        prior_map = []
-        for src, mask in zip(srcs, masks):
-            B, C, H, W = src.shape
-            valid = (~mask).float().unsqueeze(1)  # [B,1,H,W]
-            prior_map.append(valid)
+        prior_map = gamma_list
 
-        # TODO 构造spectral token
         '''
             Input:
                 prior_map : n_feature_levels * [B, 1, H, W]
@@ -295,7 +286,6 @@ class MeMOTR20260310(nn.Module):
             return pool_src_tokens, pool_spectral_tokens
         prior_src_tokens, prior_spectral_tokens = _construct_spectral_token(prior_map, srcs, masks, spectral_weights)
 
-        #TODO 准备pos_embeddings
         prior_pos_embeddings = []
         for i in range(self.n_feature_levels):
             # spectral_token_pos_embed : [num_prior_tokens, C]
@@ -366,8 +356,6 @@ class MeMOTR20260310(nn.Module):
         # init_reference: (B, Nd+Nq, 2/5)
         # inter_references: (n_dec_layers, B, Nd+Nq, 2/5)
         output_classes, output_bboxes = [], []
-        if self.decoder_spectral_refine:
-            output_spectral_weights = []
         assert outputs.ndim == 4, (
             f"Deformable Transformer's outputs should have shape (n_dec_layers, B, Nd+Nq, C), "
             f"but got n_dim={outputs.ndim}"
@@ -396,18 +384,7 @@ class MeMOTR20260310(nn.Module):
         output_classes = torch.stack(output_classes, dim=0) # (n_dec_layers, B, Nd+Nq, C)
         output_bboxes = torch.stack(output_bboxes, dim=0) # (n_dec_layers, B, Nd+Nq, 5)
 
-        if self.decoder_spectral_refine:
-            for level in range(outputs.shape[0]):
-                if level == 0:
-                    _query_spectral_weights = init_query_spectral_weights
-                else:
-                    _query_spectral_weights = inter_query_spectral_weights[level - 1]
-                _query_spectral_weights = inverse_sigmoid(_query_spectral_weights)
-                _output_spectral_weights = self.spectral_embed[level](outputs[level])
-                _output_spectral_weights += _query_spectral_weights
-                _output_spectral_weights = _output_spectral_weights.sigmoid()
-                output_spectral_weights.append(_output_spectral_weights)
-            output_spectral_weights = torch.stack(output_spectral_weights, dim=0) # (n_dec_layers, B, Nd+Nq, 8)
+
 
         # Build result dictionary
         res = {
@@ -421,40 +398,28 @@ class MeMOTR20260310(nn.Module):
         }
         
         if self.aux_loss:
-            if self.decoder_spectral_refine:
-                res["aux_outputs"] = self.set_aux_loss_spectral_refine(
-                    output_classes=output_classes,
-                    output_bboxes=output_bboxes,
-                    query_mask=query_mask,
-                    queries=inter_queries,
-                    query_spectral_weights=output_spectral_weights
-                )
-            else:
-                # TODO 为什么？inter_queries是每个layer的输入，在set_aux_loss中会错位，
-                # 使得每个queries对应每个layer的输出embedding
-                res["aux_outputs"] = self.set_aux_loss(
-                    output_classes=output_classes,
-                    output_bboxes=output_bboxes,
-                    query_mask=query_mask,
-                    queries=inter_queries
-                )
+
+            # TODO 为什么？inter_queries是每个layer的输入，在set_aux_loss中会错位，
+            # 使得每个queries对应每个layer的输出embedding
+            res["aux_outputs"] = self.set_aux_loss(
+                output_classes=output_classes,
+                output_bboxes=output_bboxes,
+                query_mask=query_mask,
+                queries=inter_queries
+            )
         
         res["outputs"] = outputs[-1]  # (B, Nd+Nq, C)
         res["spectral_weights"] = spectral_weights  # List[B, C=8, H, W]
         
         if debug:
-            if self.decoder_spectral:
-                res["inter_query_spectral_weights"] = inter_query_spectral_weights
-                res["init_query_spectral_weights"] = init_query_spectral_weights
             res["inter_references"] = inter_references
             res["inter_queries"] = inter_queries
             res["init_reference"] = init_reference
             res['all_outputs'] = outputs
             res["spectral_weights"] = spectral_weights
 
-        if self.use_scem:
-            res["scem_gamma"] = gamma
-            res["scem_log_mix"] = log_mix
+        res["scem_gamma"] = gamma
+        res["scem_log_mix"] = log_mix
     
         return res
 
