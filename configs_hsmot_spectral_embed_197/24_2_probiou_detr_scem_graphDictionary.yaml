@@ -1,0 +1,65 @@
+PROJECT: "使用graphDictionary"
+
+PARENT_CONFIG: ./default.yaml
+
+AVAILABLE_GPUS: "4"  #if not set, will use all gpus
+
+USE_CHECKPOINT: False
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 5
+CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
+                                  # As the number increases (from 1 to 4), the memory cost increases.
+                                  # We have deleted many comments in this official code simplicity,
+                                  # if you have any questions, feel free to contact with the author.
+SAMPLE_LENGTHS: [1,1,1,1]
+
+OUTPUTS_DIR:  /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/24_2_probiou_detr_scem_graphDictionary
+SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/24_2_probiou_detr_scem_graphDictionary
+
+
+ENCODER_SPECTRAL: True
+
+TRAIN_HALF: True
+
+SCEM:
+  ENABLE: True
+  WITH_FOREGROUND: False
+  PRIOR_MODE: gate
+  USE_SPECTRAL_PI: True
+  SPECTRAL_TYPE: "graph_dictionary" #pi/manifold/graph_dictionary
+  SPECTRAL_DATABASE_NUM: 128
+  NORM: True
+
+LOSS_SCEM_NLL: 1
+LOSS_SCEM_BCE: 1
+LOSS_SCEM_DICE: 1
+LOSS_NLL_CONFIG:
+  TYPE: focal # focal or mean
+  ALPHA_POS: 1.0
+  ALPHA_NEG: 0.1
+  GAMMA_POS: 2.0
+  GAMMA_NEG: 0.0
+
+ONLY_TRAIN_DETR: True
+
+BATCH_SIZE: 3
+EPOCHS: 40
+
+EDGE_SWAP: True
+
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [12, 24]
+
+SAVE_CHECKPOINT: True
+
+TRANSFORMS_CONFIG:
+  CROP_SIZE:
+    - 800
+    - 1200
+  FLIP_RATIO: 0.5
+  RESIZE:
+    - 880
+    - 960
+    - 1040
+    - 1120
+    - 1200
+    - 1280
