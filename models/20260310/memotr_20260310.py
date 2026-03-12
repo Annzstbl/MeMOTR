@@ -13,39 +13,38 @@ from utils.GMC import compensate_rotated_boxes
 from utils.nested_tensor import NestedTensor
 from utils.utils import inverse_sigmoid
 
-from .backbone import BackboneWithPE
-from .backbone import build as build_backbone_with_pe
-from .backbone import build_woPe as build_backbone_woPe
-from .deformable_transformer import DeformableTransformer
-from .deformable_transformer import build as build_deformable_transformer
-from .ffn import FFN
-from .mlp import MLP
-from .position_embedding_rope_nd import build as build_rope_pos
-from .query_updater import build as build_query_updater
-from .SCEM import SCEM
-from .SCEM import build as build_scem
-from .utils import get_clones, logits_to_scores, pos_to_pos_embed
+from ..backbone import BackboneWithPE
+from ..backbone import build as build_backbone_with_pe
+from ..backbone import build_woPe as build_backbone_woPe
+from .deformable_transformer_20260310 import DeformableTransformer
+from .deformable_transformer_20260310 import build as build_deformable_transformer
+from ..ffn import FFN
+from ..mlp import MLP
+from ..position_embedding_rope_nd import build as build_rope_pos
+from ..query_updater import build as build_query_updater
+from ..SCEM import SCEM
+from ..SCEM import build as build_scem
+from ..utils import get_clones, logits_to_scores, pos_to_pos_embed
 
 
-class MeMOTR(nn.Module):
+class MeMOTR20260310(nn.Module):
     def __init__(self, backbone: BackboneWithPE, transformer: DeformableTransformer,
                  query_updater: nn.Module,
                  num_classes: int, n_det_queries: int, n_feature_levels: int,
                  hidden_dim: int, ffn_dim: int, dropout: float,
+                 scem_module: nn.Module,
                  aux_loss: bool = True, with_box_refine: bool = True,
                  use_checkpoint: bool = False, checkpoint_level: int = 2,
                  use_dab: bool = False,
                  visualize: bool = False,
-                 decoder_spectral: bool = False,
-                 decoder_spectral_refine: bool = False,
-                 decoder_spectral_clusters: int = 1,
-                 encoder_spectral: bool = False,
-                 encoder_global_token: bool = False,
-                 rope_pos_module = None,
-                 scem_module = None,
-                 scem_use_gt = False,
-                 ): 
-        super(MeMOTR, self).__init__()
+                 ):
+        '''
+        
+            20260310
+            
+
+        '''
+        super(MeMOTR20260310, self).__init__()
 
         self.num_classes = num_classes
         self.n_det_queries = n_det_queries
@@ -59,11 +58,6 @@ class MeMOTR(nn.Module):
         self.checkpoint_level = checkpoint_level
         self.use_dab = use_dab
         self.visualize = visualize
-        self.decoder_spectral = decoder_spectral
-        self.decoder_spectral_refine = decoder_spectral_refine
-        self.decoder_spectral_clusters = decoder_spectral_clusters
-        self.encoder_global_token = encoder_global_token
-        self.encoder_spectral = encoder_spectral
         
         # Net:
         self.backbone = backbone
@@ -74,15 +68,6 @@ class MeMOTR(nn.Module):
         self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=4, num_layers=3)
         self.angle_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=1, num_layers=3)  # 角度分支
         
-        # Spectral embedding for decoder refinement
-        if self.decoder_spectral_refine:
-            self.spectral_embed = MLP(
-                input_dim=self.hidden_dim,
-                hidden_dim=self.hidden_dim,
-                output_dim=self.decoder_spectral_clusters * 8,
-                num_layers=3
-            )
-
         # Detection query embeddings and anchors
         if self.use_dab:
             self.det_anchor = nn.Parameter(torch.randn(self.n_det_queries, 5))  # (N_det, 5) 旋转框格式
@@ -90,30 +75,17 @@ class MeMOTR(nn.Module):
         else:
             self.det_query_embed = nn.Parameter(torch.randn(self.n_det_queries, self.hidden_dim * 2))  # (N_det, 2C)
         
-        # Spectral anchor for decoder
-        if self.decoder_spectral:
-            self.det_spectral_anchor = nn.Parameter(
-                torch.randn(self.n_det_queries, self.decoder_spectral_clusters * 8)
-            )  # (N_det, decoder_spectral_clusters * 8) 8个光谱通道              
-        
-        # RoPE position encoding
-        self.rope_pos_module = rope_pos_module
-        self.rope_pos = self.rope_pos_module is not None
+        self.num_prior_tokens = 2
+
             
         # SCEM module
         self.scem_module = scem_module
-        self.use_scem = self.scem_module is not None
-        self.use_scem_norm = self.scem_module.norm if self.scem_module is not None else False
-        self.scem_use_gt = scem_use_gt
         
         # GroupNorm for SCEM enhanced features
-        if self.use_scem_norm:
-            self.scem_norms = nn.ModuleList([
-                nn.GroupNorm(num_groups=32, num_channels=self.hidden_dim)
-                for _ in range(self.n_feature_levels)
-            ])
-        else:
-            self.scem_norms = None
+        self.scem_norms = nn.ModuleList([
+            nn.GroupNorm(num_groups=32, num_channels=self.hidden_dim)
+            for _ in range(self.n_feature_levels)
+        ])
 
         assert self.n_feature_levels > 1
         n_backbone_inter_layers = backbone.n_inter_layers()
@@ -146,12 +118,6 @@ class MeMOTR(nn.Module):
         nn.init.constant_(self.angle_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.angle_embed.layers[-1].bias.data, 0)
         
-        if self.decoder_spectral_refine:
-            # nn.init.constant_(self.spectral_embed.layers[-1].weight.data, 0)
-            # nn.init.constant_(self.spectral_embed.layers[-1].bias.data, 0)
-            self.spectral_embed = get_clones(self.spectral_embed, self.transformer.get_n_dec_layers())
-            self.transformer.set_refine_spectral_embed(self.spectral_embed)
-        
         if self.with_box_refine:
             self.class_embed = get_clones(self.class_embed, self.transformer.get_n_dec_layers())
             self.bbox_embed = get_clones(self.bbox_embed, self.transformer.get_n_dec_layers())
@@ -164,15 +130,11 @@ class MeMOTR(nn.Module):
             self.transformer.set_refine_angle_embed(self.angle_embed)
         else:
             raise NotImplementedError("Box refine is not implemented yet.")
-            nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
-            self.class_embed = nn.ModuleList([self.class_embed for _ in range(self.transformer.get_n_dec_layers())])
-            self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(self.transformer.get_n_dec_layers())])
 
-        # 初始化global_token的pos_embed
-        if self.encoder_global_token:
-            self.global_pos_embed = [
-                nn.Parameter(torch.randn(self.hidden_dim)) for _ in range(n_feature_levels)
-            ]
+
+        #* 每个lvl上的基础pos是一致的
+        self.spectral_token_pos_embed = nn.Parameter(torch.randn(self.hidden_dim, self.num_prior_tokens))
+
 
     def enable_checkpoint(self, enable: bool):
         self.use_checkpoint = enable
@@ -203,16 +165,12 @@ class MeMOTR(nn.Module):
         # Unpack feature tuple
         pos = None
         spectral_weights = None
-        if self.rope_pos:
-            if self.encoder_spectral:
-                features, spectral_weights = feature_tuple
-            else:
-                features = feature_tuple
-        else:
-            if self.encoder_spectral:
-                features, pos, spectral_weights = feature_tuple
-            else:
-                features, pos = feature_tuple
+        # if self.rope_pos:
+        #     if self.encoder_spectral:
+        #         features, spectral_weights = feature_tuple
+        #     else:
+        #         features = feature_tuple
+        features, pos, spectral_weights = feature_tuple
 
         # Project features to hidden_dim
         srcs, masks = [], []
@@ -250,51 +208,129 @@ class MeMOTR(nn.Module):
         # pos: n_feature_levels * [(B, C, H, W)]
         # spectral_weights: n_feature_levels * [(B, C=8, H, W)]
 
+        ## SCEM enhancement / prior map (debug version)
+        ## SCEM enhancement
         # Generate prior map from tracks
+        # TODO 期待输出  gamma [multilevel?]
         prior_map = self.get_prior_map(tracks=tracks, gmcs=gmc, frame=frame)
+        gamma, log_mix = self.scem_module(srcs, masks, prior_map=prior_map, specs=spectral_weights)
+        srcs = self.scem_module.apply_posterior_enhance(srcs, masks, gamma, alpha=1.0)
+        srcs = [self.scem_norms[i](src) for i, src in enumerate(srcs)]
+
+        # TODO: 目前 SCEM 尚未完全接入，这里先构造一个简单的 prior_map 便于调试：
         
-        # SCEM enhancement
-        if self.use_scem:
-            if self.scem_module.prior_mode is not None:
-                gamma, log_mix = self.scem_module(srcs, masks, prior_map=prior_map, specs=spectral_weights)
-            else:
-                gamma, log_mix = self.scem_module(srcs, masks)
-            srcs = self.scem_module.apply_posterior_enhance(srcs, masks, gamma, alpha=1.0)
-            if self.use_scem_norm:
-                # Apply GroupNorm to SCEM enhanced features
-                srcs = [self.scem_norms[i](src) for i, src in enumerate(srcs)]
+        #       使用 mask 的非填充区域作为前景权重，形状为 n_feature_levels * [B, 1, H, W]
+        prior_map = []
+        for src, mask in zip(srcs, masks):
+            B, C, H, W = src.shape
+            valid = (~mask).float().unsqueeze(1)  # [B,1,H,W]
+            prior_map.append(valid)
 
-        if self.scem_use_gt:
-            assert self.use_scem is False
-            assert heatmap is not None
-            srcs = SCEM.apply_posterior_enhance(srcs, masks, heatmap.unsqueeze(1), alpha=0.5)
-            if self.use_scem_norm:
-                # Apply GroupNorm to SCEM enhanced features
-                srcs = [self.scem_norms[i](src) for i, src in enumerate(srcs)]
+        # TODO 构造spectral token
+        '''
+            Input:
+                prior_map : n_feature_levels * [B, 1, H, W]
+                srcs : n_feature_levels * [B, C, H, W]
+                masks : n_feature_levels * [B, H, W]
+                spectral_weights : n_feature_levels * [B, C=8, H, W]
+            Output:
+                pool_src_tokens : n_feature_levels * [B, C, 1]
+                pool_spectral_weights : n_feature_levels * [B, C, 1]
+        '''
+        def _construct_spectral_token(prior_map, srcs, masks, spectral_weights):
+            """
+            Input:
+                prior_map : n_levels * [B,1,H,W]
+                srcs : n_levels * [B,C,H,W]
+                masks : n_levels * [B,H,W]
+                spectral_weights : n_levels * [B,8,H,W]
 
-        if self.encoder_global_token:
-            # Generate global token by averaging over valid pixels
-            global_token = []
-            global_spectral_weights = []
-            global_pos = [
-                self.global_pos_embed[i].repeat(srcs[0].shape[0], 1).to(srcs[0].device)
-                for i in range(self.n_feature_levels)
-            ]
+            Output:
+                pool_src_tokens : n_levels * [B,C,2]
+                pool_spectral_tokens : n_levels * [B,8,2]
+            """
 
-            for _src, _mask, _spectral_weights in zip(srcs, masks, spectral_weights):
-                valid_mask = (~_mask).unsqueeze(1)  # (B, 1, H, W)
-                valid_count = valid_mask.sum(dim=(2, 3)).clamp(min=1)  # (B, 1)
-                masked_sum = (_src * valid_mask).sum(dim=(2, 3))  # (B, C)
-                global_token.append(masked_sum / valid_count)  # (B, C)
-                masked_sum_sw = (_spectral_weights * valid_mask).sum(dim=(2, 3))  # (B, 8)
-                global_spectral_weights.append(masked_sum_sw / valid_count)  # (B, 8)
+            pool_src_tokens = []
+            pool_spectral_tokens = []
+
+            eps = 1e-6
+
+            for pi, src, mask, spec in zip(prior_map, srcs, masks, spectral_weights):
+
+                B, C, H, W = src.shape
+
+                # valid mask
+                valid = (~mask).float().unsqueeze(1)   # [B,1,H,W]
+
+                # ========================
+                # Foreground pooling
+                # ========================
+
+                w_f = pi * valid
+                norm_f = w_f.sum(dim=(2,3), keepdim=True) + eps
+                w_f = w_f / norm_f
+
+                src_fg = (src * w_f).sum(dim=(2,3))        # [B,C]
+                spec_fg = (spec * w_f).sum(dim=(2,3))      # [B,8]
+
+                # ========================
+                # Global GAP pooling
+                # ========================
+
+                valid_sum = valid.sum(dim=(2,3), keepdim=True) + eps
+
+                src_gap = (src * valid).sum(dim=(2,3)) / valid_sum.squeeze(-1).squeeze(-1)
+                spec_gap = (spec * valid).sum(dim=(2,3)) / valid_sum.squeeze(-1).squeeze(-1)
+
+                # ========================
+                # Stack tokens
+                # ========================
+
+                src_tokens = torch.stack([src_fg, src_gap], dim=-1)     # [B,C,2]
+                spec_tokens = torch.stack([spec_fg, spec_gap], dim=-1)  # [B,8,2]
+
+                pool_src_tokens.append(src_tokens)
+                pool_spectral_tokens.append(spec_tokens)
+
+            return pool_src_tokens, pool_spectral_tokens
+        prior_src_tokens, prior_spectral_tokens = _construct_spectral_token(prior_map, srcs, masks, spectral_weights)
+
+        #TODO 准备pos_embeddings
+        prior_pos_embeddings = []
+        for i in range(self.n_feature_levels):
+            # spectral_token_pos_embed : [num_prior_tokens, C]
+            prior_pos_embeddings.append(self.spectral_token_pos_embed.repeat(srcs[0].shape[0], 1, 1).to(srcs[0].device))
+
+        # # if self.scem_use_gt:
+        # #     assert self.use_scem is False
+        # #     assert heatmap is not None
+        # #     srcs = SCEM.apply_posterior_enhance(srcs, masks, heatmap.unsqueeze(1), alpha=0.5)
+        # #     if self.use_scem_norm:
+        # #         # Apply GroupNorm to SCEM enhanced features
+        # #         srcs = [self.scem_norms[i](src) for i, src in enumerate(srcs)]
+
+        # if self.encoder_global_token:
+        #     # Generate global token by averaging over valid pixels
+        #     global_token = []
+        #     global_spectral_weights = []
+        #     global_pos = [
+        #         self.global_pos_embed[i].repeat(srcs[0].shape[0], 1).to(srcs[0].device)
+        #         for i in range(self.n_feature_levels)
+        #     ]
+
+        #     for _src, _mask, _spectral_weights in zip(srcs, masks, spectral_weights):
+        #         valid_mask = (~_mask).unsqueeze(1)  # (B, 1, H, W)
+        #         valid_count = valid_mask.sum(dim=(2, 3)).clamp(min=1)  # (B, 1)
+        #         masked_sum = (_src * valid_mask).sum(dim=(2, 3))  # (B, C)
+        #         global_token.append(masked_sum / valid_count)  # (B, C)
+        #         masked_sum_sw = (_spectral_weights * valid_mask).sum(dim=(2, 3))  # (B, 8)
+        #         global_spectral_weights.append(masked_sum_sw / valid_count)  # (B, 8)
         
         # Prepare decoder queries
         reference_points = self.get_reference_points(tracks=tracks).to(srcs[0].device)  # (B, Nd+Nq, 2/5)
         query_embed = self.get_query_embed(tracks=tracks).to(srcs[0].device)
         query_mask = self.get_query_mask(tracks=tracks).to(srcs[0].device)  # (B, Nd+Nq)
-        if self.decoder_spectral:
-            query_spectral_weights = self.get_query_spectral_weights(tracks=tracks).to(srcs[0].device)
+
 
         # DETR transformer forward
         transformer_kwargs = {
@@ -305,25 +341,25 @@ class MeMOTR(nn.Module):
             "query_embed": query_embed,
             "ref_pts": reference_points,  # 值域: 负无穷到正无穷
             "query_mask": query_mask,
+            "prior_src_tokens": prior_src_tokens,
+            "prior_spectral_tokens": prior_spectral_tokens,
+            "prior_pos_embeddings": prior_pos_embeddings,
+
         }
 
-        if self.encoder_global_token:
-            transformer_kwargs["global_token"] = global_token
-            transformer_kwargs["global_spectral_weights"] = global_spectral_weights
-            transformer_kwargs["global_pos_embeds"] = global_pos
+        # if self.encoder_global_token:
+        #     transformer_kwargs["global_token"] = global_token
+        #     transformer_kwargs["global_spectral_weights"] = global_spectral_weights
+        #     transformer_kwargs["global_pos_embeds"] = global_pos
 
-        if self.decoder_spectral:
-            transformer_kwargs["query_spectral_weights"] = query_spectral_weights  # 值域: 负无穷到正无穷
-            # Transformer outputs:
-            #   outputs: (n_dec_layers, B, Nd+Nq, C) - 每个layer输出的output embeddings
-            #   init_reference: (B, Nd+Nq, 5) - 初始化reference_points, 值域[0,1]
-            #   inter_references: (n_dec_layers, B, Nd+Nq, 5) - 每个layer输出的reference_points, 值域[0,1]
-            #   inter_queries: (n_dec_layers, B, Nd+Nq, C) - 每个layer输入的query_embed
-            #   init_query_spectral_weights: (B, Nd+Nq, 8) - 初始化query_spectral_weights, 值域[0,1]
-            #   inter_query_spectral_weights: (n_dec_layers, B, Nd+Nq, 8) - 每个layer输出的query_spectral_weights, 值域[0,1]
-            outputs, init_reference, inter_references, inter_queries, init_query_spectral_weights, inter_query_spectral_weights = self.transformer(**transformer_kwargs)
-        else:
-            outputs, init_reference, inter_references, inter_queries = self.transformer(**transformer_kwargs)
+        # Transformer outputs:
+        #   outputs: (n_dec_layers, B, Nd+Nq, C) - 每个layer输出的output embeddings
+        #   init_reference: (B, Nd+Nq, 5) - 初始化reference_points, 值域[0,1]
+        #   inter_references: (n_dec_layers, B, Nd+Nq, 5) - 每个layer输出的reference_points, 值域[0,1]
+        #   inter_queries: (n_dec_layers, B, Nd+Nq, C) - 每个layer输入的query_embed
+        #   init_query_spectral_weights: (B, Nd+Nq, 8) - 初始化query_spectral_weights, 值域[0,1]
+        #   inter_query_spectral_weights: (n_dec_layers, B, Nd+Nq, 8) - 每个layer输出的query_spectral_weights, 值域[0,1]
+        outputs, init_reference, inter_references, inter_queries = self.transformer(**transformer_kwargs)
 
         # Process transformer outputs
         # outputs: (n_dec_layers, B, Nd+Nq, C)
@@ -402,12 +438,6 @@ class MeMOTR(nn.Module):
                     query_mask=query_mask,
                     queries=inter_queries
                 )
-        
-        if self.decoder_spectral:
-            # 根据last_ref_pts的设置，也选择了取-2
-            res["last_query_spectral_weights"] = inverse_sigmoid(inter_query_spectral_weights[-2])
-            res["init_query_spectral_weights"] = inverse_sigmoid(init_query_spectral_weights)
-            res["pred_spectral_weights"] = inter_query_spectral_weights[-1]
         
         res["outputs"] = outputs[-1]  # (B, Nd+Nq, C)
         res["spectral_weights"] = spectral_weights  # List[B, C=8, H, W]
@@ -699,7 +729,7 @@ class MeMOTR(nn.Module):
         return self.query_updater(previous_tracks, new_tracks, unmatched_dets, no_augment)
 
 
-def build(config: dict) -> MeMOTR:
+def build(config: dict) -> MeMOTR20260310:
     """
     构建MeMOTR模型。
     
@@ -739,7 +769,7 @@ def build(config: dict) -> MeMOTR:
     scem_gt = config["SCEM"]["USE_GT"]
     scem = build_scem(config=config["SCEM"])
 
-    return MeMOTR(
+    return MeMOTR20260310(
         backbone=backbone,
         transformer=deformable_transformer,
         query_updater=query_updater,
@@ -755,12 +785,5 @@ def build(config: dict) -> MeMOTR:
         checkpoint_level=config["CHECKPOINT_LEVEL"],
         use_dab=config["USE_DAB"],
         visualize=config["VISUALIZE"],
-        decoder_spectral=config["DECODER_SPECTRAL"],
-        decoder_spectral_refine=config["DECODER_SPECTRAL_REFINE"],
-        decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"],  # decoder中spectral anchor的光谱数量
-        encoder_global_token=config["ENCODER_GLOBAL_TOKEN"],
-        encoder_spectral=config["ENCODER_SPECTRAL"],
-        rope_pos_module=rope_pos_module,
         scem_module=scem,
-        scem_use_gt=scem_gt,
     )
