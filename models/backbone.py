@@ -76,11 +76,22 @@ class Backbone(nn.Module):
                 parameter.requires_grad_(False)
 
         if return_interm_layers:
-            return_layers = {
-                "layer2": "0",
-                "layer3": "1",
-                "layer4": "2"
-            }
+            if stem=="conv3d_se_v4":
+                return_layers = {
+                    "layer1": "0",
+                    "layer2": "1",
+                    "layer3": "2",
+                    "layer4": "3"
+                }
+                '''strides和num_channels会在外部模型的初始化中使用，这里并不是真的返回layer1，会在后续计算光谱状态中删掉layer1部分'''
+                # self.strides = [4, 8, 16, 32]
+                # self.num_channels = [256, 512, 1024, 2048]
+            else:
+                return_layers = {
+                    "layer2": "0",
+                    "layer3": "1",
+                    "layer4": "2"
+                }
             self.strides = [8, 16, 32]
             self.num_channels = [512, 1024, 2048]
         else:
@@ -109,7 +120,7 @@ class Backbone(nn.Module):
                             final_act=False,
                             use_bn_3d=False
                         )
-                    elif stem == "conv3d_se" or stem == "conv3d_se_v2" or stem == "conv3d_se_v3":
+                    elif stem == "conv3d_se" or stem == "conv3d_se_v2" or stem == "conv3d_se_v3" or stem == "conv3d_se_v4":
                         return ConvMSI_SE(
                             c1=1,
                             c2=conv1_3ch.out_channels,
@@ -120,7 +131,8 @@ class Backbone(nn.Module):
                             final_bn=False,
                             final_act=False,
                             use_bn_3d=False,
-                            reduction=2
+                            reduction=2,
+                            return_before_sigmoid=True if stem == "conv3d_se_v4" else False
                         )
 
                 else:
@@ -303,6 +315,64 @@ class Backbone_PE_SpectralWeights(BackboneWithPE):
 
         return features, pos_embeds, spectral_embeds
     
+    def forward_v4(self, ntensor: NestedTensor):
+        '''
+        为了递归处理光谱状态，需要从 layer1 开始计算，
+        但最终只返回 layer2->layer4 的特征、位置编码和光谱状态。
+        光谱状态为未 sigmoid 的 raw state。
+        '''
+
+        layers = ["layer1", "layer2", "layer3", "layer4"]
+
+        backbone_outputs, sig_raw = self.backbone(ntensor)  # S0
+
+        features: List[NestedTensor] = []
+        pos_embeds: List[torch.Tensor] = []
+        spectral_embeds: List[torch.Tensor] = []
+
+        # ----------------------------
+        # 1. 按 layer 顺序取 feature
+        # ----------------------------
+        for _, output in sorted(backbone_outputs.items()):
+            features.append(output)
+
+        # ----------------------------
+        # 2. 计算 position embedding
+        # ----------------------------
+        for feature in features[1:]:
+            pos_embeds.append(self.position_embedding(feature))
+
+        # ----------------------------
+        # 3. 递推 spectral state
+        # ----------------------------
+        spectral_state = sig_raw  # S0
+        spectral_embeds.append(sig_raw)
+
+        for feature, layer in zip(features, layers):
+
+            spectral_state = self.spectral_embedding(
+                spectral_state,
+                feature,
+                layer
+            )
+
+            spectral_embeds.append(spectral_state)
+
+        # spectral_embeds = [S0, S1, S2, S3, S4]
+        # features        = [F1, F2, F3, F4]
+
+        # ----------------------------
+        # 4. 只返回 layer2->4
+        # ----------------------------
+        features = features[1:]          # F2 F3 F4
+        pos_embeds = pos_embeds          # PE2 PE3 PE4 在计算的时候已经保证了不计算layer1的pos_emb
+        spectral_embeds = spectral_embeds[2:]  # S2 S3 S4
+
+        return features, pos_embeds, spectral_embeds
+
+
+
+
     def forward(self, ntensor: NestedTensor):
         if self.weights_version == "v1":
             return self.forward_v1(ntensor)
@@ -310,6 +380,8 @@ class Backbone_PE_SpectralWeights(BackboneWithPE):
             return self.forward_v2(ntensor)
         elif self.weights_version == "v3":
             return self.forward_v2(ntensor)#复用
+        elif self.weights_version == "v4":
+            return self.forward_v4(ntensor)
         else:
             raise ValueError(f"Unsupported weights_version: {self.weights_version}")
 
@@ -449,6 +521,128 @@ class SpectralEmbeddingV3(nn.Module):
         out_weights = self.conv_list[self.resnet_output_layer.index(layer)](stage_feature)
         return out_weights
 
+class SpectralEmbeddingV4(nn.Module):
+    """
+    Dual-state spectral signature update module.
+
+    输入:
+        spectral_state: [B, 8, H_prev, W_prev]   上一阶段的光谱状态 S^{l-1}
+        ntensor: NestedTensor，其中 ntensor.tensors = [B, C_l, H_l, W_l]
+        layer: 当前 stage 名称，如 "layer1", "layer2", ...
+
+    输出:
+        out_state: [B, 8, H_l, W_l]             当前阶段更新后的光谱状态 S^l
+    """
+
+    def __init__(self, resnet_output_layer: list[str]):
+        super().__init__()
+        self.resnet_output_layer = resnet_output_layer
+
+        # ResNet50 标准输出通道
+        self.layer2channel = {
+            "layer1": 256,
+            "layer2": 512,
+            "layer3": 1024,
+            "layer4": 2048,
+            "layer_extra": 256,
+        }
+
+        self.state_channels = 8
+        hidden_dim = 64
+
+        self.content_blocks = nn.ModuleDict()
+        self.gate_blocks = nn.ModuleDict()
+        self.out_norms = nn.ModuleDict()
+
+        for layer in self.resnet_output_layer:
+            in_ch = self.layer2channel[layer] + self.state_channels
+
+            # 候选状态分支: [F^l, S^{l-1}_down] -> \tilde S^l
+            self.content_blocks[layer] = nn.Sequential(
+                nn.Conv2d(in_ch, hidden_dim, kernel_size=3, stride=1, padding=1, bias=False),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(hidden_dim, self.state_channels, kernel_size=3, stride=1, padding=1, bias=True),
+            )
+
+            # 门控分支: [F^l, S^{l-1}_down] -> G^l
+            self.gate_blocks[layer] = nn.Conv2d(
+                in_ch, self.state_channels, kernel_size=1, stride=1, padding=0, bias=True
+            )
+
+            # 输出状态归一化，稳定递推
+            self.out_norms[layer] = nn.GroupNorm(
+                num_groups=4, num_channels=self.state_channels
+            )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        # 让初始 gate 偏向保留旧状态：gate ≈ 0.12
+        for layer in self.resnet_output_layer:
+            nn.init.constant_(self.gate_blocks[layer].bias, -2.0)
+
+    @staticmethod
+    def _check_spectral_state_shape(
+        spectral_state: torch.Tensor,
+        ntensor
+    ) -> bool:
+        """
+        理论上上一阶段 spectral_state 的空间尺寸约为当前 feature 的 2 倍，
+        允许卷积/奇偶尺寸误差 ±1。
+        """
+        feat_h, feat_w = ntensor.tensors.shape[-2:]
+        s_h, s_w = spectral_state.shape[-2:]
+
+        valid_h = s_h in (2 * feat_h - 1, 2 * feat_h, 2 * feat_h + 1)
+        valid_w = s_w in (2 * feat_w - 1, 2 * feat_w, 2 * feat_w + 1)
+
+        return valid_h and valid_w
+
+    def spectral_embedding(
+        self,
+        spectral_state: torch.Tensor,
+        ntensor,
+        layer: str
+    ) -> torch.Tensor:
+        """
+        S^{l-1} -> S^l
+        """
+        assert layer in self.resnet_output_layer, f"Unknown layer: {layer}"
+
+        feature = ntensor.tensors                       # [B, C_l, H_l, W_l]
+        _, _, h_feat, w_feat = feature.shape
+
+        assert self._check_spectral_state_shape(spectral_state, ntensor), \
+            f"spectral_state shape {spectral_state.shape[-2:]} is incompatible with feature shape {feature.shape[-2:]}"
+
+        # 1) 将上一阶段状态降采样到当前尺度
+        s_down = F.adaptive_avg_pool2d(spectral_state, (h_feat, w_feat))   # [B,8,H_l,W_l]
+
+        # 2) 融合当前空间特征和上一阶段状态
+        fusion = torch.cat([feature, s_down], dim=1)                       # [B,C_l+8,H_l,W_l]
+
+        # 3) 候选状态 \tilde S^l
+        content_logits = self.content_blocks[layer](fusion)                # [B,8,H_l,W_l]
+        content = torch.tanh(content_logits)                               # 候选状态，限制到 [-1,1]
+
+        # 4) 更新门 G^l
+        gate = torch.sigmoid(self.gate_blocks[layer](fusion))              # [B,8,H_l,W_l]
+
+        # 5) 递推更新 S^l
+        out_state = gate * content + (1.0 - gate) * s_down
+
+        # 6) 归一化，稳定不同 stage 的状态分布
+        out_state = self.out_norms[layer](out_state)
+
+        return out_state
+
+    def forward(
+        self,
+        spectral_state: torch.Tensor,
+        ntensor,
+        layer: str = "layer_extra"
+    ) -> torch.Tensor:
+        return self.spectral_embedding(spectral_state, ntensor, layer)
 
 
 
@@ -461,6 +655,7 @@ def build(config: dict) -> Union[BackboneWithPE, Backbone_PE_SpectralWeights]:
     num_levels = config["NUM_FEATURE_LEVELS"]
     assert (num_levels == 3 or num_levels == 4), "num_levels should be 3 or 4"
     resnet_output_layer = ["layer2", "layer3", "layer4"] if num_levels == 3 else ["layer2", "layer3", "layer4", "layer_extra"]
+    recursion_resnet_output_layer=["layer1", "layer2", "layer3", "layer4", "layer_extra"]
 
     if CONFIG_STEM=="conv3d_se":
         spectral_embedding = SpectralEmbedding()
@@ -471,6 +666,9 @@ def build(config: dict) -> Union[BackboneWithPE, Backbone_PE_SpectralWeights]:
     elif CONFIG_STEM=="conv3d_se_v3":
         spectral_embedding = SpectralEmbeddingV3(resnet_output_layer=resnet_output_layer)
         return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding, weights_version="v3")
+    elif CONFIG_STEM=="conv3d_se_v4":
+        spectral_embedding = SpectralEmbeddingV4(resnet_output_layer=recursion_resnet_output_layer)
+        return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding, weights_version="v4")
     else:
         return BackboneWithPE(backbone=backbone, position_embedding=position_embedding)
 
@@ -482,6 +680,8 @@ def build_woPe(config: dict) -> Union[BackboneWoPe, BackboneWoPe_SpectralWeights
     num_levels = config["NUM_FEATURE_LEVELS"]
     assert (num_levels == 3 or num_levels == 4), "num_levels should be 3 or 4"
     resnet_output_layer = ["layer2", "layer3", "layer4"] if num_levels == 3 else ["layer2", "layer3", "layer4", "layer_extra"]
+    
+    recursion_resnet_output_layer=["layer1", "layer2", "layer3", "layer4", "layer_extra"]
 
     if CONFIG_STEM=="conv3d_se":
         spectral_embedding = SpectralEmbedding()
@@ -492,5 +692,8 @@ def build_woPe(config: dict) -> Union[BackboneWoPe, BackboneWoPe_SpectralWeights
     elif CONFIG_STEM=="conv3d_se_v3":
         spectral_embedding = SpectralEmbeddingV3(resnet_output_layer=resnet_output_layer)
         return BackboneWoPe_SpectralWeights(backbone=backbone, spectral_embedding=spectral_embedding, weights_version="v3")
+    elif CONFIG_STEM=="conv3d_se_v4":
+        spectral_embedding = SpectralEmbeddingV4(resnet_output_layer=recursion_resnet_output_layer)
+        return BackboneWoPe_SpectralWeights(backbone=backbone, spectral_embedding=spectral_embedding, weights_version="v4")
     else:
         return BackboneWoPe(backbone=backbone)

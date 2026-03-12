@@ -10,7 +10,7 @@ import torch.backends.cudnn
 from utils.utils import distributed_rank
 from utils.utils import yaml_to_dict
 from configs.utils import update_config
-from utils.utils import load_yaml_with_inheritance
+from utils.utils import load_yaml_with_inheritance, TrackedConfig
 
 
 def parse_option():
@@ -128,4 +128,7 @@ if __name__ == '__main__':
     # Merge parser option and .yaml config, then run main function.
     merged_config = update_config(config=cfg, option=opt)
     merged_config["CONFIG_PATH"] = opt.config_path
-    main(config=merged_config)
+
+    # 使用带访问记录功能的配置类
+    tracked_config = TrackedConfig(merged_config)
+    main(config=tracked_config)

@@ -99,6 +99,12 @@ def train(config: dict):
     multi_checkpoint = "MULTI_CHECKPOINT" in config and config["MULTI_CHECKPOINT"]
     use_checkpoint = "USE_CHECKPOINT" in config and config["USE_CHECKPOINT"]
 
+    # 打印config使用情况
+    train_logger.show(head=f"config使用情况: {config.access_summary()}")
+    train_logger.write(head=f"config使用情况: {config.access_summary()}", filename="log.txt", mode="a")
+    train_logger.show(head=f"config未使用项: {config.unused_keys()}")
+    train_logger.write(head=f"config未使用项: {config.unused_keys()}", filename="log.txt", mode="a")
+
     # log记录开始时间
     train_logger.show(head=f"训练开始 Start Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
     train_logger.write(head=f"训练开始 Start Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", filename="log.txt", mode="a")
@@ -265,7 +271,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
 
     criterion.set_epoch(epoch)
     
-    TrackInstances.set_static_properties(use_spectral_decoder=get_model(model).decoder_spectral, decoder_spectral_weights_dim=8*decoder_spectral_clusters)
+    TrackInstances.set_static_properties(False,)
 
     if only_train_detr:
         for i, batch in enumerate(dataloader):
