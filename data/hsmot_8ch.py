@@ -17,7 +17,12 @@ from hsmot.mmlab.hs_mmrotate import poly2obb, poly2obb_np
 import os.path as osp
 from hsmot.datasets.pipelines.compose import MotCompose, MotRandomChoice
 from hsmot.datasets.pipelines.channel import MotrToMmrotate, MmrotateToMotr, MmrotateToMemotr, MotipToMmrotate
-from hsmot.datasets.pipelines.loading import MotLoadAnnotations, MotLoadImageFromFile, MotLoadMultichannelImageFromNpy
+from hsmot.datasets.pipelines.loading import (
+    MotLoadAnnotations,
+    MotLoadImageFromFile,
+    MotLoadMultichannelImageFrom3JPG,
+    MotLoadMultichannelImageFromNpy,
+)
 from hsmot.datasets.pipelines.transforms import MotRRsize, MotRRandomFlip, MotRRandomCrop, MotNormalize, MotPad
 from hsmot.datasets.pipelines.formatting import MotCollect, MotDefaultFormatBundle, MotShow
 
@@ -46,6 +51,7 @@ class hsmot_8ch(MOTDataset):
         self.sample_vid_tmax = None
 
         self.npy2rgb = config["NPY2RGB"]
+        self.dataset_type = config.get("DATASET_TYPE", "NPY").upper()
 
         self.gts = defaultdict(lambda: defaultdict(list))
         self.vid_idx = dict()
@@ -57,7 +63,16 @@ class hsmot_8ch(MOTDataset):
         if self.dataset_version is not None:
             base_dataset_dir = os.path.join(base_dataset_dir, self.dataset_version)
 
-        self.split_dir = os.path.join(base_dataset_dir, split, "npy")
+        if self.dataset_type == "NPY":
+            self.data_subdir = "npy"
+            self.frame_ext = ".npy"
+        elif self.dataset_type == "3JPG":
+            self.data_subdir = "npy2jpg"
+            self.frame_ext = ".jpg"
+        else:
+            raise ValueError(f"Unsupported DATASET_TYPE: {self.dataset_type}")
+
+        self.split_dir = os.path.join(base_dataset_dir, split, self.data_subdir)
         assert os.path.exists(self.split_dir), f"Dir {self.split_dir} is not exist."
         self.labels_dir = os.path.join(base_dataset_dir, split, "mot")
 
@@ -175,12 +190,32 @@ class hsmot_8ch(MOTDataset):
         self.sample_interval = self.sample_intervals[min(len(self.sample_intervals) - 1, self.sample_stage)]
         for vid in self.vid_idx.keys():
             t_min = min(self.labels_full[vid].keys())
-            t_max = max(self.labels_full[vid].keys())
+            t_max = self.get_vid_tmax(vid)
             self.sample_vid_tmax[vid] = t_max
             for t in range(t_min, t_max - (self.sample_length - 1) + 1):
                 self.sample_begin_frames.append((vid, t))
 
         return
+
+    def get_vid_tmax(self, vid: str) -> int:
+        vid_dir = os.path.join(self.split_dir, osp.splitext(vid)[0])
+        assert os.path.exists(vid_dir), f"Dir {vid_dir} is not exist."
+
+        if self.dataset_type == "NPY":
+            frame_ids = [
+                int(osp.splitext(file_name)[0])
+                for file_name in os.listdir(vid_dir)
+                if file_name.endswith(self.frame_ext)
+            ]
+        else:
+            frame_ids = [
+                int(osp.splitext(file_name)[0].rsplit('_', 1)[0])
+                for file_name in os.listdir(vid_dir)
+                if file_name.endswith(self.frame_ext) and '_p' in osp.splitext(file_name)[0]
+            ]
+
+        assert frame_ids, f"No valid frames found in {vid_dir}"
+        return max(frame_ids)
 
     def get_single_frame(self, vid: str, idx: int):
         #确认源代码的 frame_idx 现在看不需要
@@ -192,7 +227,11 @@ class hsmot_8ch(MOTDataset):
             info["frame_idx"] = torch.as_tensor(idx)
 
         '''
-        img_path = os.path.join(self.split_dir, osp.splitext(vid)[0], f'{idx:06d}.npy')
+        if self.dataset_type == "3JPG":
+            frame_name = f'{idx:06d}_p1{self.frame_ext}'
+        else:
+            frame_name = f'{idx:06d}{self.frame_ext}'
+        img_path = os.path.join(self.split_dir, osp.splitext(vid)[0], frame_name)
         data_info = {}
         data_info['filename'] = img_path
         data_info['ann'] = {}
@@ -244,7 +283,7 @@ class hsmot_8ch(MOTDataset):
 
 
 def transforms_for_train(use_cache=True, cache_path=None, spectral_method=None, spectral_n_clusters=None,
-                         get_spectral_weights=True, transform_config=None):
+                         get_spectral_weights=True, transform_config=None, dataset_type="NPY"):
     mean = [0.27358221, 0.28804452, 0.28133921, 0.26906377, 0.28309119, 0.26928305, 0.28372527, 0.27149373]
     std = [0.19756629, 0.17432339, 0.16413284, 0.17581682, 0.18366176, 0.1536845, 0.15964683, 0.16557951]
     mean = [_*255 for _ in mean]
@@ -260,9 +299,16 @@ def transforms_for_train(use_cache=True, cache_path=None, spectral_method=None, 
     crop_size = tuple(transform_config["CROP_SIZE"])
     flip_ratio = transform_config["FLIP_RATIO"]
 
+    if dataset_type == "3JPG":
+        load_image = MotLoadMultichannelImageFrom3JPG()
+    elif dataset_type == "NPY":
+        load_image = MotLoadMultichannelImageFromNpy()
+    else:
+        raise ValueError(f"Unsupported DATASET_TYPE: {dataset_type}")
+
     return MotCompose([
                 MotipToMmrotate(),
-                MotLoadMultichannelImageFromNpy(),
+                load_image,
                 MotLoadAnnotations(poly2mask=False),
                 MotRRandomFlip(direction=['horizontal'], flip_ratio=[flip_ratio], version='le135'),
                 MotRRandomCrop(crop_size=crop_size, crop_type='absolute_w_range', version='le135',
@@ -292,7 +338,8 @@ def build(config: dict, split: str, logger):
                 use_cache=config["DECODER_SPECTRAL_USE_CACHE"],
                 spectral_n_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
                 spectral_method=config["DECODER_SPECTRAL_METHOD"],
-                transform_config= config["TRANSFORMS_CONFIG"]
+                transform_config=config["TRANSFORMS_CONFIG"],
+                dataset_type=config.get("DATASET_TYPE", "NPY").upper()
             ),
             logger = logger,
             dataset_version=config["DATASET_VERSION"]

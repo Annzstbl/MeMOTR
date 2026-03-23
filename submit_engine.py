@@ -32,13 +32,13 @@ import cv2
 class Submitter:
     """Run MeMOTR inference on a single HSMOT sequence and dump tracking/detection results."""
     def __init__(self, dataset_name: str, split_dir: str, seq_name: str, outputs_dir: str, model: nn.Module,
+                 dataset,
                  det_score_thresh: float = 0.7, track_score_thresh: float = 0.6, result_score_thresh: float = 0.7,
                  miss_tolerance: int = 5,
                  use_motion: bool = False, motion_lambda: float = 0.5,
                  motion_min_length: int = 3, motion_max_length: int = 5,
                  use_dab: bool = False,
                  visualize: bool = False,
-                 npy2rgb: bool = False, 
                  decoder_spectral: bool = True,
                  use_scem_gt: bool = False,
                  only_train_detr: bool = False,
@@ -59,11 +59,7 @@ class Submitter:
         self.result_score_thresh = result_score_thresh
         self.motion_lambda = motion_lambda
         self.use_scem_gt = use_scem_gt
-        if self.use_scem_gt:
-            self.label_file = os.path.join(split_dir, '..', 'mot', '{seq_name}.txt'.format(seq_name=seq_name))
-            self.dataset = SeqDataset_HeatmapGT(seq_dir=self.seq_dir, label_file=self.label_file, npy2rgb=npy2rgb)
-        else:
-            self.dataset = SeqDataset(seq_dir=self.seq_dir, npy2rgb=npy2rgb)
+        self.dataset = dataset
         self.dataloader = DataLoader(self.dataset, batch_size=1, num_workers=4, shuffle=False)
         self.device = next(self.model.parameters()).device
         self.use_dab = use_dab
@@ -480,6 +476,8 @@ def submit(config: dict):
     motion_max_length = config["MOTION_MAX_LENGTH"]
     motion_lambda = config["MOTION_LAMBDA"]
     miss_tolerance = config["MISS_TOLERANCE"]
+    dataset_type = config.get("DATASET_TYPE", train_config.get("DATASET_TYPE", None))
+    use_scem_gt = config.get("SCEM", {}).get("USE_GT", False)
 
     model = build_model(config=train_config)
     load_checkpoint(
@@ -487,7 +485,13 @@ def submit(config: dict):
         path=path.join(config["SUBMIT_DIR"], config["SUBMIT_MODEL"])
     )
     if "hsmot" in dataset_name:
-        data_split_dir = path.join(data_root, dataset_name.replace("_8ch",""), dataset_split, 'npy')
+        data_split_dir = resolve_submit_split_dir(
+            data_root=data_root,
+            dataset_name=dataset_name,
+            dataset_split=dataset_split,
+            dataset_version=config.get("DATASET_VERSION", None),
+            dataset_type=dataset_type
+        )
     # if dataset_name == "DanceTrack" or dataset_name == "SportsMOT":
     #     data_split_dir = path.join(data_root, dataset_name, dataset_split)
     # elif dataset_name == "BDD100K":
@@ -506,12 +510,22 @@ def submit(config: dict):
 
     for seq_name in seq_names:
         seq_name = str(seq_name)
+        seq_dir = path.join(data_split_dir, seq_name)
+        dataset = build_seq_dataset(
+            seq_dir=seq_dir,
+            split_dir=data_split_dir,
+            seq_name=seq_name,
+            npy2rgb=config["NPY2RGB"],
+            use_scem_gt=use_scem_gt,
+            dataset_type=dataset_type
+        )
         submitter = Submitter(
             dataset_name=dataset_name,
             split_dir=data_split_dir,
             seq_name=seq_name,
             outputs_dir=outputs_dir,
             model=model,
+            dataset=dataset,
             use_dab=use_dab,
             det_score_thresh=det_score_thresh,
             track_score_thresh=track_score_thresh,
@@ -521,10 +535,46 @@ def submit(config: dict):
             motion_max_length=motion_max_length,
             motion_lambda=motion_lambda,
             miss_tolerance=miss_tolerance,
-            npy2rgb = config["NPY2RGB"]
+            use_scem_gt=use_scem_gt
         )
         submitter.run()
     return
+
+def resolve_submit_split_dir(data_root: str, dataset_name: str, dataset_split: str, dataset_version: str | None = None,
+                             dataset_type: str | None = None):
+    """
+    Resolve sequence folder for submit/infer.
+    Select by DATASET_TYPE:
+      - 3JPG -> <root>/<split>/jpg
+      - else -> <root>/<split>/npy
+    Fallback: <root>/<split>
+    """
+    if "hsmot" not in dataset_name:
+        raise ValueError(f"Unsupported dataset for submit process: {dataset_name}")
+
+    dataset_root = path.join(data_root, dataset_name.replace("_8ch", ""))
+    if dataset_version is not None:
+        dataset_root = path.join(dataset_root, dataset_version)
+
+    split_root = path.join(dataset_root, dataset_split)
+    dataset_type_upper = str(dataset_type).upper() if dataset_type is not None else "NPY"
+    target_subdir = "npy2jpg" if dataset_type_upper == "3JPG" else "npy"
+    target_dir = path.join(split_root, target_subdir)
+    if path.isdir(target_dir):
+        return target_dir
+    return split_root
+
+
+def build_seq_dataset(seq_dir: str, split_dir: str, seq_name: str, npy2rgb: bool, use_scem_gt: bool,
+                      dataset_type: str | None = None):
+    """
+    Centralized SeqDataset builder used by both submit() and submit_during_train().
+    """
+    if use_scem_gt:
+        label_file = os.path.join(split_dir, "..", "mot", f"{seq_name}.txt")
+        return SeqDataset_HeatmapGT(seq_dir=seq_dir, label_file=label_file, npy2rgb=npy2rgb, dataset_type=dataset_type)
+    return SeqDataset(seq_dir=seq_dir, npy2rgb=npy2rgb, dataset_type=dataset_type)
+
 
 def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_detr: bool = False, train_logger: Logger = None):
 
@@ -555,13 +605,22 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_d
     motion_lambda = config["MOTION_LAMBDA"]
     miss_tolerance = config["MISS_TOLERANCE"]
     dataset_version = config["DATASET_VERSION"]
-    
-    # 构造带 version 的数据集根目录
+    dataset_type = config.get("DATASET_TYPE", "NPY")
+    use_scem_gt = config["SCEM"]["USE_GT"]
+
+    # submit 与 submit_during_train 复用同一套 split 目录解析逻辑
     if "hsmot" in dataset_name:
-        dataset_root = path.join(data_root, dataset_name.replace("_8ch", ""))
-        if dataset_version is not None:
-            dataset_root = path.join(dataset_root, dataset_version)
-        data_split_dir = path.join(dataset_root, dataset_split, 'npy')
+        data_split_dir = resolve_submit_split_dir(
+            data_root=data_root,
+            dataset_name=dataset_name,
+            dataset_split=dataset_split,
+            dataset_version=dataset_version,
+            dataset_type=dataset_type
+        )
+        if path.basename(data_split_dir) in ("npy", "npy2jpg"):
+            dataset_root = path.dirname(path.dirname(data_split_dir))
+        else:
+            dataset_root = path.dirname(data_split_dir)
     seq_names = os.listdir(data_split_dir)
 
     if is_distributed():
@@ -573,12 +632,22 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_d
 
     for seq_name in seq_names:
         seq_name = str(seq_name)
+        seq_dir = path.join(data_split_dir, seq_name)
+        dataset = build_seq_dataset(
+            seq_dir=seq_dir,
+            split_dir=data_split_dir,
+            seq_name=seq_name,
+            npy2rgb=config["NPY2RGB"],
+            use_scem_gt=use_scem_gt,
+            dataset_type=dataset_type
+        )
         submitter = Submitter(
             dataset_name=dataset_name,
             split_dir=data_split_dir,
             seq_name=seq_name,
             outputs_dir=outputs_dir,
             model=model,
+            dataset=dataset,
             use_dab=use_dab,
             det_score_thresh=det_score_thresh,
             track_score_thresh=track_score_thresh,
@@ -588,9 +657,8 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_d
             motion_max_length=motion_max_length,
             motion_lambda=motion_lambda,
             miss_tolerance=miss_tolerance,
-            npy2rgb = config["NPY2RGB"],
             decoder_spectral= config["DECODER_SPECTRAL"],
-            use_scem_gt=config["SCEM"]["USE_GT"],
+            use_scem_gt=use_scem_gt,
             only_train_detr=only_train_detr,
             epoch=epoch,
             draw_pic_dir=draw_pic_dir,
@@ -605,7 +673,10 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_d
         # 评估阶段同样复用 dataset_root
 
         gt_dir = os.path.join(dataset_root, dataset_split, 'mot')
-        img_dir = os.path.join(dataset_root, dataset_split, 'npy')
+        if str(dataset_type).upper() == "3JPG":
+            img_dir = os.path.join(dataset_root, dataset_split, 'npy2jpg')
+        else:
+            img_dir = os.path.join(dataset_root, dataset_split, 'npy')
 
         tracker_dir = submit_dir_epoch
         trackers_name = outputs_dir.split('/')[-1]

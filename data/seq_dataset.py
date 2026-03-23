@@ -13,8 +13,54 @@ import torch
 from collections import defaultdict
 
 
+def _detect_dataset_type(seq_dir: str, dataset_type=None) -> str:
+    if dataset_type is not None:
+        return dataset_type.upper()
+
+    file_names = sorted(os.listdir(seq_dir))
+    if any(file_name.endswith('.npy') for file_name in file_names):
+        return "NPY"
+    if any(file_name.endswith('.jpg') and '_p1' in os.path.splitext(file_name)[0] for file_name in file_names):
+        return "3JPG"
+    raise ValueError(f"Cannot infer dataset type from {seq_dir}")
+
+
+def _collect_image_paths(seq_dir: str, dataset_type: str):
+    file_names = sorted(os.listdir(seq_dir))
+    if dataset_type == "NPY":
+        return [os.path.join(seq_dir, file_name) for file_name in file_names if file_name.endswith('.npy')]
+    if dataset_type == "3JPG":
+        return [
+            os.path.join(seq_dir, file_name)
+            for file_name in file_names
+            if file_name.endswith('.jpg') and '_p1' in os.path.splitext(file_name)[0]
+        ]
+    raise ValueError(f"Unsupported DATASET_TYPE: {dataset_type}")
+
+
+def _load_multichannel_image(path: str, dataset_type: str):
+    if dataset_type == "NPY":
+        image = np.load(path)
+        assert image is not None
+        return image
+
+    if dataset_type == "3JPG":
+        stem, ext = os.path.splitext(path)
+        base_stem = stem.rsplit('_', 1)[0] if stem.endswith(('_p1', '_p2', '_p3')) else stem
+        part_paths = [f'{base_stem}_p1{ext}', f'{base_stem}_p2{ext}', f'{base_stem}_p3{ext}']
+        part_images = []
+        for part_path in part_paths:
+            image = mmcv.imread(part_path)
+            assert image is not None, f"Failed to load image: {part_path}"
+            cv2.cvtColor(image, cv2.COLOR_BGR2RGB, image)
+            part_images.append(image)
+        return np.concatenate([part_images[0], part_images[1], part_images[2][:, :, :2]], axis=2)
+
+    raise ValueError(f"Unsupported DATASET_TYPE: {dataset_type}")
+
+
 class SeqDataset(Dataset):
-    def __init__(self, seq_dir: str, stride=64, npy2rgb=False):
+    def __init__(self, seq_dir: str, stride=64, npy2rgb=False, dataset_type=None):
         # a hack implementation for BDD100K and others:
         # if "BDD100K" in seq_dir:
         #     image_paths = sorted(os.listdir(os.path.join(seq_dir)))
@@ -22,9 +68,8 @@ class SeqDataset(Dataset):
         # else:
         #     image_paths = sorted(os.listdir(os.path.join(seq_dir, "img1")))
         #     image_paths = [os.path.join(seq_dir, "img1", _) for _ in image_paths if ("jpg" in _) or ("png" in _)]
-        image_paths = sorted(os.listdir(seq_dir))
-        image_paths = [os.path.join(seq_dir, _) for _ in image_paths if ("npy" in _)]
-        self.image_paths = image_paths
+        self.dataset_type = _detect_dataset_type(seq_dir, dataset_type)
+        self.image_paths = _collect_image_paths(seq_dir, self.dataset_type)
         self.image_height = 900
         self.image_width = 1200
         mean = [0.27358221, 0.28804452, 0.28133921, 0.26906377, 0.28309119, 0.26928305, 0.28372527, 0.27149373]
@@ -40,11 +85,8 @@ class SeqDataset(Dataset):
         return
 
     @staticmethod
-    def load(path):
-        image = np.load(path)
-        assert image is not None
-
-        return image
+    def load(path, dataset_type):
+        return _load_multichannel_image(path, dataset_type)
 
     def process_image(self, image):
         ori_image = image.copy()
@@ -72,7 +114,7 @@ class SeqDataset(Dataset):
         # return image, ori_image
 
     def __getitem__(self, item):
-        image = self.load(self.image_paths[item])
+        image = self.load(self.image_paths[item], self.dataset_type)
         info = self.image_paths[item]
         return self.process_image(image=image), info
 
@@ -83,7 +125,7 @@ class SeqDataset(Dataset):
 
 
 class SeqDataset_HeatmapGT(Dataset):
-    def __init__(self, seq_dir: str, label_file:str, stride=64, npy2rgb=False):
+    def __init__(self, seq_dir: str, label_file:str, stride=64, npy2rgb=False, dataset_type=None):
         # a hack implementation for BDD100K and others:
         # if "BDD100K" in seq_dir:
         #     image_paths = sorted(os.listdir(os.path.join(seq_dir)))
@@ -91,9 +133,8 @@ class SeqDataset_HeatmapGT(Dataset):
         # else:
         #     image_paths = sorted(os.listdir(os.path.join(seq_dir, "img1")))
         #     image_paths = [os.path.join(seq_dir, "img1", _) for _ in image_paths if ("jpg" in _) or ("png" in _)]
-        image_paths = sorted(os.listdir(seq_dir))
-        image_paths = [os.path.join(seq_dir, _) for _ in image_paths if ("npy" in _)]
-        self.image_paths = image_paths
+        self.dataset_type = _detect_dataset_type(seq_dir, dataset_type)
+        self.image_paths = _collect_image_paths(seq_dir, self.dataset_type)
         self.image_height = 900
         self.image_width = 1200
         mean = [0.27358221, 0.28804452, 0.28133921, 0.26906377, 0.28309119, 0.26928305, 0.28372527, 0.27149373]
@@ -118,11 +159,8 @@ class SeqDataset_HeatmapGT(Dataset):
                 self.label_full[t-1].append(np.array([x0, y0, x1, y1, x2, y2, x3, y3, i, cls], dtype=np.float32))
 
     @staticmethod
-    def load(path):
-        image = np.load(path)
-        assert image is not None
-
-        return image
+    def load(path, dataset_type):
+        return _load_multichannel_image(path, dataset_type)
 
     def process_image(self, image):
         ori_image = image.copy()
@@ -141,7 +179,7 @@ class SeqDataset_HeatmapGT(Dataset):
 
 
     def __getitem__(self, item):
-        image = self.load(self.image_paths[item])
+        image = self.load(self.image_paths[item], self.dataset_type)
         info = self.image_paths[item]
         labels = np.stack(self.label_full[item]) # xyxyxyxy id cls  (N, 10)
         xyxyxyxy = torch.tensor(labels[:, :8], dtype=torch.float32)
