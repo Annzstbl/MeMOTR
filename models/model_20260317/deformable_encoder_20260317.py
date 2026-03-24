@@ -180,7 +180,7 @@ class DeformableEncoderLayer20260317(nn.Module):
 
         """
         # Self Attention
-        src2 = self.self_attn(
+        output, add_output = self.self_attn(
             self.with_spectral_embed(self.with_pos_embed(src, pos), spectral),
             reference_points, 
             src, 
@@ -190,6 +190,8 @@ class DeformableEncoderLayer20260317(nn.Module):
             self.with_spectral_embed(self.with_pos_embed(add_tokens, add_pos_embeds), add_specs),
             add_tokens)
 
+        src2 = torch.cat([output, add_output], dim=-2)
+
         src = torch.cat([src, add_tokens], dim=-2)
 
         src = src + self.dropout1(src2)
@@ -198,7 +200,7 @@ class DeformableEncoderLayer20260317(nn.Module):
         # ffn
         src = self.forward_ffn(src) #[B, len_q + len_a, C]
 
-        return src[:, :-add_tokens.shape[1], :], src[:, -add_tokens.shape[1]:, :]
+        return src[:, :-add_output.shape[1], :], src[:, -add_output.shape[1]:, :]
 
 
 DeformableEncoder = DeformableEncoder20260317

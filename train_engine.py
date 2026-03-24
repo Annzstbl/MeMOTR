@@ -94,7 +94,8 @@ def train(config: dict):
         # sync_bn3d_in_conv1 = nn.SyncBatchNorm.convert_sync_batchnorm(bn3d_in_conv1)
         # model.backbone.backbone.backbone.conv1.bn3d = sync_bn3d_in_conv1
 
-        model = DDP(module=model, device_ids=[distributed_rank()],)
+        # model = DDP(module=model, device_ids=[distributed_rank()], find_unused_parameters=True)
+        model = DDP(module=model, device_ids=[distributed_rank()])
 
     multi_checkpoint = "MULTI_CHECKPOINT" in config and config["MULTI_CHECKPOINT"]
     use_checkpoint = "USE_CHECKPOINT" in config and config["USE_CHECKPOINT"]
@@ -332,6 +333,10 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             loss = loss / accumulation_steps
             loss.backward()
 
+            for name, p in model.module.named_parameters():
+                if p.requires_grad and p.grad is None:
+                    print("NO GRAD:", name)
+        
             if (i + 1) % accumulation_steps == 0:
                 if max_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)

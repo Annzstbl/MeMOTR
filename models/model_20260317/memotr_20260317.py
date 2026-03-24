@@ -83,10 +83,11 @@ class MeMOTR20260317(MeMOTR20260310):
         self.scem_module = scem_module
         
         # GroupNorm for SCEM enhanced features
-        self.scem_norms = nn.ModuleList([
-            nn.GroupNorm(num_groups=32, num_channels=self.hidden_dim)
-            for _ in range(self.n_feature_levels)
-        ])
+        # 转到scem_module中运行
+        # self.scem_norms = nn.ModuleList([
+        #     nn.GroupNorm(num_groups=32, num_channels=self.hidden_dim)
+        #     for _ in range(self.n_feature_levels)
+        # ])
 
         assert self.n_feature_levels > 1
         n_backbone_inter_layers = backbone.n_inter_layers()
@@ -205,7 +206,9 @@ class MeMOTR20260317(MeMOTR20260310):
 
         prior_map = self.get_prior_map(tracks=tracks, gmcs=gmc, frame=frame)
 
-        (feat_enhanced, specs), (evidence_tokens, evidence_tokens_spectral_part), (global_token, global_token_spectral_part), (gamma, log_mix, spectral_dict) = self.scem_module(srcs, masks, prior_map=prior_map, specs=spectral_weights)
+
+        # 更新srcs和spectral_weights
+        (srcs, spectral_weights), (evidence_tokens, evidence_tokens_spectral_part), (global_token, global_token_spectral_part), (gamma, log_mix, spectral_dict) = self.scem_module(srcs, masks, prior_map=prior_map, specs=spectral_weights)
 
         additional_pos_embeds = [pos.unsqueeze(0).expand(srcs[0].shape[0], -1, -1).to(srcs[0].device) for pos in self.evidence_token_pos_embed]
 

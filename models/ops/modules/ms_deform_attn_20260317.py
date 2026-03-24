@@ -175,11 +175,10 @@ class MSDeformAttn20260317(nn.Module):
         output_add = torch.einsum('nqha,nahd->nqhd', attention_weights_to_add, add_value).reshape(N, Len_q, self.d_model)
 
         add_output = torch.einsum('nqha, nqhd->nahd', attention_weights_to_add, value).reshape(N, Len_add, self.d_model)#[]
-        add_output = add_value.view(N, Len_add, -1) + add_output
 
 
         #==================合并输出==================
         output = output_defomrable + output_add #[B, Len_q, C]
-        output = torch.cat([output, add_output], dim=-2)#[B, Len_q + Len_add, C]
-        output = self.output_proj(output)#[B, Len_q + Len_add, C]
-        return output
+        output = self.output_proj(output)
+        add_output = self.output_proj(add_output)
+        return output, add_output

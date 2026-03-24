@@ -91,7 +91,7 @@ class PIHead20260317(PIHead20260310):
             nn.Conv2d(gate_hidden_ch, self.spec_channels, 1, 1, 0),
         )
         self.out = nn.Conv2d(self.spec_channels, 1, 3, 1, 1, bias=False)
-        self.enhance_alpha = nn.Parameter(torch.tensor(1.0))
+        # self.enhance_alpha = nn.Parameter(torch.tensor(1.0))
 
         # 光谱相似度
         if self.spectral_type == "pi":
@@ -165,12 +165,12 @@ class MixBGFG20260317(MixBGFG20260310):
 
         self.prior_mode = prior_mode.lower()
         assert self.prior_mode == "gate"
-        self.gate_head = nn.Sequential(
-            nn.Conv2d(ch + 1, ch // 2, 3, 1, 1),
-            GN(ch // 2),
-            nn.SiLU(),
-            nn.Conv2d(ch // 2, 1, 1, 1, 0),
-        )
+        # self.gate_head = nn.Sequential(
+        #     nn.Conv2d(ch + 1, ch // 2, 3, 1, 1),
+        #     GN(ch // 2),
+        #     nn.SiLU(),
+        #     nn.Conv2d(ch // 2, 1, 1, 1, 0),
+        # )
 
     @override
     def forward(self, Z, pad_mask, interval_width: float = 1.0, prior_map = None, spec=None):
