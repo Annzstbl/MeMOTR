@@ -25,6 +25,7 @@ from log.logger import Logger, ProgressLogger
 from log.log import MetricLog
 from models.utils import load_pretrained_model
 from utils.vis_val import visualize_validation_metrics
+from utils.vis_train_loss import visualize_train_loss
 
 
 def train(config: dict):
@@ -205,20 +206,36 @@ def train(config: dict):
     train_logger.write(head=f"训练结束 End Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", filename="log.txt", mode="a")
     train_logger.show(head=f"训练结束 End Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
     
-    # 训练结束后可视化验证指标
+    # 训练结束后可视化训练损失和验证指标
     if is_main_process():
+        train_log_file = os.path.join(config["OUTPUTS_DIR"], "train", "log.txt")
+        train_loss_fig_dir = os.path.join(config["OUTPUTS_DIR"], "train", "fig_loss")
+
         try:
-            train_logger.show(head="开始生成验证指标可视化...")
-            best_result = visualize_validation_metrics(
-                val_root_path=config["OUTPUTS_DIR"],
-                fig_path=os.path.join(config["OUTPUTS_DIR"], 'fig')
+            train_logger.show(head="开始生成训练损失可视化...")
+            visualize_train_loss(
+                log_file=train_log_file,
+                output_dir=train_loss_fig_dir
             )
-            if best_result:
-                train_logger.show(head=f"最佳组合分数: Epoch {best_result['epoch']}, "
-                                     f"Combined Score: {best_result['combined_score']:.4f}")
-            train_logger.show(head="验证指标可视化完成")
+            train_logger.show(head="训练损失可视化完成")
         except Exception as e:
-            train_logger.show(head=f"验证指标可视化失败: {str(e)}")
+            train_logger.show(head=f"训练损失可视化失败: {str(e)}")
+
+        if not config["ONLY_TRAIN_DETR"]:
+            try:
+                train_logger.show(head="开始生成验证指标可视化...")
+                best_result = visualize_validation_metrics(
+                    val_root_path=config["OUTPUTS_DIR"],
+                    fig_path=os.path.join(config["OUTPUTS_DIR"], 'fig')
+                )
+                if best_result:
+                    train_logger.show(head=f"最佳组合分数: Epoch {best_result['epoch']}, "
+                                         f"Combined Score: {best_result['combined_score']:.4f}")
+                train_logger.show(head="验证指标可视化完成")
+            except Exception as e:
+                train_logger.show(head=f"验证指标可视化失败: {str(e)}")
+        else:
+            train_logger.show(head="ONLY_TRAIN_DETR=True，跳过 visualize_validation_metrics")
     
     return
 

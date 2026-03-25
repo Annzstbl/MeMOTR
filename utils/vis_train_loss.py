@@ -32,6 +32,40 @@ sns.set_style("whitegrid")
 sns.set_palette("husl")
 
 
+VALIDATION_METRICS = [
+    ('precision', 'P'),
+    ('recall', 'R'),
+    ('map50', 'mAP@.5'),
+    ('map50_95', 'mAP@.5:.95'),
+]
+
+
+def _append_validation_block(data, epoch, block_rows):
+    """将一次验证结果块追加到数据结构中，并自动对齐各类别长度。"""
+    if epoch is None or not block_rows:
+        return
+
+    validation_data = data['validation']
+    existing_epochs = validation_data['epochs']
+    current_len = len(existing_epochs)
+
+    # 同一epoch如果重复出现，仅保留第一次，避免重复绘图
+    if epoch in existing_epochs:
+        return
+
+    validation_data['epochs'].append(epoch)
+
+    all_classes = set(validation_data['metrics'].keys()) | set(block_rows.keys())
+    for class_name in all_classes:
+        class_metrics = validation_data['metrics'][class_name]
+        for metric_key, _ in VALIDATION_METRICS:
+            while len(class_metrics[metric_key]) < current_len:
+                class_metrics[metric_key].append(None)
+            class_metrics[metric_key].append(
+                block_rows.get(class_name, {}).get(metric_key)
+            )
+
+
 def parse_log_file(log_file):
     """
     解析训练日志文件，提取所有损失值
@@ -108,26 +142,67 @@ def parse_log_file(log_file):
         'layer_losses': defaultdict(lambda: defaultdict(list)),  # 各layer损失
         'class_losses': defaultdict(lambda: defaultdict(lambda: defaultdict(list))),  # 按类别损失
         'scem_losses': defaultdict(list),  # SCEM相关损失
+        'validation': {
+            'epochs': [],
+            'metrics': defaultdict(lambda: defaultdict(list)),
+        },  # 验证集指标
     }
-    
+
+    float_pattern = r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?'
+    validation_row_pattern = re.compile(
+        rf'^\s*([A-Za-z0-9_.-]+)\s+(\d+)\s+(\d+)\s+({float_pattern})\s+({float_pattern})\s+({float_pattern})\s+({float_pattern})\s*$'
+    )
+    in_validation_block = False
+    current_validation_rows = {}
+    last_completed_epoch = None
+
     # 第二步：解析数据，使用预先计算的offset
     for line in lines[start_line_idx:]:
         line = line.strip()
         if not line:
+            if in_validation_block:
+                _append_validation_block(data, last_completed_epoch, current_validation_rows)
+                current_validation_rows = {}
+                in_validation_block = False
             continue
-        
-        # 跳过Epoch结束的汇总行：--[Epoch: X, Total Time: ...]
-        if re.match(r'--\[Epoch:\s*\d+,\s*Total Time:', line):
+
+        # 解析验证结果表头
+        if line.startswith('Validation Results:'):
+            in_validation_block = True
+            current_validation_rows = {}
             continue
-        
+
+        # 解析验证结果表格内容
+        if in_validation_block:
+            validation_match = validation_row_pattern.match(line)
+            if validation_match:
+                class_name = validation_match.group(1)
+                current_validation_rows[class_name] = {
+                    'precision': float(validation_match.group(4)),
+                    'recall': float(validation_match.group(5)),
+                    'map50': float(validation_match.group(6)),
+                    'map50_95': float(validation_match.group(7)),
+                }
+                continue
+
+            _append_validation_block(data, last_completed_epoch, current_validation_rows)
+            current_validation_rows = {}
+            in_validation_block = False
+
+        # 记录Epoch结束的汇总行，用于关联后续验证结果
+        epoch_summary_match = re.match(r'--\[Epoch:\s*(\d+),\s*Total Time:', line)
+        if epoch_summary_match:
+            last_completed_epoch = int(epoch_summary_match.group(1))
+            continue
+
         # 跳过Epoch设置行：--Epoch=X Settings: ...
         if re.match(r'--Epoch=\d+\s+Settings:', line):
             continue
-        
+
         # 跳过学习率行：[Epoch X] lr=...
         if re.match(r'\[Epoch\s+\d+\]\s+lr=', line):
             continue
-        
+
         # 解析主损失行：--[Epoch=39, Iter=414, ...]
         main_loss_match = re.search(r'--\[Epoch=(\d+),\s*Iter=(\d+)', line)
         if main_loss_match:
@@ -226,7 +301,11 @@ def parse_log_file(log_file):
     for key in data['scem_losses']:
         while len(data['scem_losses'][key]) < n_iters:
             data['scem_losses'][key].append(None)
-    
+
+    # 如果文件在验证表格处结束，补一次写入
+    if in_validation_block:
+        _append_validation_block(data, last_completed_epoch, current_validation_rows)
+
     return data, train_count
 
 
@@ -627,6 +706,140 @@ def plot_layer5_class_losses(data, output_dir):
         print(f"Saved: layer5_class_{loss_type}_losses.png")
 
 
+def plot_validation_all_metrics(data, output_dir):
+    """绘制总类(all)在验证集上的各指标曲线。"""
+    validation_data = data['validation']
+    epochs = validation_data['epochs']
+    metrics_by_class = validation_data['metrics']
+
+    if not epochs or 'all' not in metrics_by_class:
+        print("No overall validation metrics found, skipping validation_all_metrics.png")
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+    axes = axes.flatten()
+
+    for ax, (metric_key, metric_label) in zip(axes, VALIDATION_METRICS):
+        values = metrics_by_class['all'][metric_key]
+        valid_points = [(epoch, value) for epoch, value in zip(epochs, values) if value is not None]
+        if not valid_points:
+            ax.axis('off')
+            continue
+
+        plot_epochs = [epoch for epoch, _ in valid_points]
+        plot_values = [value for _, value in valid_points]
+        ax.plot(plot_epochs, plot_values, marker='o', linewidth=2, label=metric_label)
+        for epoch, value in valid_points:
+            ax.text(epoch, value, f'{value:.3f}', ha='center', va='bottom', fontsize=8)
+
+        ax.set_xlabel('Epoch', fontsize=10)
+        ax.set_ylabel(metric_label, fontsize=10)
+        ax.set_title(f'Validation All - {metric_label}', fontsize=12, fontweight='bold')
+        ax.set_xticks(plot_epochs)
+        ax.set_ylim(0, 1.05)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=9, loc='best')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'validation_all_metrics.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+    print("Saved: validation_all_metrics.png")
+
+
+def plot_validation_metrics_by_metric(data, output_dir):
+    """按指标分别绘制各类别验证曲线。"""
+    validation_data = data['validation']
+    epochs = validation_data['epochs']
+    metrics_by_class = validation_data['metrics']
+
+    if not epochs or not metrics_by_class:
+        print("No validation metrics found, skipping validation_metrics_by_metric.png")
+        return
+
+    class_names = [class_name for class_name in sorted(metrics_by_class.keys()) if class_name != 'all']
+    if not class_names:
+        print("No per-class validation metrics found, skipping validation_metrics_by_metric.png")
+        return
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    axes = axes.flatten()
+
+    for ax, (metric_key, metric_label) in zip(axes, VALIDATION_METRICS):
+        for class_name in class_names:
+            values = metrics_by_class[class_name][metric_key]
+            valid_points = [(epoch, value) for epoch, value in zip(epochs, values) if value is not None]
+            if not valid_points:
+                continue
+
+            plot_epochs = [epoch for epoch, _ in valid_points]
+            plot_values = [value for _, value in valid_points]
+            ax.plot(plot_epochs, plot_values, marker='o', linewidth=1.8, label=class_name)
+
+        ax.set_xlabel('Epoch', fontsize=10)
+        ax.set_ylabel(metric_label, fontsize=10)
+        ax.set_title(f'Validation by Class - {metric_label}', fontsize=12, fontweight='bold')
+        ax.set_xticks(epochs)
+        ax.set_ylim(0, 1.05)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, ncol=2, loc='best')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'validation_metrics_by_metric.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+    print("Saved: validation_metrics_by_metric.png")
+
+
+def plot_validation_metrics_by_class(data, output_dir):
+    """按类别分别绘制验证指标曲线。"""
+    validation_data = data['validation']
+    epochs = validation_data['epochs']
+    metrics_by_class = validation_data['metrics']
+
+    if not epochs or not metrics_by_class:
+        print("No validation metrics found, skipping validation_metrics_by_class.png")
+        return
+
+    class_names = [class_name for class_name in sorted(metrics_by_class.keys()) if class_name != 'all']
+    if not class_names:
+        print("No per-class validation metrics found, skipping validation_metrics_by_class.png")
+        return
+
+    n_cols = 3
+    n_rows = (len(class_names) + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 5 * n_rows))
+    if not isinstance(axes, np.ndarray):
+        axes = np.array([axes])
+    axes = axes.flatten()
+
+    for idx, class_name in enumerate(class_names):
+        ax = axes[idx]
+        for metric_key, metric_label in VALIDATION_METRICS:
+            values = metrics_by_class[class_name][metric_key]
+            valid_points = [(epoch, value) for epoch, value in zip(epochs, values) if value is not None]
+            if not valid_points:
+                continue
+
+            plot_epochs = [epoch for epoch, _ in valid_points]
+            plot_values = [value for _, value in valid_points]
+            ax.plot(plot_epochs, plot_values, marker='o', linewidth=1.8, label=metric_label)
+
+        ax.set_xlabel('Epoch', fontsize=10)
+        ax.set_ylabel('Metric', fontsize=10)
+        ax.set_title(f'Validation - {class_name}', fontsize=11, fontweight='bold')
+        ax.set_xticks(epochs)
+        ax.set_ylim(0, 1.05)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8, loc='best')
+
+    for idx in range(len(class_names), len(axes)):
+        axes[idx].axis('off')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'validation_metrics_by_class.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+    print("Saved: validation_metrics_by_class.png")
+
+
 def visualize_train_loss(log_file, output_dir):
     """
     可视化训练损失
@@ -642,6 +855,8 @@ def visualize_train_loss(log_file, output_dir):
     print(f"Main losses: {list(data['main_losses'].keys())}")
     print(f"Layers: {list(data['layer_losses'].keys())}")
     print(f"SCEM losses: {list(data['scem_losses'].keys())}")
+    print(f"Validation epochs: {data['validation']['epochs']}")
+    print(f"Validation classes: {list(data['validation']['metrics'].keys())}")
     
     os.makedirs(output_dir, exist_ok=True)
     
@@ -652,6 +867,9 @@ def visualize_train_loss(log_file, output_dir):
     plot_layer_comparison(data, output_dir)
     plot_class_losses_curves(data, output_dir)
     plot_layer5_class_losses(data, output_dir)
+    plot_validation_all_metrics(data, output_dir)
+    plot_validation_metrics_by_metric(data, output_dir)
+    plot_validation_metrics_by_class(data, output_dir)
     
     print(f"\nAll visualizations saved to: {output_dir}")
 

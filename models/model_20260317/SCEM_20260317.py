@@ -90,7 +90,7 @@ class PIHead20260317(PIHead20260310):
             nn.SiLU(inplace=False),
             nn.Conv2d(gate_hidden_ch, self.spec_channels, 1, 1, 0),
         )
-        self.out = nn.Conv2d(self.spec_channels, 1, 3, 1, 1, bias=False)
+        self.out = nn.Conv2d(self.spec_channels, 1, 1, 1, 0, bias=False)
         # self.enhance_alpha = nn.Parameter(torch.tensor(1.0))
 
         # 光谱相似度
@@ -124,7 +124,7 @@ class PIHead20260317(PIHead20260310):
 
         f_spec = _zero_invalid(self.specpi(spec), pad_mask) #[B, spec_channels, H, W]
         w = torch.softmax(self.space_to_spec_gate(f_space), dim=1)
-        e_k = w * f_spec# [B, ch, H, W]
+        e_k = (1 + w) * f_spec# [B, ch, H, W]
 
         pi = torch.sigmoid(self.out(e_k))#[B, 1, H, W]
 
