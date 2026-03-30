@@ -350,7 +350,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             loss = loss / accumulation_steps
             loss.backward()
 
-            for name, p in model.module.named_parameters():
+            for name, p in get_model(model).named_parameters():
                 if p.requires_grad and p.grad is None:
                     print("NO GRAD:", name)
         

@@ -18,14 +18,12 @@ def build_model(config: dict):
 
     if version == "old":
         model = build_memotr(config=config)
-    elif version == "20260310":
-        module = importlib.import_module(".model_20260310.memotr_20260310", package=__name__)
-        model = module.build(config=config)
-    elif version == "20260317":
-        module = importlib.import_module(".model_20260317.memotr_20260317", package=__name__)
-        model = module.build(config=config)
     else:
-        raise ValueError(f"Unknown MEMOTR_VERSION='{version}', expected 'old' or '20260310'.")
+        try:
+            version_model = importlib.import_module(f".model_{version}.memotr_{version}", package=__name__)
+        except ImportError:
+            raise ValueError(f"Unknown MEMOTR_VERSION='{version}'")
+        model = version_model.build(config=config) 
 
     if config["AVAILABLE_GPUS"] is not None and config["DEVICE"] == "cuda":
         model.to(device=torch.device(config["DEVICE"], distributed_rank()))
