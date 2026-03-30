@@ -131,7 +131,7 @@ def pos_to_pos_embed_rotated(pos, num_pos_feats: int = 64, temperature: int = 10
 def load_pretrained_model(model: nn.Module, pretrained_path: str, show_details: bool = False, logger = None):
     if not is_main_process():
         return model
-    pretrained_checkpoint = torch.load(pretrained_path, map_location=lambda storage, loc: storage)
+    pretrained_checkpoint = torch.load(pretrained_path, map_location=lambda storage, loc: storage, weights_only=False)
     pretrained_state_dict = pretrained_checkpoint["model"]
     model_state_dict = model.state_dict()
 

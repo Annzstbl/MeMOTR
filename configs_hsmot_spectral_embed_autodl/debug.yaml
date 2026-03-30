@@ -1,0 +1,71 @@
+PROJECT: "20260317模型第一次训练"
+
+PARENT_CONFIG: ./default_autodl.yaml
+
+AVAILABLE_GPUS:  "0" #if not set, will use all gpus
+
+USE_CHECKPOINT: False
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 5
+CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
+                                  # As the number increases (from 1 to 4), the memory cost increases.
+                                  # We have deleted many comments in this official code simplicity,
+                                  # if you have any questions, feel free to contact with the author.
+SAMPLE_LENGTHS: [1,1,1,1]
+
+
+ENCODER_SPECTRAL: True
+
+
+SCEM:
+  ENABLE: True
+  USE_GT: False
+  PRIOR_MODE: gate
+  USE_SPECTRAL_PI: True
+  SPECTRAL_DATABASE_NUM: 64
+  SPECTRAL_TYPE: "pi"
+
+LOSS_SCEM_NLL: 1
+LOSS_SCEM_BCE: 1
+LOSS_SCEM_DICE: 1
+LOSS_NLL_CONFIG:
+  TYPE: focal # focal or mean
+  ALPHA_POS: 1.0
+  ALPHA_NEG: 0.1
+  GAMMA_POS: 2.0
+  GAMMA_NEG: 0.0
+
+ONLY_TRAIN_DETR: True
+
+BATCH_SIZE: 3
+EPOCHS: 40
+
+EDGE_SWAP: True
+
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [12, 24]
+
+
+TRANSFORMS_CONFIG:
+  CROP_SIZE:
+    - 1200
+    - 1200
+  FLIP_RATIO: 0.5
+  RESIZE:
+    # - 880
+    # - 960
+    # - 1040
+    # - 1120
+    - 1200
+    # - 1280
+
+
+STEM: conv3d_se_v4
+
+MEMOTR_VERSION: '20260317'
+DATASET_TYPE: 3JPG
+TRAIN_HALF: False
+SAVE_CHECKPOINT: False
+DATASET_VERSION: OnePic
+
+# cd /data/users/litianhao/hsmot_code/MeMOTR
+# python -m torch.distributed.run --nproc_per_node=1 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260317_detr.yaml
