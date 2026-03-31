@@ -208,7 +208,7 @@ class MeMOTR20260317(MeMOTR20260310):
 
 
         # 更新srcs和spectral_weights
-        (srcs, spectral_weights), (evidence_tokens, evidence_tokens_spectral_part), (global_token, global_token_spectral_part), (gamma, log_mix, spectral_dict) = self.scem_module(srcs, masks, prior_map=prior_map, specs=spectral_weights)
+        (srcs, spectral_weights), (evidence_tokens, evidence_tokens_spectral_part), (global_token, global_token_spectral_part), (gamma, log_mix, spectral_dict), _ = self.scem_module(srcs, masks, prior_map=prior_map, specs=spectral_weights)
 
         additional_pos_embeds = [pos.unsqueeze(0).expand(srcs[0].shape[0], -1, -1).to(srcs[0].device) for pos in self.evidence_token_pos_embed]
 

@@ -14,4 +14,16 @@ exps/
 build/
 *.egg
 *.egg-info
-debug/
+# Ignore specific contents under any debug directory
+**/debug/**/*csv*/
+**/debug/**/*map*/
+**/debug/**/*.csv
+**/debug/**/*.jpg
+**/debug/**/*.jpeg
+**/debug/**/*.png
+**/debug/**/*.bmp
+**/debug/**/*.gif
+**/debug/**/*.webp
+**/debug/**/*.tif
+**/debug/**/*.tiff
+**/debug/no_git

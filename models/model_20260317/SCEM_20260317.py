@@ -191,7 +191,7 @@ class MixBGFG20260317(MixBGFG20260310):
 
 
         # π 先验：将 pad_mask 传入 PIHead / CoordConv，使坐标只在有效区域内为 [-1,1]
-        pi_net, spectral_evidence = self.pi_head(x, spec, pad_mask)   # [B,1,H,W]
+        pi_net, spectral_evidence = self.pi_head(x, spec, pad_mask)   # [B,1,H,W],  [B, K, H, W]
         pi = pi_net.clamp(1e-6, 1 - 1e-6)
 
 
@@ -523,16 +523,18 @@ class SCEM20260317(SCEM20260310):
         evidence_tokens_spectral_part = []
         top_idx_list = []
         assign_list = []
+        A_list = []
 
         spectral_dict = out["spectral_dict"]#[K, 8]
         token_nums = [8, 4, 2, 1]
         for i, (feat, token_num) in enumerate(zip(features, token_nums)):
-            tokens, top_idx, assign = self.build_evidence_tokens(feat, spectral_evidence_multilevel[i], top_m=token_num, mask=masks[i])
+            tokens, top_idx, assign, A = self.build_evidence_tokens(feat, spectral_evidence_multilevel[i], top_m=token_num, mask=masks[i])
             spectral_part = spectral_dict[top_idx] #[K, 8] + [B, token_num] 高级索引->[B, token_num, 8]
             evidence_tokens_spectral_part.append(spectral_part)
             evidence_tokens.append(tokens)
             top_idx_list.append(top_idx)
             assign_list.append(assign)
+            A_list.append(A)
         
         # 构造global token
         global_token = []
@@ -554,8 +556,9 @@ class SCEM20260317(SCEM20260310):
         # gamma: [B,1,H0,W0]
         # log_mix: [B,1,H0,W0]
         # spectral_dict: [K, 8]
+        # top_idx_list: n_feature_levels * [(B, top_m)]
         
-        return (feat_enhanced, specs), (evidence_tokens, evidence_tokens_spectral_part), (global_token, global_token_spectral_part), (gamma, out['log_mix'], spectral_dict)
+        return (feat_enhanced, specs), (evidence_tokens, evidence_tokens_spectral_part), (global_token, global_token_spectral_part), (gamma, out['log_mix'], spectral_dict), (top_idx_list, assign_list, A_list)
         
 
 
@@ -625,7 +628,7 @@ class SCEM20260317(SCEM20260310):
         A = A / (A.sum(dim=(2, 3), keepdim=True) + eps)
         tokens = torch.einsum("bchw, bmhw->bmc", feat, A)
 
-        return tokens, top_idx, assign
+        return tokens, top_idx, assign, A
 
 
 
