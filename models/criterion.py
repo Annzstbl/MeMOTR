@@ -12,6 +12,7 @@
 import torch
 import copy
 import math
+import re
 
 import torch.nn.functional as F
 import torch.distributed
@@ -149,6 +150,8 @@ class ClipCriterion:
             self.loss["scem_nll_loss"] = torch.zeros(()).to(self.device)
             self.loss["scem_bce_loss"] = torch.zeros(()).to(self.device)
             self.loss["scem_dice_loss"] = torch.zeros(()).to(self.device)
+            self.loss["scem_pool_div_loss"] = torch.zeros(()).to(self.device)
+            self.loss["scem_gamma_cover_loss"] = torch.zeros(()).to(self.device)
 
         return
 
@@ -174,15 +177,39 @@ class ClipCriterion:
                 return self.weight["scem_bce_loss"]
             elif "scem_dice_loss" in loss_name:
                 return self.weight["scem_dice_loss"]
+            elif "scem_pool_div_loss" in loss_name:
+                return self.weight["scem_pool_div_loss"]
+            elif "scem_gamma_cover_loss" in loss_name:
+                return self.weight["scem_gamma_cover_loss"]
+            return 0.0
 
-        #== 预处理：当kl权重为0时，不再显示spectral_kl_loss
-        if get_weight("spectral_kl_loss") == 0:
-            pop_keys_log = [k for k in log_dict if "spectral_kl_loss" in k]
-            pop_keys_loss = [k for k in loss_dict if "spectral_kl_loss" in k]
-            for k in pop_keys_log:
-                log_dict.pop(k)
-            for k in pop_keys_loss:
-                loss_dict.pop(k)
+        def _frame_log_pattern_for_loss_key(loss_key: str):
+            """与 process_single_frame 里 self.log 的命名规则一致。"""
+            if "spectral_kl" in loss_key:
+                return re.compile(r"^frame\d+_spectral_kl_loss$")
+            if "scem_" in loss_key:
+                return re.compile(rf"^frame\d+_{re.escape(loss_key)}$")
+            if "spectral_decoder_mse" in loss_key:
+                return re.compile(r"^frame\d+_(?:aux_layer\d+_)?spectral_decoder_mse_loss$")
+            if "box_l1" in loss_key:
+                return re.compile(r"^frame\d+_(?:aux_layer\d+_)?box_l1_loss(?:_class_\d+)?$")
+            if "box_giou" in loss_key:
+                return re.compile(r"^frame\d+_(?:aux_layer\d+_)?box_giou_loss(?:_class_\d+)?$")
+            if "label_focal" in loss_key:
+                return re.compile(r"^frame\d+_(?:aux_layer\d+_)?label_focal_loss$")
+            return None
+
+        # 任一损失权重为 0 时，从 loss_dict / log_dict 中去掉该项（不参与加权求和、日志也不显示）
+        for lk in list(loss_dict.keys()):
+            if get_weight(lk) != 0:
+                continue
+            loss_dict.pop(lk, None)
+            pat = _frame_log_pattern_for_loss_key(lk)
+            if pat is None:
+                continue
+            for gk in list(log_dict.keys()):
+                if pat.match(gk):
+                    log_dict.pop(gk, None)
 
         loss = sum([
             get_weight(k) * v for k, v in loss_dict.items()
@@ -561,6 +588,19 @@ class ClipCriterion:
             self.log[f"frame{frame_idx}_scem_nll_loss"] = scem_nll_loss.item()
             self.log[f"frame{frame_idx}_scem_dice_loss"] = scem_dice_loss.item()
 
+            aux = model_outputs.get("scem_aux_losses")
+            if isinstance(aux, dict):
+                lp = aux.get("loss_pool_div")
+                lg = aux.get("loss_gamma_cover")
+                if torch.is_tensor(lp):
+                    scem_pool_div_loss = lp
+                    self.loss["scem_pool_div_loss"] += scem_pool_div_loss * self.frame_weights[frame_idx]
+                    self.log[f"frame{frame_idx}_scem_pool_div_loss"] = scem_pool_div_loss.item()
+                if torch.is_tensor(lg):
+                    scem_gamma_cover_loss = lg
+                    self.loss["scem_gamma_cover_loss"] += scem_gamma_cover_loss * self.frame_weights[frame_idx]
+                    self.log[f"frame{frame_idx}_scem_gamma_cover_loss"] = scem_gamma_cover_loss.item()
+
 
         return tracked_instances, new_trackinstances, unmatched_detections
 
@@ -808,6 +848,8 @@ def build(config: dict):
             "scem_nll_loss": config["LOSS_SCEM_NLL"],
             "scem_bce_loss": config["LOSS_SCEM_BCE"],
             "scem_dice_loss": config["LOSS_SCEM_DICE"],
+            "scem_pool_div_loss": config.get("LOSS_SCEM_POOL_DIV"),
+            "scem_gamma_cover_loss": config.get("LOSS_SCEM_GAMMA_COVER"),
         },
         max_frame_length=max(config["SAMPLE_LENGTHS"]),
         n_aux=config["NUM_DEC_LAYERS"]-1,

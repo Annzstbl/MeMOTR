@@ -125,6 +125,9 @@ LOSS_SPECTRAL_DECODER_MSE: -1
 LOSS_SCEM_NLL: -1
 LOSS_SCEM_BCE: -1
 LOSS_SCEM_DICE: -1
+# SCEM 辅助：token 空间分布多样性、与 gamma 覆盖对齐（权重为 0 时不参与总损失）
+LOSS_SCEM_POOL_DIV: 0
+LOSS_SCEM_GAMMA_COVER: 0
 LOSS_NLL_CONFIG:
   TYPE: mean # focal or mean
 

@@ -166,10 +166,7 @@ class MeMOTR(nn.Module):
         else:
             gamma, log_mix, spectral_dict = tail
             scem_aux_losses = None
-        if scem_token_debug is not None and isinstance(scem_token_debug, dict):
-            aux_from_dbg = scem_token_debug.get("scem_aux_losses")
-            if aux_from_dbg is not None:
-                scem_aux_losses = aux_from_dbg
+
 
         additional_pos_embeds = [p.unsqueeze(0).expand(srcs[0].shape[0], -1, -1).to(srcs[0].device) for p in self.evidence_token_pos_embed]
         additional_tokens = [torch.cat((evi_token, global_tok.unsqueeze(1)), dim=1) for evi_token, global_tok in zip(evidence_tokens, global_token)]
