@@ -1,8 +1,12 @@
+PROJECT: "20260330模型第一次训练"
+OUTPUTS_DIR:  /root/autodl-fs/workdir/20260330
+SUBMIT_DIR: /root/autodl-fs/workdir/20260330
 
 
-AVAILABLE_GPUS: "6,7"
 
-PARENT_CONFIG: ./default.yaml
+AVAILABLE_GPUS: "0"
+
+PARENT_CONFIG: ../../configs_hsmot_spectral_embed_197/default.yaml
 
 USE_CHECKPOINT: False
 DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
@@ -14,18 +18,9 @@ SAMPLE_LENGTHS: [1,1,1,1]
 
 
 ENCODER_SPECTRAL: True
-# ENCODER_GLOBAL_TOKEN: False
-# ROPE_POS: False
+
 TRAIN_HALF: True
-# VID_WHITE_LIST: ["data39-4"]
-# resume
-# RESUME: /data4/litianhao/hsmot/memotr/spectralemb/12_global/checkpoint_19.pth
-# RESUME_SCHEDULER: True
-# PRETRAINED_MODEL: 
-# EPOCHS: 25
-# ONLY_TRAIN_QUERY_UPDATER_AFTER: 20
-# LR_DROP_RATE: 0.1
-# LR_DROP_MILESTONES: [12]
+
 
 ONLY_TRAIN_DETR: True
 
@@ -37,23 +32,22 @@ EDGE_SWAP: True
 LR_DROP_RATE: 0.1
 LR_DROP_MILESTONES: [12, 24]
 
-# PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/14_train_half/checkpoint_19.pth
 
 # DATASET_VERSION: OnePic
 
-
 TRANSFORMS_CONFIG:
   CROP_SIZE:
-    - 1200
+    - 800
     - 1200
   FLIP_RATIO: 0.5
   RESIZE:
-    # - 880
-    # - 960
-    # - 1040
-    # - 1120
+    - 880
+    - 960
+    - 1040
+    - 1120
     - 1200
-    # - 1280
+    - 1280
+
 
 
 SCEM:
@@ -75,8 +69,11 @@ LOSS_NLL_CONFIG:
   GAMMA_NEG: 0.0
 
 
-SAVE_CHECKPOINT: False
+SAVE_CHECKPOINT: True
 
 STEM: conv3d_se_v4
 
 MEMOTR_VERSION: '20260330'
+DATASET_TYPE: 3JPG
+# python -m torch.distributed.run --nproc_per_node=1 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /root/hsmot/MeMOTR/configs_hsmot_spectral_embed_autodl/20260330.yaml
+# python main.py --config-path /root/hsmot/MeMOTR/configs_hsmot_spectral_embed_autodl/20260330.yaml

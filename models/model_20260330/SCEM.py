@@ -3,53 +3,201 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from ..model_20260310.SCEM_20260310 import ASPP as ASPP20260310
-from ..model_20260310.SCEM_20260310 import BGHead as BGHead20260310
-from ..model_20260310.SCEM_20260310 import CenterMaskedConv3x3 as CenterMaskedConv3x3Base20260310
-from ..model_20260310.SCEM_20260310 import CoordConv as CoordConv20260310
-from ..model_20260310.SCEM_20260310 import GDN
-from ..model_20260310.SCEM_20260310 import GN
-from ..model_20260310.SCEM_20260310 import MixBGFG as MixBGFG20260310
-from ..model_20260310.SCEM_20260310 import PIHead as PIHead20260310
-from ..model_20260310.SCEM_20260310 import SCEM as SCEM20260310
-from ..model_20260310.SCEM_20260310 import SpectralGraphDictionaryPrior as SpectralGraphDictionaryPrior20260310
-from ..model_20260310.SCEM_20260310 import SpectralManifold as SpectralManifold20260310
-from ..model_20260310.SCEM_20260310 import SpectralPi as SpectralPi20260310
-from ..model_20260310.SCEM_20260310 import _zero_invalid
+from torch.distributions import Normal
+from models.GDN import GDN
 from typing_extensions import override
 
-class CoordConv20260317(CoordConv20260310):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+def _log_sigma_from_raw(raw_log_sigma: torch.Tensor, eps: float = 1e-4):
+    return torch.log(F.softplus(raw_log_sigma) + eps)
 
 
-class CenterMaskedConv3x3_20260317(CenterMaskedConv3x3Base20260310):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+def GN(ch, num_groups=32):
+    return nn.GroupNorm(min(num_groups, ch), ch)
 
 
-class ASPP20260317(ASPP20260310):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+def _zero_invalid(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    if mask.dim() == 3:
+        mask = mask.unsqueeze(1)
+    elif not (mask.dim() == 4 and mask.size(1) == 1):
+        raise ValueError(f"mask shape should be [B,H,W] or [B,1,H,W], got {mask.shape}")
+    valid = (~mask).to(dtype=x.dtype)
+    return x * valid
 
 
-class SpectralManifold20260317(SpectralManifold20260310):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class CoordConv(nn.Module):
+    def __init__(self, in_ch, out_ch, k=3, s=1, p=1, use_cache=True, cache_size=8):
+        super().__init__()
+        self.conv = nn.Conv2d(in_ch + 2, out_ch, k, s, p, bias=False)
+        self.bn = GN(out_ch)
+        self.act = nn.SiLU(inplace=False)
+
+    def forward(self, x, pad_mask: torch.Tensor = None):
+        batch_size, _, height, width = x.shape
+        if pad_mask.dim() == 3:
+            pad = pad_mask.unsqueeze(1)
+        elif pad_mask.dim() == 4 and pad_mask.size(1) == 1:
+            pad = pad_mask
+        else:
+            raise ValueError(f"pad_mask shape should be [B,H,W] or [B,1,H,W], got {pad_mask.shape}")
+
+        valid = ~pad
+        row_has_valid = valid.any(dim=3).squeeze(1)
+        col_has_valid = valid.any(dim=2).squeeze(1)
+
+        h_valid = row_has_valid.sum(dim=1).view(batch_size, 1, 1).clamp(min=1)
+        w_valid = col_has_valid.sum(dim=1).view(batch_size, 1, 1).clamp(min=1)
+
+        yy = torch.arange(height, device=x.device, dtype=x.dtype).view(1, height, 1).expand(batch_size, height, width)
+        xx = torch.arange(width, device=x.device, dtype=x.dtype).view(1, 1, width).expand(batch_size, height, width)
+
+        yy_max = (h_valid - 1).clamp(min=0)
+        xx_max = (w_valid - 1).clamp(min=0)
+        yy = torch.minimum(yy, yy_max)
+        xx = torch.minimum(xx, xx_max)
+
+        den_h = (h_valid - 1).clamp(min=1)
+        den_w = (w_valid - 1).clamp(min=1)
+        yy = (yy / den_h) * 2.0 - 1.0
+        xx = (xx / den_w) * 2.0 - 1.0
+
+        cc = torch.stack([xx, yy], dim=1)
+        x = torch.cat([x, cc], dim=1)
+        return self.act(self.bn(self.conv(x)))
 
 
-class SpectralPi20260317(SpectralPi20260310):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class CenterMaskedConv3x3(nn.Module):
+    def __init__(self, ch: int):
+        super().__init__()
+        self.conv = nn.Conv2d(ch, ch, kernel_size=3, stride=1, padding=1, groups=ch, bias=False)
+        mask = torch.ones(3, 3)
+        mask[1, 1] = 0.0
+        self.register_buffer("mask", mask.view(1, 1, 3, 3))
+        self.bn = GN(ch)
+        self.act = nn.SiLU(inplace=False)
+        nn.init.kaiming_normal_(self.conv.weight, mode="fan_out", nonlinearity="relu")
+
+    def forward(self, x):
+        self.conv.weight.data = self.conv.weight.data * self.mask
+        out = self.conv(x)
+        out = self.bn(out)
+        out = self.act(out)
+        return out
 
 
-class SpectralGraphDictionaryPrior20260317(SpectralGraphDictionaryPrior20260310):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class ASPP(nn.Module):
+    def __init__(self, in_ch, out_ch, rates=(1, 2, 3, 5)):
+        super().__init__()
+        self.branches = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 3, 1, dilation=r, padding=r, bias=False),
+                GN(out_ch),
+                nn.SiLU(inplace=False),
+            )
+            for r in rates
+        ])
+        self.proj = nn.Sequential(
+            nn.Conv2d(out_ch * len(rates), out_ch, 1, 1, 0, bias=False),
+            GN(out_ch),
+            nn.SiLU(inplace=False),
+        )
+
+    def forward(self, x):
+        ys = [m(x) for m in self.branches]
+        return self.proj(torch.cat(ys, dim=1))
 
 
-class PIHead20260317(PIHead20260310):
+class SpectralManifold(nn.Module):
+    def __init__(self, spectral_channels: int = 8, num_prototypes: int = 64, hidden_ratio: float = 2.0, eps: float = 1e-6):
+        super().__init__()
+        ch = spectral_channels
+        num_proto = num_prototypes
+        hidden = int(ch * hidden_ratio)
+        self.ch = ch
+        self.num_proto = num_proto
+        self.eps = eps
+        self.encoder = nn.Sequential(
+            nn.Conv2d(ch, hidden, 1, bias=False),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden, ch, 1, bias=False),
+        )
+        self.prototypes = nn.Parameter(torch.randn(num_proto, ch))
+        nn.init.normal_(self.prototypes, std=0.02)
+
+    def forward(self, spec):
+        _, ch, _, _ = spec.shape
+        assert ch == self.ch
+        s_enc = self.encoder(spec)
+        s_norm = s_enc - s_enc.mean(dim=1, keepdim=True)
+        s_norm = F.normalize(s_norm, dim=1)
+        proto = self.prototypes
+        proto_norm = proto - proto.mean(dim=1, keepdim=True)
+        proto_norm = F.normalize(proto_norm, dim=1)
+        sim = F.conv2d(s_norm, proto_norm.view(self.num_proto, self.ch, 1, 1))
+        weight = F.softmax(sim, dim=1)
+        recon = torch.einsum("bkhw,kc->bchw", weight, proto)
+        error = (spec - recon).pow(2).sum(dim=1, keepdim=True)
+        return torch.cat([recon, error], dim=1)
+
+
+class SpectralPi(nn.Module):
+    def __init__(self, spectral_database_num=64, in_ch=8, eps=1e-6):
+        super().__init__()
+        self.K = spectral_database_num
+        self.C = in_ch
+        self.eps = eps
+        self.spectral_db_logits = nn.Parameter(torch.randn(self.K, self.C))
+
+    def forward(self, spec):
+        _, channels, _, _ = spec.shape
+        assert channels == self.C, f"SpectralPi expects {self.C} channels, got {channels}"
+        s = spec
+        mu_s = s.mean(dim=1, keepdim=True)
+        s_zero = s - mu_s
+        s_norm = s_zero / (s_zero.norm(dim=1, keepdim=True) + self.eps)
+
+        db = self.spectral_db_logits
+        mu_db = db.mean(dim=1, keepdim=True)
+        db_zero = db - mu_db
+        db_norm = db_zero / (db_zero.norm(dim=1, keepdim=True) + self.eps)
+        weight = db_norm.view(self.K, self.C, 1, 1)
+        return F.conv2d(s_norm, weight=weight, bias=None)
+
+
+class SpectralGraphDictionaryPrior(nn.Module):
+    def __init__(self, spectral_channels=8, num_prototypes=64, tau=1.0):
+        super().__init__()
+        self.C = spectral_channels
+        self.K = num_prototypes
+        self.tau = tau
+        self.prototypes = nn.Parameter(torch.randn(self.K, self.C))
+        nn.init.normal_(self.prototypes, std=0.02)
+        self.proto_obj = nn.Parameter(torch.full((self.K,), 0.0))
+
+    def diversity_loss(self):
+        p = F.normalize(self.prototypes, dim=1)
+        gram = torch.matmul(p, p.t())
+        identity = torch.eye(self.K, device=p.device)
+        return ((gram - identity) ** 2).mean()
+
+    def forward(self, spec):
+        batch_size, channels, height, width = spec.shape
+        s = spec - spec.mean(dim=1, keepdim=True)
+        s = F.normalize(s, dim=1)
+        proto = self.prototypes
+        proto_norm = proto - proto.mean(dim=1, keepdim=True)
+        proto_norm = F.normalize(proto_norm, dim=1)
+        sim = F.conv2d(s, proto_norm.view(self.K, channels, 1, 1))
+        w = F.softmax(sim / self.tau, dim=1)
+        a = torch.matmul(proto_norm, proto_norm.t())
+        a = F.softmax(a, dim=1)
+        w_flat = w.view(batch_size, self.K, -1)
+        w_graph = torch.matmul(a, w_flat).view(batch_size, self.K, height, width)
+        obj = self.proto_obj.view(1, self.K, 1, 1)
+        score = torch.sigmoid(obj)
+        return w_graph * score
+
+
+class PIHead(nn.Module):
     def __init__(self, in_ch, ch=128, use_cache=True, spectral_type=None, spectral_databse_num=64):
         nn.Module.__init__(self)
 
@@ -123,20 +271,41 @@ class PIHead20260317(PIHead20260310):
         f_space = _zero_invalid(f_space, pad_mask) #[B, ch, H, W]
 
         f_spec = _zero_invalid(self.specpi(spec), pad_mask) #[B, spec_channels, H, W]
-        w = torch.softmax(self.space_to_spec_gate(f_space), dim=1)
-        e_k = w * f_spec# [B, ch, H, W]
+        w = torch.softmax(self.space_to_spec_gate(f_space), dim=1) # [B, spec_channels, H, W]
+        e_k = w * f_spec# [B, ch, H, W]  
 
         pi = torch.sigmoid(self.out(e_k))#[B, 1, H, W]
 
         return pi, e_k
 
 
-class BGHead20260317(BGHead20260310):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class BGHead(nn.Module):
+    def __init__(self, in_ch, out_ch, interval_width: float = 1.0):
+        super().__init__()
+        self.interval_width = interval_width
+        self.mu_b_head = nn.Conv2d(in_ch, out_ch, 3, 1, 1, bias=False)
+        self.logsig_b_head = nn.Conv2d(in_ch, out_ch, 3, 1, 1, bias=True)
+        with torch.no_grad():
+            nn.init.zeros_(self.logsig_b_head.weight)
+            self.logsig_b_head.bias.fill_(1.313)
+
+    def forward(self, x, z):
+        mu_b = self.mu_b_head(x)
+        log_sigb = self.logsig_b_head(x)
+        return self.log_gaussian_interval(z, mu_b, log_sigb, width=self.interval_width)
+
+    def log_gaussian_interval(self, z, mu, raw_log_sigma, width: float = 1.0, eps: float = 1e-8):
+        log_sigma = _log_sigma_from_raw(raw_log_sigma)
+        sigma = torch.exp(log_sigma)
+        half = width * 0.5
+        dist = Normal(loc=mu, scale=sigma)
+        upper = dist.cdf(z + half)
+        lower = dist.cdf(z - half)
+        p = (upper - lower).clamp_min(eps)
+        return torch.log(p).sum(dim=1, keepdim=True)
 
 
-class MixBGFG20260317(MixBGFG20260310):
+class MixBGFG(nn.Module):
     '''
         与20260310相比, 想要输出的是由光谱库得到的余弦相似度类似的东西
     '''
@@ -155,8 +324,8 @@ class MixBGFG20260317(MixBGFG20260310):
             nn.SiLU(),
         )
 
-        self.bg_head = BGHead20260317(in_ch=ch, out_ch=C)
-        self.pi_head = PIHead20260317(
+        self.bg_head = BGHead(in_ch=ch, out_ch=C)
+        self.pi_head = PIHead(
             in_ch=ch,
             use_cache=use_cache,
             spectral_type=spectral_type,
@@ -218,7 +387,7 @@ class MixBGFG20260317(MixBGFG20260310):
         }
 
 
-class SCEMFeatureFusion20260317(nn.Module):
+class SCEMFeatureFusion(nn.Module):
     """
         与20260310相比，光谱通道采用 主层+残差补充的方式实现
     """
@@ -355,7 +524,7 @@ class SCEMFeatureFusion20260317(nn.Module):
         return feat, out_mask, spec
 
 
-class SCEM20260317(SCEM20260310):
+class SCEM(nn.Module):
     def __init__(self, config):
         nn.Module.__init__(self)
         self.cfg = dict(config)
@@ -367,7 +536,7 @@ class SCEM20260317(SCEM20260310):
         self.spectral_databse_num = int(self.cfg.get("SPECTRAL_DATABASE_NUM"))
         self.spectral_type = self.cfg.get("SPECTRAL_TYPE").lower()
 
-        self.posterior = MixBGFG20260317(
+        self.posterior = MixBGFG(
             C=self.in_ch,
             depth=self.depth,
             width=self.width,
@@ -377,7 +546,7 @@ class SCEM20260317(SCEM20260310):
             spectral_type=self.spectral_type,
         )
 
-        self.feature_fusion = SCEMFeatureFusion20260317(
+        self.feature_fusion = SCEMFeatureFusion(
             feat_in_channels=[256, 256, 256, 256],
             out_channels=self.in_ch,
             spec_channels=8,
@@ -439,6 +608,12 @@ class SCEM20260317(SCEM20260310):
                 nn.init.zeros_(self.spectral_evidence_resize_heads[i][-1].weight)
                 nn.init.zeros_(self.spectral_evidence_resize_heads[i][-1].bias)
 
+    @torch.no_grad()
+    def _check_masks(self, masks):
+        assert isinstance(masks, (list, tuple)) and len(masks) > 0
+        for m in masks:
+            assert m.dtype == torch.bool and m.dim() == 3, "mask should be [B,H,W] bool"
+
 
     def _resize_by_mixed_pool(self, x: torch.Tensor, out_hw, lam:float):
         H0, W0 = x.shape[-2:]
@@ -489,7 +664,14 @@ class SCEM20260317(SCEM20260310):
         return enhanced
 
     @override
-    def forward(self, features:list[torch.Tensor], masks:list[torch.Tensor], specs:list[torch.Tensor], prior_map=None):
+    def forward(
+        self,
+        features: list[torch.Tensor],
+        masks: list[torch.Tensor],
+        specs: list[torch.Tensor],
+        prior_map=None,
+        return_debug: bool = False,
+    ):
         """
         features: List[Tensor]   each [B, C_i, H_i, W_i]
         masks:    List[Bool]     each [B, H_i, W_i]  True=pad
@@ -543,6 +725,9 @@ class SCEM20260317(SCEM20260310):
         # token生成
         evidence_tokens = []
         evidence_tokens_spectral_part = []
+        debug_evidence_weights = []
+        debug_pool_weights = []
+        debug_token_feature_corr = []
 
         spectral_dict = out["spectral_dict"]#[K, 8]
         token_nums = [8, 4, 2, 1]
@@ -559,6 +744,16 @@ class SCEM20260317(SCEM20260310):
 
             pool_logits = (evidence_weights * spectral_evidence_multilevel[i].unsqueeze(1)).sum(dim=(2)) #[B, T, H, W]
 
+            # debug print
+            pl = pool_logits.detach()
+            pl_flat = pl.flatten(2)
+            print(f"pl_flat.mean(): {pl_flat.mean(dim=-1)}, pl_flat.max(): {pl_flat.max(dim=-1)}, pl_flat.mean(): {pl_flat.mean(dim=-1)}")
+            
+            evi = spectral_evidence_multilevel[i].detach()
+            evi_flat = evi.flatten(2)
+            print(f"evi_flat.mean(): {evi_flat.mean(dim=-1)}, evi_flat.max(): {evi_flat.max(dim=-1)}, evi_flat.mean(): {evi_flat.mean(dim=-1)}")    
+
+
             pool_weights = self._masked_softmax_spatial(pool_logits, mask)# [B, T, H, W]
             feat_flat = feat.flatten(2)#[B, C, HW]
             pool_weights_flat = pool_weights.flatten(2)
@@ -572,6 +767,21 @@ class SCEM20260317(SCEM20260310):
 
             evidence_tokens.append(tokens)
             evidence_tokens_spectral_part.append(spectral_part)
+
+            if return_debug:
+                debug_evidence_weights.append(evidence_weights.detach())
+                debug_pool_weights.append(pool_weights.detach())
+
+                token_corr_all_levels = []
+                for token_idx in range(tokens.shape[1]):
+                    token_vec = F.normalize(tokens[:, token_idx, :], dim=-1)  # [B, C]
+                    corr_per_level = []
+                    for feat_level in features:
+                        feat_norm = F.normalize(feat_level, dim=1)  # [B, C, H, W]
+                        corr_map = torch.einsum("bc,bchw->bhw", token_vec, feat_norm).unsqueeze(1)  # [B,1,H,W]
+                        corr_per_level.append(corr_map.detach())
+                    token_corr_all_levels.append(corr_per_level)
+                debug_token_feature_corr.append(token_corr_all_levels)
         
         # 构造global token
         global_token = []
@@ -594,6 +804,21 @@ class SCEM20260317(SCEM20260310):
         # log_mix: [B,1,H0,W0]
         # spectral_dict: [K, 8]
         
+        if return_debug:
+            debug_info = {
+                "evidence_weights": debug_evidence_weights,      # level -> [B,T,K,H,W]
+                "pool_weights": debug_pool_weights,              # level -> [B,T,H,W]
+                "token_feature_corr": debug_token_feature_corr,  # src_level -> token -> tgt_level -> [B,1,H,W]
+                "spectral_evidence_multilevel": spectral_evidence_multilevel,
+            }
+            return (
+                (feat_enhanced, specs),
+                (evidence_tokens, evidence_tokens_spectral_part),
+                (global_token, global_token_spectral_part),
+                (gamma, out['log_mix'], spectral_dict),
+                debug_info,
+            )
+
         return (feat_enhanced, specs), (evidence_tokens, evidence_tokens_spectral_part), (global_token, global_token_spectral_part), (gamma, out['log_mix'], spectral_dict)
         
 
@@ -692,19 +917,6 @@ class SCEM20260317(SCEM20260310):
 
 
 
-CoordConv = CoordConv20260317
-CenterMaskedConv3x3 = CenterMaskedConv3x3_20260317
-ASPP = ASPP20260317
-SpectralManifold = SpectralManifold20260317
-SpectralPi = SpectralPi20260317
-SpectralGraphDictionaryPrior = SpectralGraphDictionaryPrior20260317
-PIHead = PIHead20260317
-BGHead = BGHead20260317
-MixBGFG = MixBGFG20260317
-SCEMFeatureFusion = SCEMFeatureFusion20260317
-SCEM = SCEM20260317
-
-
 def build(config):
     scem_enable = config.get("ENABLE", True)
     scem_gt = config.get("USE_GT")
@@ -712,4 +924,4 @@ def build(config):
         scem_enable = False
     if not scem_enable:
         return None
-    return SCEM20260317(config)
+    return SCEM(config)

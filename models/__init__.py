@@ -20,7 +20,7 @@ def build_model(config: dict):
         model = build_memotr(config=config)
     else:
         try:
-            version_model = importlib.import_module(f".model_{version}.memotr_{version}", package=__name__)
+            version_model = importlib.import_module(f".model_{version}.memotr", package=__name__)
         except ImportError:
             raise ValueError(f"Unknown MEMOTR_VERSION='{version}'")
         model = version_model.build(config=config) 

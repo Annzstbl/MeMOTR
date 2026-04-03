@@ -1,6 +1,7 @@
 # @Author       : Ruopeng Gao
 # @Date         : 2022/7/5
 import os
+import shutil
 import time
 import torch
 from torch._C import NoneType
@@ -100,6 +101,16 @@ def train(config: dict):
 
     multi_checkpoint = "MULTI_CHECKPOINT" in config and config["MULTI_CHECKPOINT"]
     use_checkpoint = "USE_CHECKPOINT" in config and config["USE_CHECKPOINT"]
+    save_checkpoint_enabled = "SAVE_CHECKPOINT" in config and config["SAVE_CHECKPOINT"]
+    checkpoint_every_n_epochs = config["CHECKPOINT_EVERY_N_EPOCHS"] if "CHECKPOINT_EVERY_N_EPOCHS" in config else 1
+    checkpoint_tail_epochs = config["CHECKPOINT_TAIL_EPOCHS"] if "CHECKPOINT_TAIL_EPOCHS" in config else 1
+    # Backward-compatible fallback for old key.
+    evaluate_every_n_epochs = config["EVALUATE_EVERY_N_EPOCHS"] if "EVALUATE_EVERY_N_EPOCHS" in config else (
+        config["EVALUATE_PER_EPOCH"] if "EVALUATE_PER_EPOCH" in config else 0
+    )
+    evaluate_tail_epochs = config["EVALUATE_TAIL_EPOCHS"] if "EVALUATE_TAIL_EPOCHS" in config else 5
+    evaluate_force_epochs = config["EVALUATE_FORCE_EPOCHS"] if "EVALUATE_FORCE_EPOCHS" in config else []
+    evaluate_force_epochs = set(evaluate_force_epochs if evaluate_force_epochs is not None else [])
 
     # 打印config使用情况
     train_logger.show(head=f"config使用情况: {config.access_summary()}")
@@ -169,35 +180,45 @@ def train(config: dict):
         )
         scheduler.step()
         train_states["start_epoch"] += 1
+        current_epoch = epoch + 1
+        in_checkpoint_tail = checkpoint_tail_epochs > 0 and current_epoch > (config["EPOCHS"] - checkpoint_tail_epochs)
+        hit_checkpoint_interval = checkpoint_every_n_epochs > 0 and (current_epoch % checkpoint_every_n_epochs == 0)
+        should_save_epoch_checkpoint = hit_checkpoint_interval or in_checkpoint_tail
+
         if multi_checkpoint is True:
             pass
-        elif config["SAVE_CHECKPOINT"] is True:
-            if config["DATASET"] == "DanceTrack" or config["EPOCHS"] < 100 or (epoch + 1) % 5 == 0:
+        elif save_checkpoint_enabled:
+            if should_save_epoch_checkpoint:
+                checkpoint_path = os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth")
                 save_checkpoint(
                     model=model,
-                    path=os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth"),
+                    path=checkpoint_path,
                     states=train_states,
                     optimizer=optimizer,
                     scheduler=scheduler
                 )
+                shutil.copy2(checkpoint_path, os.path.join(config["OUTPUTS_DIR"], "last.pth"))
         else:
-            #只保留最后一个epoch
+            # 兼容原逻辑：关闭 SAVE_CHECKPOINT 时仍保留最后一个 epoch，并同步保存 last.pth
             if epoch == config["EPOCHS"] - 1:
+                checkpoint_path = os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth")
                 save_checkpoint(
                     model=model,
-                    path=os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth"),
+                    path=checkpoint_path,
                     states=train_states,
                     optimizer=optimizer,
                     scheduler=scheduler
                 )
-            # warning
-            train_logger.show(head="No checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml")
-            train_logger.write(head="No checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml", filename="log.txt", mode="a")
+                shutil.copy2(checkpoint_path, os.path.join(config["OUTPUTS_DIR"], "last.pth"))
+            train_logger.show(head="No periodic checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml")
+            train_logger.write(head="No periodic checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml", filename="log.txt", mode="a")
 
-        # 添加evaluate_one_epoch
-        # 在以EVALUATE_PER_EPOCH为间隔的epoch结束后进行一次验证
-        # 同时，最后5轮全部验证
-        if ("EVALUATE_PER_EPOCH" in config and config["EVALUATE_PER_EPOCH"] > 0 and (epoch+1) % config["EVALUATE_PER_EPOCH"] == 0) or (epoch >= config["EPOCHS"] - 5):
+        in_evaluate_tail = evaluate_tail_epochs > 0 and current_epoch > (config["EPOCHS"] - evaluate_tail_epochs)
+        hit_evaluate_interval = evaluate_every_n_epochs > 0 and (current_epoch % evaluate_every_n_epochs == 0)
+        hit_evaluate_force = current_epoch in evaluate_force_epochs
+
+        # 评估触发规则：固定间隔 或 尾部全评估 或 强制指定轮次
+        if hit_evaluate_interval or in_evaluate_tail or hit_evaluate_force:
             from submit_engine import submit_during_train
             submit_during_train(config=config, epoch=epoch, model=model, only_train_detr=config["ONLY_TRAIN_DETR"], train_logger=train_logger)
 
@@ -402,10 +423,12 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
             if multi_checkpoint:
                 if i % 1 == 0 and is_main_process():
+                    checkpoint_path = os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
                     save_checkpoint(
                         model=model,
-                        path=os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
+                        path=checkpoint_path
                     )
+                    shutil.copy2(checkpoint_path, os.path.join(logger.logdir[:-5], "last.pth"))
 
             train_states["global_iters"] += 1
     else:
@@ -538,10 +561,12 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
 
             if multi_checkpoint:
                 if i % 1 == 0 and is_main_process():
+                    checkpoint_path = os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
                     save_checkpoint(
                         model=model,
-                        path=os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
+                        path=checkpoint_path
                     )
+                    shutil.copy2(checkpoint_path, os.path.join(logger.logdir[:-5], "last.pth"))
 
             train_states["global_iters"] += 1
 

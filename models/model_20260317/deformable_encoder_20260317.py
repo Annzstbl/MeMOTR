@@ -1,6 +1,3 @@
-from ..model_20260310.deformable_encoder_20260310 import DeformableEncoder20260310
-from ..model_20260310.deformable_encoder_20260310 import DeformableEncoderLayer20260310
-
 import torch
 import torch.nn as nn
 
@@ -9,9 +6,28 @@ from torch.utils.checkpoint import checkpoint
 from ..ops.modules import MSDeformAttn20260317
 from ..utils import get_activation_layer, get_clones
 
-class DeformableEncoder20260317(DeformableEncoder20260310):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class DeformableEncoder20260317(nn.Module):
+    def __init__(self, encoder_layer, num_layers, use_checkpoint: bool):
+        super().__init__()
+        self.layers = get_clones(module=encoder_layer, n=num_layers)
+        self.num_layers = num_layers
+        self.use_checkpoint = use_checkpoint
+
+    @staticmethod
+    def get_reference_points(spatial_shapes, valid_ratios, device):
+        reference_points_list = []
+        for lvl, (height, width) in enumerate(spatial_shapes):
+            ref_y, ref_x = torch.meshgrid(
+                torch.linspace(0.5, height - 0.5, height, dtype=torch.float32, device=device),
+                torch.linspace(0.5, width - 0.5, width, dtype=torch.float32, device=device),
+            )
+            ref_y = ref_y.reshape(-1)[None] / (valid_ratios[:, None, lvl, 1] * height)
+            ref_x = ref_x.reshape(-1)[None] / (valid_ratios[:, None, lvl, 0] * width)
+            ref = torch.stack((ref_x, ref_y), -1)
+            reference_points_list.append(ref)
+        reference_points = torch.cat(reference_points_list, 1)
+        reference_points = reference_points[:, :, None] * valid_ratios[:, None]
+        return reference_points
 
 
     def forward(
@@ -29,7 +45,7 @@ class DeformableEncoder20260317(DeformableEncoder20260310):
         add_level_start_index=None,
     ):
         """
-        Args 与 DeformableEncoderLayer20260310.forward 对齐，除了 src/pos 等外，
+        Args 与 DeformableEncoderLayer20260317.forward 对齐，除了 src/pos 等外，
         还需要接收先验 token 相关的张量，并在每一层中使用。
         """
         output = src

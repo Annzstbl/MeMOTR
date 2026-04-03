@@ -87,16 +87,14 @@ class CenterMaskedConv3x3(nn.Module):
 class ASPP(nn.Module):
     def __init__(self, in_ch, out_ch, rates=(1, 2, 3, 5)):
         super().__init__()
-        self.branches = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Conv2d(in_ch, out_ch, 3, 1, dilation=r, padding=r, bias=False),
-                    GN(out_ch),
-                    nn.SiLU(inplace=False),
-                )
-                for r in rates
-            ]
-        )
+        self.branches = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 3, 1, dilation=r, padding=r, bias=False),
+                GN(out_ch),
+                nn.SiLU(inplace=False),
+            )
+            for r in rates
+        ])
         self.proj = nn.Sequential(
             nn.Conv2d(out_ch * len(rates), out_ch, 1, 1, 0, bias=False),
             GN(out_ch),
@@ -199,63 +197,7 @@ class SpectralGraphDictionaryPrior(nn.Module):
         return w_graph * score
 
 
-class BGHead(nn.Module):
-    def __init__(self, in_ch, out_ch, interval_width: float = 1.0):
-        super().__init__()
-        self.interval_width = interval_width
-        self.mu_b_head = nn.Conv2d(in_ch, out_ch, 3, 1, 1, bias=False)
-        self.logsig_b_head = nn.Conv2d(in_ch, out_ch, 3, 1, 1, bias=True)
-        with torch.no_grad():
-            nn.init.zeros_(self.logsig_b_head.weight)
-            self.logsig_b_head.bias.fill_(1.313)
-
-    def forward(self, x, z):
-        mu_b = self.mu_b_head(x)
-        log_sigb = self.logsig_b_head(x)
-        return self.log_gaussian_interval(z, mu_b, log_sigb, width=self.interval_width)
-
-    def log_gaussian_interval(self, z, mu, raw_log_sigma, width: float = 1.0, eps: float = 1e-8):
-        log_sigma = _log_sigma_from_raw(raw_log_sigma)
-        sigma = torch.exp(log_sigma)
-        half = width * 0.5
-        dist = Normal(loc=mu, scale=sigma)
-        upper = dist.cdf(z + half)
-        lower = dist.cdf(z - half)
-        p = (upper - lower).clamp_min(eps)
-        return torch.log(p).sum(dim=1, keepdim=True)
-
-
-class CoordConv20260317(CoordConv):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-
-class CenterMaskedConv3x3_20260317(CenterMaskedConv3x3):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-
-class ASPP20260317(ASPP):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-
-class SpectralManifold20260317(SpectralManifold):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-
-class SpectralPi20260317(SpectralPi):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-
-class SpectralGraphDictionaryPrior20260317(SpectralGraphDictionaryPrior):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-
-class PIHead20260317(nn.Module):
+class PIHead(nn.Module):
     def __init__(self, in_ch, ch=128, use_cache=True, spectral_type=None, spectral_databse_num=64):
         nn.Module.__init__(self)
 
@@ -296,7 +238,7 @@ class PIHead20260317(nn.Module):
             nn.SiLU(inplace=False),
             nn.Conv2d(gate_hidden_ch, self.spec_channels, 1, 1, 0),
         )
-        self.out = nn.Conv2d(self.spec_channels, 1, 1, 1, 0, bias=False)
+        self.out = nn.Conv2d(self.spec_channels, 1, 3, 1, 1, bias=False)
         # self.enhance_alpha = nn.Parameter(torch.tensor(1.0))
 
         # 光谱相似度
@@ -329,7 +271,7 @@ class PIHead20260317(nn.Module):
         f_space = _zero_invalid(f_space, pad_mask) #[B, ch, H, W]
 
         f_spec = _zero_invalid(self.specpi(spec), pad_mask) #[B, spec_channels, H, W]
-        w = torch.softmax(self.space_to_spec_gate(f_space), dim=1)
+        w = torch.tanh(self.space_to_spec_gate(f_space)) #[B, spec_channels, H, W]
         e_k = (1 + w) * f_spec# [B, ch, H, W]
 
         pi = torch.sigmoid(self.out(e_k))#[B, 1, H, W]
@@ -337,12 +279,33 @@ class PIHead20260317(nn.Module):
         return pi, e_k
 
 
-class BGHead20260317(BGHead):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class BGHead(nn.Module):
+    def __init__(self, in_ch, out_ch, interval_width: float = 1.0):
+        super().__init__()
+        self.interval_width = interval_width
+        self.mu_b_head = nn.Conv2d(in_ch, out_ch, 3, 1, 1, bias=False)
+        self.logsig_b_head = nn.Conv2d(in_ch, out_ch, 3, 1, 1, bias=True)
+        with torch.no_grad():
+            nn.init.zeros_(self.logsig_b_head.weight)
+            self.logsig_b_head.bias.fill_(1.313)
+
+    def forward(self, x, z):
+        mu_b = self.mu_b_head(x)
+        log_sigb = self.logsig_b_head(x)
+        return self.log_gaussian_interval(z, mu_b, log_sigb, width=self.interval_width)
+
+    def log_gaussian_interval(self, z, mu, raw_log_sigma, width: float = 1.0, eps: float = 1e-8):
+        log_sigma = _log_sigma_from_raw(raw_log_sigma)
+        sigma = torch.exp(log_sigma)
+        half = width * 0.5
+        dist = Normal(loc=mu, scale=sigma)
+        upper = dist.cdf(z + half)
+        lower = dist.cdf(z - half)
+        p = (upper - lower).clamp_min(eps)
+        return torch.log(p).sum(dim=1, keepdim=True)
 
 
-class MixBGFG20260317(nn.Module):
+class MixBGFG(nn.Module):
     '''
         与20260310相比, 想要输出的是由光谱库得到的余弦相似度类似的东西
     '''
@@ -361,8 +324,8 @@ class MixBGFG20260317(nn.Module):
             nn.SiLU(),
         )
 
-        self.bg_head = BGHead20260317(in_ch=ch, out_ch=C)
-        self.pi_head = PIHead20260317(
+        self.bg_head = BGHead(in_ch=ch, out_ch=C)
+        self.pi_head = PIHead(
             in_ch=ch,
             use_cache=use_cache,
             spectral_type=spectral_type,
@@ -397,7 +360,7 @@ class MixBGFG20260317(nn.Module):
 
 
         # π 先验：将 pad_mask 传入 PIHead / CoordConv，使坐标只在有效区域内为 [-1,1]
-        pi_net, spectral_evidence = self.pi_head(x, spec, pad_mask)   # [B,1,H,W],  [B, K, H, W]
+        pi_net, spectral_evidence = self.pi_head(x, spec, pad_mask)   # [B,1,H,W]
         pi = pi_net.clamp(1e-6, 1 - 1e-6)
 
 
@@ -424,7 +387,7 @@ class MixBGFG20260317(nn.Module):
         }
 
 
-class SCEMFeatureFusion20260317(nn.Module):
+class SCEMFeatureFusion(nn.Module):
     """
         与20260310相比，光谱通道采用 主层+残差补充的方式实现
     """
@@ -561,7 +524,7 @@ class SCEMFeatureFusion20260317(nn.Module):
         return feat, out_mask, spec
 
 
-class SCEM20260317(nn.Module):
+class SCEM(nn.Module):
     def __init__(self, config):
         nn.Module.__init__(self)
         self.cfg = dict(config)
@@ -570,20 +533,20 @@ class SCEM20260317(nn.Module):
         self.use_cache = bool(self.cfg.get("USE_CACHE", True))
         self.in_ch = int(self.cfg.get("IN_CHANNELS", 256))
         self.prior_mode = self.cfg.get("PRIOR_MODE")
-        self.spectral_databse_num = int(self.cfg.get("SPECTRAL_DATABASE_NUM"))
+        self.spectral_database_num = int(self.cfg.get("SPECTRAL_DATABASE_NUM"))
         self.spectral_type = self.cfg.get("SPECTRAL_TYPE").lower()
 
-        self.posterior = MixBGFG20260317(
+        self.posterior = MixBGFG(
             C=self.in_ch,
             depth=self.depth,
             width=self.width,
             use_cache=self.use_cache,
             prior_mode=self.prior_mode,
-            spectral_databse_num=self.spectral_databse_num,
+            spectral_databse_num=self.spectral_database_num,
             spectral_type=self.spectral_type,
         )
 
-        self.feature_fusion = SCEMFeatureFusion20260317(
+        self.feature_fusion = SCEMFeatureFusion(
             feat_in_channels=[256, 256, 256, 256],
             out_channels=self.in_ch,
             spec_channels=8,
@@ -606,13 +569,68 @@ class SCEM20260317(nn.Module):
 
         self.spectral_evidence_resize_heads = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(self.spectral_databse_num, self.spectral_databse_num, 3, padding=1, bias=False),
-                GN(self.spectral_databse_num),
+                nn.Conv2d(self.spectral_database_num, self.spectral_database_num, 3, padding=1, bias=False),
+                GN(self.spectral_database_num),
                 nn.SiLU(inplace=False),
-                nn.Conv2d(self.spectral_databse_num, self.spectral_databse_num, 1, bias=True),
+                nn.Conv2d(self.spectral_database_num, self.spectral_database_num, 1, bias=True),
             )
             for _ in range(3)
         ])
+
+
+        self.evi_hidden_dim = 64
+        #! 每个evidence使用自己的推理网络
+        self.evidence_relation_nets = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(self.spectral_database_num, self.evi_hidden_dim, 1, bias=False),
+                GN(self.evi_hidden_dim),
+                nn.SiLU(inplace=False),
+
+                nn.Conv2d(self.evi_hidden_dim, self.evi_hidden_dim, 3, padding=1, groups=self.evi_hidden_dim, bias=False),
+                GN(self.evi_hidden_dim),
+                nn.SiLU(inplace=False),
+
+                nn.Conv2d(self.evi_hidden_dim, self.evi_hidden_dim, 1, bias=False),
+                GN(self.evi_hidden_dim),
+                nn.SiLU(inplace=False),
+            )
+            for _ in range(4)
+        ])
+        
+        self.evidence_weight_head_pos = nn.ModuleList([
+            nn.Conv2d(self.evi_hidden_dim, num_tokens * self.spectral_database_num, kernel_size=1, bias=True)
+            for num_tokens in [8, 4, 2, 1]
+        ])
+        self.evidence_weight_head_neg = nn.ModuleList([
+        nn.Conv2d(self.evi_hidden_dim, num_tokens * self.spectral_database_num, kernel_size=1, bias=True)
+        for num_tokens in [8, 4, 2, 1]
+        ])
+        # 每层一个负证据抑制系数，初值 0.5
+        self.lambda_neg = nn.Parameter(torch.full((4,), 0.5))
+
+        # 每层每个token一个gate偏置，抬阈值压背景
+        self.gate_bias = nn.ParameterList([
+            nn.Parameter(torch.zeros(1, num_tokens, 1, 1))
+            for num_tokens in [8, 4, 2, 1]
+        ])
+
+        # 每层每个token一个空间温度，初值 0.5
+        self.gate_tau = nn.ParameterList([
+            nn.Parameter(torch.full((1, num_tokens, 1, 1), 0.5))
+            for num_tokens in [8, 4, 2, 1]
+        ])
+
+        # token输出后做norm，再和feature token拼接
+        self.evidence_token_norms = nn.ModuleList([
+            nn.LayerNorm(self.in_ch) for _ in range(4)
+        ])
+
+        # # 如果你后面要把 spectral_part 投到同一维再融合
+        self.evidence_spec_proj = nn.ModuleList([
+            nn.Linear(8, self.in_ch, bias=True) for _ in range(4)
+        ])
+        self.evidence_temperature = nn.Parameter(torch.full((4,), 1.0))
+
 
 
         # 初始化gamma_resize_heads的conv，使其输出全0
@@ -627,8 +645,8 @@ class SCEM20260317(nn.Module):
     @torch.no_grad()
     def _check_masks(self, masks):
         assert isinstance(masks, (list, tuple)) and len(masks) > 0
-        for mask in masks:
-            assert mask.dtype == torch.bool and mask.dim() == 3, "mask should be [B,H,W] bool"
+        for m in masks:
+            assert m.dtype == torch.bool and m.dim() == 3, "mask should be [B,H,W] bool"
 
 
     def _resize_by_mixed_pool(self, x: torch.Tensor, out_hw, lam:float):
@@ -680,7 +698,14 @@ class SCEM20260317(nn.Module):
         return enhanced
 
     @override
-    def forward(self, features, masks, specs, prior_map=None):
+    def forward(
+        self,
+        features: list[torch.Tensor],
+        masks: list[torch.Tensor],
+        specs: list[torch.Tensor],
+        prior_map=None,
+        return_debug: bool = False,
+    ):
         """
         features: List[Tensor]   each [B, C_i, H_i, W_i]
         masks:    List[Bool]     each [B, H_i, W_i]  True=pad
@@ -692,7 +717,8 @@ class SCEM20260317(nn.Module):
         """
         assert isinstance(features, (list, tuple)) and len(features) > 0
         self._check_masks(masks)
-
+        B = features[0].size(0)
+        
         feat, mask, spec  = self.feature_fusion(features, masks, specs)
 
         # feat0 = features[0]
@@ -704,6 +730,7 @@ class SCEM20260317(nn.Module):
         # 特征增强
         gamma = out["gamma"]
         feat_enhanced = []
+        gamma_levels = []
         for i, feat in enumerate(features):
             Hi, Wi = feat.shape[-2:]
             if i == 0:
@@ -715,6 +742,7 @@ class SCEM20260317(nn.Module):
             feat_enh_i = feat * (1.0 + 1.0 * gamma_i)
             feat_enh_i = self.scem_norms[i](feat_enh_i)
             feat_enhanced.append(feat_enh_i)
+            gamma_levels.append(gamma_i)
 
 
         # 光谱resize
@@ -733,20 +761,112 @@ class SCEM20260317(nn.Module):
         # token生成
         evidence_tokens = []
         evidence_tokens_spectral_part = []
-        top_idx_list = []
-        assign_list = []
-        A_list = []
+        debug_evidence_weights = []
+        debug_pool_weights = []
+        debug_pool_logits = []
+        debug_token_feature_corr = []
+        debug_gate = []
 
-        spectral_dict = out["spectral_dict"]#[K, 8]
+        pool_weights_levels: list[torch.Tensor] = []
+
+        spectral_dict = out["spectral_dict"]  # [K, 8]
         token_nums = [8, 4, 2, 1]
-        for i, (feat, token_num) in enumerate(zip(features, token_nums)):
-            tokens, top_idx, assign, A = self.build_evidence_tokens(feat, spectral_evidence_multilevel[i], top_m=token_num, mask=masks[i])
-            spectral_part = spectral_dict[top_idx] #[K, 8] + [B, token_num] 高级索引->[B, token_num, 8]
-            evidence_tokens_spectral_part.append(spectral_part)
+
+        for i, (feat, mask, token_num) in enumerate(zip(features, masks, token_nums)):
+            H_i, W_i = feat.shape[-2:]
+
+            # --------------------------------------------------
+            # 1) evidence relation feature
+            # --------------------------------------------------
+            evi = spectral_evidence_multilevel[i]   # [B, K, H, W], signed
+            relation_feat = self.evidence_relation_nets[i](evi)
+
+            # --------------------------------------------------
+            # 2) 正负evidence分解
+            # --------------------------------------------------
+            evi_pos = F.relu(evi)
+            evi_neg = F.relu(-evi)
+
+            # --------------------------------------------------
+            # 3) 位置型 K维 evidence mixing
+            #    仅在K维做softmax，不做token维softmax
+            # --------------------------------------------------
+            logits_pos = self.evidence_weight_head_pos[i](relation_feat)
+            logits_neg = self.evidence_weight_head_neg[i](relation_feat)
+
+            logits_pos = logits_pos.view(B, token_num, self.spectral_database_num, H_i, W_i)
+            logits_neg = logits_neg.view(B, token_num, self.spectral_database_num, H_i, W_i)
+
+            invalid_mask = mask.unsqueeze(1).unsqueeze(2)  # [B,1,1,H,W]
+            logits_pos = logits_pos.masked_fill(invalid_mask, -1e4)
+            logits_neg = logits_neg.masked_fill(invalid_mask, -1e4)
+
+            a_pos = torch.softmax(logits_pos / self.evidence_temperature[i], dim=2)   # [B,T,K,H,W]
+            a_neg = torch.softmax(logits_neg / self.evidence_temperature[i], dim=2)   # [B,T,K,H,W]
+
+            a_pos = a_pos.masked_fill(invalid_mask, 0.0)
+            a_neg = a_neg.masked_fill(invalid_mask, 0.0)
+
+            # --------------------------------------------------
+            # 4) signed gate，不再做 spatial softmax
+            # --------------------------------------------------
+            gate, pool_logits, support_map, suppress_map = self._build_signed_gate(
+                evi_pos=evi_pos,
+                evi_neg=evi_neg,
+                a_pos=a_pos,
+                a_neg=a_neg,
+                gate_bias=self.gate_bias[i],
+                gate_tau=self.gate_tau[i],
+                lambda_neg=self.lambda_neg[i],
+                mask=mask,
+            )  # gate: [B,T,H,W]
+
+            # --------------------------------------------------
+            # 5) weighted average token
+            # --------------------------------------------------
+            tokens, pool_weights = self._masked_weighted_avg_tokens(
+                feat=feat,
+                gate=gate,
+                mask=mask,
+            )  # tokens:[B,T,C], pool_weights:[B,T,H,W] 仅用于调试/可视化
+            pool_weights_levels.append(pool_weights)
+
+            # token后归一化，后续送DETR encoder更稳
+            tokens = self.evidence_token_norms[i](tokens)
+
+            # --------------------------------------------------
+            # 6) beta：只从正证据路得到token-level evidence mixture
+            #    更符合“token由哪些支持性evidence构成”
+            # --------------------------------------------------
+            beta = a_pos * gate.unsqueeze(2)                     # [B,T,K,H,W]
+            beta = beta.flatten(3).sum(dim=-1)                  # [B,T,K]
+            beta = beta / beta.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+
+            spectral_part = torch.einsum("btk,kc->btc", beta, spectral_dict)   # [B,T,8]
+
             evidence_tokens.append(tokens)
-            top_idx_list.append(top_idx)
-            assign_list.append(assign)
-            A_list.append(A)
+            evidence_tokens_spectral_part.append(spectral_part)
+
+            if return_debug:
+                debug_evidence_weights.append({
+                    "a_pos": a_pos.detach(),
+                    "a_neg": a_neg.detach(),
+                })
+                debug_pool_weights.append(pool_weights.detach())    # 归一化后仅用于可视化
+                debug_pool_logits.append(pool_logits.detach())
+                debug_gate.append(gate.detach())
+
+                token_corr_all_levels = []
+                for token_idx in range(tokens.shape[1]):
+                    token_vec = F.normalize(tokens[:, token_idx, :], dim=-1)  # [B, C]
+                    corr_per_level = []
+                    for feat_level in features:
+                        feat_norm = F.normalize(feat_level, dim=1)  # [B, C, H, W]
+                        corr_map = torch.einsum("bc,bchw->bhw", token_vec, feat_norm).unsqueeze(1)  # [B,1,H,W]
+                        corr_per_level.append(corr_map.detach())
+                    token_corr_all_levels.append(corr_per_level)
+                debug_token_feature_corr.append(token_corr_all_levels)
+
         
         # 构造global token
         global_token = []
@@ -757,6 +877,24 @@ class SCEM20260317(nn.Module):
             global_token_spectral_part_i = spec.mean(dim=(2, 3))
             global_token_spectral_part.append(global_token_spectral_part_i)
 
+        device = features[0].device
+        dtype = features[0].dtype
+        loss_pool_div_total = torch.zeros((), device=device, dtype=dtype)
+        loss_gamma_cover_total = torch.zeros((), device=device, dtype=dtype)
+        if pool_weights_levels:
+            for pool_weights, gamma_i, mask in zip(pool_weights_levels, gamma_levels, masks):
+                loss_pool_div_total = loss_pool_div_total + self._loss_pool_diversity(pool_weights, mask)
+                loss_gamma_cover_total = loss_gamma_cover_total + self._loss_gamma_coverage(
+                    pool_weights, gamma_i, mask
+                )
+            n_lvl = float(len(pool_weights_levels))
+            loss_pool_div_total = loss_pool_div_total / n_lvl
+            loss_gamma_cover_total = loss_gamma_cover_total / n_lvl
+
+        scem_aux_losses = {
+            "loss_pool_div": loss_pool_div_total,
+            "loss_gamma_cover": loss_gamma_cover_total,
+        }
 
         # return 特征 + evidence特征 + 损失计算部分
         # feat_enhanced: n_feature_levels * [(B, C, H, W)]
@@ -768,12 +906,105 @@ class SCEM20260317(nn.Module):
         # gamma: [B,1,H0,W0]
         # log_mix: [B,1,H0,W0]
         # spectral_dict: [K, 8]
-        # top_idx_list: n_feature_levels * [(B, top_m)]
         
-        return (feat_enhanced, specs), (evidence_tokens, evidence_tokens_spectral_part), (global_token, global_token_spectral_part), (gamma, out['log_mix'], spectral_dict), (top_idx_list, assign_list, A_list)
+        if return_debug:
+            debug_info = {
+                "evidence_weights": debug_evidence_weights,      # level -> [B,T,K,H,W]
+                "pool_weights": debug_pool_weights,              # level -> [B,T,H,W]
+                "pool_logits": debug_pool_logits,                # level -> [B,T,H,W]
+                "gate": debug_gate,                              # level -> [B,T,H,W]
+                "evidence_tokens": [t.detach() for t in evidence_tokens],  # level -> [B,T,C]
+                "token_feature_corr": debug_token_feature_corr,  # src_level -> token -> tgt_level -> [B,1,H,W]
+                "spectral_evidence_multilevel": spectral_evidence_multilevel,
+                "scem_aux_losses": scem_aux_losses,
+            }
+            return (
+                (feat_enhanced, specs),
+                (evidence_tokens, evidence_tokens_spectral_part),
+                (global_token, global_token_spectral_part),
+                (gamma, out['log_mix'], spectral_dict),
+                debug_info,
+            )
+
+        return (
+            (feat_enhanced, specs),
+            (evidence_tokens, evidence_tokens_spectral_part),
+            (global_token, global_token_spectral_part),
+            (gamma, out["log_mix"], spectral_dict, scem_aux_losses),
+        )
         
 
+    def _masked_weighted_avg_tokens(self, feat, gate, mask=None, eps=1e-6):
+        """
+        feat: [B, C, H, W]
+        gate: [B, T, H, W], non-negative
+        mask: [B, H, W], True=invalid
+        return:
+            tokens: [B, T, C]
+            pool_weights_vis: [B, T, H, W]  # 仅用于可视化/调试
+        """
+        if mask is not None:
+            gate = gate.masked_fill(mask.unsqueeze(1), 0.0)
 
+        feat_flat = feat.flatten(2)              # [B, C, HW]
+        gate_flat = gate.flatten(2)              # [B, T, HW]
+
+        num = torch.einsum("bts,bcs->btc", gate_flat, feat_flat)   # [B, T, C]
+        den = gate_flat.sum(dim=-1, keepdim=True).clamp_min(eps)   # [B, T, 1]
+        tokens = num / den
+
+        pool_weights_vis = gate / gate.sum(dim=(-2, -1), keepdim=True).clamp_min(eps)
+        return tokens, pool_weights_vis
+
+
+    def _build_signed_gate(self, evi_pos, evi_neg, a_pos, a_neg, gate_bias, gate_tau, lambda_neg, mask=None):
+        """
+        evi_pos/evi_neg: [B, K, H, W]
+        a_pos/a_neg    : [B, T, K, H, W]
+        return:
+            gate: [B, T, H, W] non-negative
+            pool_logits: [B, T, H, W]
+            support/suppress: [B, T, H, W]
+        """
+        support = (a_pos * evi_pos.unsqueeze(1)).sum(dim=2)      # [B,T,H,W]
+        suppress = (a_neg * evi_neg.unsqueeze(1)).sum(dim=2)     # [B,T,H,W]
+
+        pool_logits = support - lambda_neg * suppress
+
+        tau = F.softplus(gate_tau) + 1e-4
+        gate = F.softplus((pool_logits - gate_bias) / tau)
+
+        if mask is not None:
+            gate = gate.masked_fill(mask.unsqueeze(1), 0.0)
+
+        return gate, pool_logits, support, suppress
+
+
+    def _masked_softmax_spatial(
+                            self,
+                            logits: torch.Tensor,
+                            mask: torch.Tensor,
+                            eps: float = 1e-6) -> torch.Tensor:
+        """
+        对每个 token 的空间维做 masked softmax
+        logits: [B, T, H, W]
+        mask  : [B, H, W]，True 表示 invalid
+        return: [B, T, H, W]
+        """
+        B, T, H, W = logits.shape
+        x = logits.view(B, T, -1)  # [B, T, HW]
+
+        mask_flat = mask.view(B, 1, -1).expand(-1, T, -1)  # [B,T,HW]
+        x = x.masked_fill(mask_flat, float("-inf"))
+
+        out = torch.softmax(x, dim=-1)
+        out = out.view(B, T, H, W)
+
+        out = out.masked_fill(mask.unsqueeze(1), 0.0)
+        denom = out.sum(dim=(-2, -1), keepdim=True).clamp_min(eps)
+        out = out / denom
+  
+        return out
 
 
     def _top_p_mean(self, score_map: torch.Tensor, top_p: int):
@@ -840,7 +1071,65 @@ class SCEM20260317(nn.Module):
         A = A / (A.sum(dim=(2, 3), keepdim=True) + eps)
         tokens = torch.einsum("bchw, bmhw->bmc", feat, A)
 
-        return tokens, top_idx, assign, A
+        return tokens, top_idx, assign
+
+
+    def _loss_pool_diversity(self, pool_weights, mask=None):
+        """
+        pool_weights: [B, T, H, W]
+        """
+        pw = pool_weights
+        if pw.size(1) < 2:
+            return pw.sum() * 0.0
+        if mask is not None:
+            pw = pw.masked_fill(mask.unsqueeze(1), 0.0)
+
+        pw = pw.flatten(2)  # [B,T,HW]
+        pw = F.normalize(pw, dim=-1)
+
+        sim = torch.matmul(pw, pw.transpose(1, 2))  # [B,T,T]
+        eye = torch.eye(sim.size(-1), device=sim.device, dtype=torch.bool).unsqueeze(0)
+        loss = sim.masked_select(~eye).mean()
+        return loss
+
+    def _loss_token_diversity(self, tokens):
+        """
+        tokens: [B, T, C]
+        """
+        tok = F.normalize(tokens, dim=-1)
+        sim = torch.matmul(tok, tok.transpose(1, 2))  # [B,T,T]
+        eye = torch.eye(sim.size(-1), device=sim.device, dtype=torch.bool).unsqueeze(0)
+        loss = sim.masked_select(~eye).mean()
+        return loss
+
+    def _loss_gamma_coverage(self, pool_weights, gamma_i, mask=None):
+        """
+        pool_weights: [B, T, H, W]
+        gamma_i:      [B, 1, H, W] or [B, H, W]
+        """
+        if gamma_i.dim() == 3:
+            gamma_i = gamma_i.unsqueeze(1)
+
+        pw = pool_weights
+        if mask is not None:
+            pw = pw.masked_fill(mask.unsqueeze(1), 0.0)
+            gamma_i = gamma_i.masked_fill(mask.unsqueeze(1), 0.0)
+
+        # 联合覆盖，而不是简单sum
+        cover = 1.0 - torch.prod(1.0 - pw.clamp(0.0, 1.0), dim=1, keepdim=True)  # [B,1,H,W]
+
+        loss = F.l1_loss(cover, gamma_i)
+        return loss
+
+    def _loss_token_entropy_roles(self, pool_weights, target_entropy):
+        """
+        pool_weights: [B, T, H, W]
+        target_entropy: [T]
+        """
+        pw = pool_weights.flatten(2).clamp_min(1e-8)
+        entropy = -(pw * pw.log()).sum(dim=-1)  # [B,T]
+        target = target_entropy.view(1, -1).to(entropy.device)
+        return F.l1_loss(entropy, target.expand_as(entropy))
 
 def build(config):
     scem_enable = config.get("ENABLE", True)
@@ -849,4 +1138,4 @@ def build(config):
         scem_enable = False
     if not scem_enable:
         return None
-    return SCEM20260317(config)
+    return SCEM(config)

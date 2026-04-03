@@ -1,24 +1,19 @@
-import torch.nn as nn
-from typing import Optional
-
-from ..model_20260310.deformable_transformer_20260310 import DeformableTransformer20260310
-from ..model_20260317.deformable_encoder_20260317 import DeformableEncoder20260317
-from ..model_20260317.deformable_encoder_20260317 import DeformableEncoderLayer20260317
-from ..model_20260317.deformable_decoder_20260317 import DeformableDecoder20260317
-from ..model_20260317.deformable_decoder_20260317 import DeformableDecoderLayer20260317
-from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
-from typing import List, Optional
-from ..ops.modules import MSDeformAttn, MSDeformAttnSpectral, MSDeformAttn_Rotate
-from ..mlp import MLP
-from deprecated.sphinx import deprecated
 import torch
 import math
 import torch.nn as nn
-
-from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
 from typing import List, Optional
+from deprecated.sphinx import deprecated
+from torch.nn.init import constant_, normal_, xavier_uniform_
 
-class DeformableTransformer20260317(DeformableTransformer20260310):
+from ..mlp import MLP
+from ..model_20260317.deformable_decoder_20260317 import DeformableDecoder20260317
+from ..model_20260317.deformable_decoder_20260317 import DeformableDecoderLayer20260317
+from ..model_20260317.deformable_encoder_20260317 import DeformableEncoder20260317
+from ..model_20260317.deformable_encoder_20260317 import DeformableEncoderLayer20260317
+from ..ops.modules import MSDeformAttn, MSDeformAttn_Rotate, MSDeformAttnSpectral
+
+
+class DeformableTransformer20260317(nn.Module):
     def __init__(self, d_model=256, d_ffn=1024,
                  n_feature_levels=4, n_heads=8,
                  n_enc_points=4, n_dec_points=4,
@@ -52,7 +47,7 @@ class DeformableTransformer20260317(DeformableTransformer20260310):
             two_stage_num_proposals:
             visualize
         """
-        super(DeformableTransformer20260310, self).__init__()
+        super().__init__()
 
         self.d_model = d_model
         self.n_heads = n_heads
@@ -119,6 +114,85 @@ class DeformableTransformer20260317(DeformableTransformer20260310):
                 self.reference_points = nn.Linear(d_model, 2)
 
         self.reset_parameters()
+
+    def enable_checkpoint(self, enable: bool):
+        self.use_checkpoint = enable
+        self.encoder.use_checkpoint = enable
+        self.decoder.use_checkpoint = enable
+        return
+
+    def reset_parameters(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+        for module in self.modules():
+            if any(
+                [
+                    isinstance(module, MSDeformAttn),
+                    isinstance(module, MSDeformAttnSpectral),
+                    isinstance(module, MSDeformAttn_Rotate),
+                ]
+            ):
+                module.reset_parameters()
+        if not self.two_stage and (not self.use_dab):
+            xavier_uniform_(self.reference_points.weight.data, gain=1.0)
+            constant_(self.reference_points.bias.data, 0.0)
+        normal_(self.level_embed)
+
+    @staticmethod
+    def get_proposal_pos_embed(proposals):
+        num_pos_feats = 128
+        temperature = 10000
+        scale = 2 * math.pi
+        dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=proposals.device)
+        dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
+        proposals = proposals.sigmoid() * scale
+        pos = proposals[:, :, :, None] / dim_t
+        pos = torch.stack((pos[:, :, :, 0::2].sin(), pos[:, :, :, 1::2].cos()), dim=4).flatten(2)
+        return pos
+
+    @deprecated(version="1.0", reason="only use in two stage detr")
+    def gen_encoder_output_proposals(self, memory, memory_padding_mask, spatial_shapes):
+        n_batch, n_tokens, n_channels = memory.shape
+        proposals = []
+        cur = 0
+        for lvl, (height, width) in enumerate(spatial_shapes):
+            mask_flatten = memory_padding_mask[:, cur : (cur + height * width)].view(n_batch, height, width, 1)
+            valid_h = torch.sum(~mask_flatten[:, :, 0, 0], 1)
+            valid_w = torch.sum(~mask_flatten[:, 0, :, 0], 1)
+
+            grid_y, grid_x = torch.meshgrid(
+                torch.linspace(0, height - 1, height, dtype=torch.float32, device=memory.device),
+                torch.linspace(0, width - 1, width, dtype=torch.float32, device=memory.device),
+            )
+            grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)
+            scale = torch.cat([valid_w.unsqueeze(-1), valid_h.unsqueeze(-1)], 1).view(n_batch, 1, 1, 2)
+            grid = (grid.unsqueeze(0).expand(n_batch, -1, -1, -1) + 0.5) / scale
+            wh = torch.ones_like(grid) * 0.05 * (2.0**lvl)
+            proposal = torch.cat((grid, wh), -1).view(n_batch, -1, 4)
+            proposals.append(proposal)
+            cur += height * width
+
+        output_proposals = torch.cat(proposals, 1)
+        output_proposals_valid = ((output_proposals > 0.01) & (output_proposals < 0.99)).all(-1, keepdim=True)
+        output_proposals = torch.log(output_proposals / (1 - output_proposals))
+        output_proposals = output_proposals.masked_fill(memory_padding_mask.unsqueeze(-1), float("inf"))
+        output_proposals = output_proposals.masked_fill(~output_proposals_valid, float("inf"))
+
+        output_memory = memory
+        output_memory = output_memory.masked_fill(memory_padding_mask.unsqueeze(-1), float(0))
+        output_memory = output_memory.masked_fill(~output_proposals_valid, float(0))
+        output_memory = self.enc_output_norm(self.enc_output(output_memory))
+        return output_memory, output_proposals
+
+    @staticmethod
+    def get_valid_ratio(mask):
+        _, height, width = mask.shape
+        valid_h = torch.sum(~mask[:, :, 0], 1)
+        valid_w = torch.sum(~mask[:, 0, :], 1)
+        valid_ratio_h = valid_h.float() / height
+        valid_ratio_w = valid_w.float() / width
+        return torch.stack([valid_ratio_w, valid_ratio_h], -1)
 
 
 
@@ -285,12 +359,24 @@ class DeformableTransformer20260317(DeformableTransformer20260310):
         # inter_query_spectral_weights: if inter is True, (n_layers, B, Nq, 8)
         #                                else,             (B, Nq, 8)
 
+    def get_d_model(self):
+        return self.d_model
 
+    def get_n_dec_layers(self):
+        return self.decoder.num_layers
 
+    def set_refine_bbox_embed(self, bbox_embed: nn.Module):
+        self.decoder.bbox_embed = bbox_embed
+        return
 
+    def set_refine_angle_embed(self, angle_embed: nn.Module):
+        self.decoder.angle_embed = angle_embed
+        return
 
+    def set_refine_spectral_embed(self, spectral_embed: nn.Module):
+        self.decoder.spectral_embed = spectral_embed
+        return
 
-DeformableTransformer = DeformableTransformer20260317
 
 
 def build(config: dict, rope_pos_module: Optional[nn.Module] = None):

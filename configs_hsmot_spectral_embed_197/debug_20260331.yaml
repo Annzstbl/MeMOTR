@@ -1,9 +1,10 @@
 
 
-AVAILABLE_GPUS: "6,7"
+AVAILABLE_GPUS: "3"
 
 PARENT_CONFIG: ./default.yaml
-
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260331_debug
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260331_debug
 USE_CHECKPOINT: False
 DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
 CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
@@ -16,7 +17,7 @@ SAMPLE_LENGTHS: [1,1,1,1]
 ENCODER_SPECTRAL: True
 # ENCODER_GLOBAL_TOKEN: False
 # ROPE_POS: False
-TRAIN_HALF: True
+TRAIN_HALF: False
 # VID_WHITE_LIST: ["data39-4"]
 # resume
 # RESUME: /data4/litianhao/hsmot/memotr/spectralemb/12_global/checkpoint_19.pth
@@ -29,7 +30,7 @@ TRAIN_HALF: True
 
 ONLY_TRAIN_DETR: True
 
-BATCH_SIZE: 3
+BATCH_SIZE: 1
 EPOCHS: 40
 
 EDGE_SWAP: True
@@ -39,7 +40,7 @@ LR_DROP_MILESTONES: [12, 24]
 
 # PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/14_train_half/checkpoint_19.pth
 
-# DATASET_VERSION: OnePic
+DATASET_VERSION: OnePic
 
 
 TRANSFORMS_CONFIG:
@@ -75,8 +76,22 @@ LOSS_NLL_CONFIG:
   GAMMA_NEG: 0.0
 
 
-SAVE_CHECKPOINT: False
+CHECKPOINT_EVERY_N_EPOCHS: 3
+CHECKPOINT_TAIL_EPOCHS: 1
+
+# EVALUATE
+# 每 N 个 epoch 评估一次；<=0 表示关闭间隔评估
+EVALUATE_EVERY_N_EPOCHS: 3
+# 最后多少个 epoch 每个都评估
+EVALUATE_TAIL_EPOCHS: 3
+# 指定必须评估的 epoch（1-based），例如 [1, 10, 20]
+EVALUATE_FORCE_EPOCHS: []
+
+
 
 STEM: conv3d_se_v4
 
-MEMOTR_VERSION: '20260330'
+MEMOTR_VERSION: '20260331'
+
+
+# python main.py --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/debug_20260331.yaml
