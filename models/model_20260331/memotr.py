@@ -148,11 +148,13 @@ class MeMOTR(nn.Module):
                 masks.append(mask)
 
         prior_map = self.get_prior_map(tracks=tracks, gmcs=gmc, frame=frame)
+        # spectral_weights 作为第 3 个位置参数传入 specs：forward_hook 的 input 不含 keyword，
+        # 若写 specs=... 则 hook 里只有 (srcs, masks)，不会出现 scem_module.in.2.*。
         scem_out = self.scem_module(
             srcs,
             masks,
+            spectral_weights,
             prior_map=prior_map,
-            specs=spectral_weights,
             return_debug=debug,
         )
         if len(scem_out) == 5:

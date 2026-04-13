@@ -271,7 +271,7 @@ class PIHead(nn.Module):
         f_space = _zero_invalid(f_space, pad_mask) #[B, ch, H, W]
 
         f_spec = _zero_invalid(self.specpi(spec), pad_mask) #[B, spec_channels, H, W]
-        w = torch.tanh(self.space_to_spec_gate(f_space)) #[B, spec_channels, H, W]
+        w = F.tanh(self.space_to_spec_gate(f_space)) #[B, spec_channels, H, W]
         e_k = (1 + w) * f_spec# [B, ch, H, W]
 
         pi = torch.sigmoid(self.out(e_k))#[B, 1, H, W]
@@ -479,7 +479,7 @@ class SCEMFeatureFusion(nn.Module):
         mask_up = F.interpolate(mask_f, size=size_hw, mode="nearest")
         return mask_up[:, 0] > 0.5
 
-    def forward(self, features, masks, specs):
+    def forward(self, features, masks, specs, return_feat_list: bool = False):
         assert len(features) == self.num_levels
         assert len(masks) == self.num_levels
         assert len(specs) == self.num_levels
@@ -521,6 +521,8 @@ class SCEMFeatureFusion(nn.Module):
         feat = _zero_invalid(feat, out_mask)
         spec = _zero_invalid(spec, out_mask)
 
+        if return_feat_list:
+            return feat, out_mask, spec, feat_list, spec_list
         return feat, out_mask, spec
 
 
@@ -535,6 +537,8 @@ class SCEM(nn.Module):
         self.prior_mode = self.cfg.get("PRIOR_MODE")
         self.spectral_database_num = int(self.cfg.get("SPECTRAL_DATABASE_NUM"))
         self.spectral_type = self.cfg.get("SPECTRAL_TYPE").lower()
+        # gate 阈值与门控：相对 padding 边界向内收缩的像素数，减轻边界效应（0 表示不收缩）
+        self.gate_valid_shrink_pixels = [4,3,2,1]
 
         self.posterior = MixBGFG(
             C=self.in_ch,
@@ -577,34 +581,42 @@ class SCEM(nn.Module):
             for _ in range(3)
         ])
 
-
-        self.evi_hidden_dim = 64
+        self.token_nums = [8, 4, 2, 2]
+        self.evi_hidden_dim_list = [128, 64, 32, 16]
         #! 每个evidence使用自己的推理网络
         self.evidence_relation_nets = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(self.spectral_database_num, self.evi_hidden_dim, 1, bias=False),
-                GN(self.evi_hidden_dim),
+                nn.Conv2d(self.spectral_database_num, evi_hidden_dim, 1, bias=False),
+                GN(evi_hidden_dim),
                 nn.SiLU(inplace=False),
 
-                nn.Conv2d(self.evi_hidden_dim, self.evi_hidden_dim, 3, padding=1, groups=self.evi_hidden_dim, bias=False),
-                GN(self.evi_hidden_dim),
+                nn.Conv2d(evi_hidden_dim, evi_hidden_dim, 3, padding=1, groups=evi_hidden_dim, bias=False),
+                GN(evi_hidden_dim),
                 nn.SiLU(inplace=False),
 
-                nn.Conv2d(self.evi_hidden_dim, self.evi_hidden_dim, 1, bias=False),
-                GN(self.evi_hidden_dim),
+                nn.Conv2d(evi_hidden_dim, evi_hidden_dim, 1, bias=False),
+                GN(evi_hidden_dim),
                 nn.SiLU(inplace=False),
             )
-            for _ in range(4)
+            for evi_hidden_dim in self.evi_hidden_dim_list
         ])
         
+        # self.evidence_weight_head_pos = nn.ModuleList([
+            # nn.Conv2d(self.evi_hidden_dim, num_tokens * self.spectral_database_num, kernel_size=1, bias=True)
+            # for num_tokens in [8, 4, 2, 1]
+        # ])
+        #这样可以分head进行
         self.evidence_weight_head_pos = nn.ModuleList([
-            nn.Conv2d(self.evi_hidden_dim, num_tokens * self.spectral_database_num, kernel_size=1, bias=True)
-            for num_tokens in [8, 4, 2, 1]
+            nn.Conv2d(evi_hidden_dim // num_tokens, self.spectral_database_num, kernel_size=1, bias=True)
+            for evi_hidden_dim, num_tokens in zip(self.evi_hidden_dim_list, self.token_nums)
         ])
-        self.evidence_weight_head_neg = nn.ModuleList([
-        nn.Conv2d(self.evi_hidden_dim, num_tokens * self.spectral_database_num, kernel_size=1, bias=True)
-        for num_tokens in [8, 4, 2, 1]
-        ])
+
+
+
+        # self.evidence_weight_head_neg = nn.ModuleList([
+        # nn.Conv2d(self.evi_hidden_dim, num_tokens * self.spectral_database_num, kernel_size=1, bias=True)
+        # for num_tokens in [8, 4, 2, 1]
+        # ])
         # 每层一个负证据抑制系数，初值 0.5
         self.lambda_neg = nn.Parameter(torch.full((4,), 0.5))
 
@@ -625,11 +637,11 @@ class SCEM(nn.Module):
             nn.LayerNorm(self.in_ch) for _ in range(4)
         ])
 
-        # # 如果你后面要把 spectral_part 投到同一维再融合
-        self.evidence_spec_proj = nn.ModuleList([
-            nn.Linear(8, self.in_ch, bias=True) for _ in range(4)
-        ])
-        self.evidence_temperature = nn.Parameter(torch.full((4,), 1.0))
+        # # # 如果你后面要把 spectral_part 投到同一维再融合
+        # self.evidence_spec_proj = nn.ModuleList([
+        #     nn.Linear(8, self.in_ch, bias=True) for _ in range(4)
+        # ])
+        # self.evidence_temperature = nn.Parameter(torch.full((4,), 1.0))
 
 
 
@@ -718,8 +730,13 @@ class SCEM(nn.Module):
         assert isinstance(features, (list, tuple)) and len(features) > 0
         self._check_masks(masks)
         B = features[0].size(0)
-        
-        feat, mask, spec  = self.feature_fusion(features, masks, specs)
+
+        if return_debug:
+            feat, mask, spec, feat_fusion_list, spec_fusion_list = self.feature_fusion(
+                features, masks, specs, return_feat_list=True
+            )
+        else:
+            feat, mask, spec = self.feature_fusion(features, masks, specs)
 
         # feat0 = features[0]
         # mask0 = masks[0]  # [B,H0,W0] bool
@@ -766,11 +783,17 @@ class SCEM(nn.Module):
         debug_pool_logits = []
         debug_token_feature_corr = []
         debug_gate = []
+        debug_support_map = []
+        debug_a_pos_levels = []
+        debug_pool_weights_levels = []
+        debug_pool_logits_levels = []
+        debug_gate_levels = []
+        debug_support_map_levels = []
 
         pool_weights_levels: list[torch.Tensor] = []
 
         spectral_dict = out["spectral_dict"]  # [K, 8]
-        token_nums = [8, 4, 2, 1]
+        token_nums = self.token_nums
 
         for i, (feat, mask, token_num) in enumerate(zip(features, masks, token_nums)):
             H_i, W_i = feat.shape[-2:]
@@ -778,34 +801,42 @@ class SCEM(nn.Module):
             # --------------------------------------------------
             # 1) evidence relation feature
             # --------------------------------------------------
-            evi = spectral_evidence_multilevel[i]   # [B, K, H, W], signed
-            relation_feat = self.evidence_relation_nets[i](evi)
-
+            evi = spectral_evidence_multilevel[i]   # [B, K, H, W], signed  K = self.spectral_database_num
+            relation_feat = self.evidence_relation_nets[i](evi) # [B, C, H, W]
+            C_relation_feat = relation_feat.shape[1]
             # --------------------------------------------------
             # 2) 正负evidence分解
             # --------------------------------------------------
             evi_pos = F.relu(evi)
-            evi_neg = F.relu(-evi)
+            # evi_neg = F.relu(-evi)
+            evi_neg = None
 
             # --------------------------------------------------
             # 3) 位置型 K维 evidence mixing
             #    仅在K维做softmax，不做token维softmax
             # --------------------------------------------------
-            logits_pos = self.evidence_weight_head_pos[i](relation_feat)
-            logits_neg = self.evidence_weight_head_neg[i](relation_feat)
+            # 分head
+            logits_pos = self.evidence_weight_head_pos[i](relation_feat.view(B* token_num, C_relation_feat//token_num, H_i, W_i)).view(B, token_num, self.spectral_database_num, H_i, W_i)
 
-            logits_pos = logits_pos.view(B, token_num, self.spectral_database_num, H_i, W_i)
-            logits_neg = logits_neg.view(B, token_num, self.spectral_database_num, H_i, W_i)
+
+            # logits_pos = self.evidence_weight_head_pos[i](relation_feat)
+            # logits_neg = self.evidence_weight_head_neg[i](relation_feat)
+            logits_neg = None
+
+            # logits_pos = logits_pos.view(B, token_num, self.spectral_database_num, H_i, W_i)#[B,T,K,H,W]
+            # logits_neg = logits_neg.view(B, token_num, self.spectral_database_num, H_i, W_i)
 
             invalid_mask = mask.unsqueeze(1).unsqueeze(2)  # [B,1,1,H,W]
             logits_pos = logits_pos.masked_fill(invalid_mask, -1e4)
-            logits_neg = logits_neg.masked_fill(invalid_mask, -1e4)
+            # logits_neg = logits_neg.masked_fill(invalid_mask, -1e4)
 
-            a_pos = torch.softmax(logits_pos / self.evidence_temperature[i], dim=2)   # [B,T,K,H,W]
-            a_neg = torch.softmax(logits_neg / self.evidence_temperature[i], dim=2)   # [B,T,K,H,W]
+            a_pos = logits_pos.sigmoid()
+            # a_pos = torch.softmax(logits_pos / self.evidence_temperature[i], dim=2)   # [B,T,K,H,W]
+            # a_neg = torch.softmax(logits_neg / self.evidence_temperature[i], dim=2)   # [B,T,K,H,W]
 
             a_pos = a_pos.masked_fill(invalid_mask, 0.0)
-            a_neg = a_neg.masked_fill(invalid_mask, 0.0)
+            # a_neg = a_neg.masked_fill(invalid_mask, 0.0)
+            a_neg = None
 
             # --------------------------------------------------
             # 4) signed gate，不再做 spatial softmax
@@ -819,6 +850,7 @@ class SCEM(nn.Module):
                 gate_tau=self.gate_tau[i],
                 lambda_neg=self.lambda_neg[i],
                 mask=mask,
+                gate_valid_shrink_pixels=self.gate_valid_shrink_pixels[i],
             )  # gate: [B,T,H,W]
 
             # --------------------------------------------------
@@ -834,6 +866,10 @@ class SCEM(nn.Module):
             # token后归一化，后续送DETR encoder更稳
             tokens = self.evidence_token_norms[i](tokens)
 
+
+            #TODO 合并归一化?
+
+
             # --------------------------------------------------
             # 6) beta：只从正证据路得到token-level evidence mixture
             #    更符合“token由哪些支持性evidence构成”
@@ -848,17 +884,33 @@ class SCEM(nn.Module):
             evidence_tokens_spectral_part.append(spectral_part)
 
             if return_debug:
-                debug_evidence_weights.append({
-                    "a_pos": a_pos.detach(),
-                    "a_neg": a_neg.detach(),
-                })
-                debug_pool_weights.append(pool_weights.detach())    # 归一化后仅用于可视化
-                debug_pool_logits.append(pool_logits.detach())
-                debug_gate.append(gate.detach())
+                debug_a_pos_levels.append(a_pos)
+                debug_pool_weights_levels.append(pool_weights)    # 归一化后仅用于可视化
+                debug_pool_logits_levels.append(pool_logits)
+                debug_gate_levels.append(gate)
+                debug_support_map_levels.append(support_map)
 
+        if return_debug:
+            for a_pos_i, pool_weights_i, pool_logits_i, gate_i, support_i in zip(
+                debug_a_pos_levels,
+                debug_pool_weights_levels,
+                debug_pool_logits_levels,
+                debug_gate_levels,
+                debug_support_map_levels,
+            ):
+                debug_evidence_weights.append({
+                    "a_pos": a_pos_i.detach(),
+                    # "a_neg": a_neg.detach(),
+                })
+                debug_pool_weights.append(pool_weights_i.detach())    # 归一化后仅用于可视化
+                debug_pool_logits.append(pool_logits_i.detach())
+                debug_gate.append(gate_i.detach())
+                debug_support_map.append(support_i.detach())
+
+            for tokens_i in evidence_tokens:
                 token_corr_all_levels = []
-                for token_idx in range(tokens.shape[1]):
-                    token_vec = F.normalize(tokens[:, token_idx, :], dim=-1)  # [B, C]
+                for token_idx in range(tokens_i.shape[1]):
+                    token_vec = F.normalize(tokens_i[:, token_idx, :], dim=-1)  # [B, C]
                     corr_per_level = []
                     for feat_level in features:
                         feat_norm = F.normalize(feat_level, dim=1)  # [B, C, H, W]
@@ -877,19 +929,23 @@ class SCEM(nn.Module):
             global_token_spectral_part_i = spec.mean(dim=(2, 3))
             global_token_spectral_part.append(global_token_spectral_part_i)
 
+
+        # 计算损失
         device = features[0].device
         dtype = features[0].dtype
         loss_pool_div_total = torch.zeros((), device=device, dtype=dtype)
         loss_gamma_cover_total = torch.zeros((), device=device, dtype=dtype)
         if pool_weights_levels:
-            for pool_weights, gamma_i, mask in zip(pool_weights_levels, gamma_levels, masks):
-                loss_pool_div_total = loss_pool_div_total + self._loss_pool_diversity(pool_weights, mask)
+            loss_pool_div_weights = [token_num - 1 for token_num in self.token_nums]
+
+            for i, (pool_weights, gamma_i, mask) in enumerate(zip(pool_weights_levels, gamma_levels, masks)):
+                loss_pool_div_total = loss_pool_div_total + self._loss_pool_diversity(pool_weights, mask) * loss_pool_div_weights[i]
                 loss_gamma_cover_total = loss_gamma_cover_total + self._loss_gamma_coverage(
-                    pool_weights, gamma_i, mask
+                    pool_weights, gamma_i.detach(), mask
                 )
-            n_lvl = float(len(pool_weights_levels))
-            loss_pool_div_total = loss_pool_div_total / n_lvl
-            loss_gamma_cover_total = loss_gamma_cover_total / n_lvl
+            loss_poll_div_weights_sum = sum(loss_pool_div_weights)
+            loss_pool_div_total = loss_pool_div_total / loss_poll_div_weights_sum
+            loss_gamma_cover_total = loss_gamma_cover_total / len(pool_weights_levels) # 除每个lvl
 
         scem_aux_losses = {
             "loss_pool_div": loss_pool_div_total,
@@ -913,10 +969,14 @@ class SCEM(nn.Module):
                 "pool_weights": debug_pool_weights,              # level -> [B,T,H,W]
                 "pool_logits": debug_pool_logits,                # level -> [B,T,H,W]
                 "gate": debug_gate,                              # level -> [B,T,H,W]
+                "support_map": debug_support_map,                # level -> [B,T,H,W] 阈值前 support
                 "evidence_tokens": [t.detach() for t in evidence_tokens],  # level -> [B,T,C]
                 "token_feature_corr": debug_token_feature_corr,  # src_level -> token -> tgt_level -> [B,1,H,W]
                 "spectral_evidence_multilevel": spectral_evidence_multilevel,
                 "scem_aux_losses": scem_aux_losses,
+                # feature_fusion：各尺度对齐到 H0×W0 且 feat_proj 后的特征，concat 前
+                "feature_fusion_feat_list": [t.detach() for t in feat_fusion_list],
+                "feature_fusion_spec_list": [t.detach() for t in spec_fusion_list],
             }
             return (
                 (feat_enhanced, specs),
@@ -956,8 +1016,30 @@ class SCEM(nn.Module):
         pool_weights_vis = gate / gate.sum(dim=(-2, -1), keepdim=True).clamp_min(eps)
         return tokens, pool_weights_vis
 
+    @staticmethod
+    def _valid_interior_from_mask(mask: torch.Tensor, shrink: int) -> torch.Tensor:
+        """
+        mask: [B,H,W] bool, True=padding/invalid。
+        返回 valid_interior: [B,H,W] bool，True 表示在「非 padding」区域内且距任意 padding 至少 shrink 像素
+        （对 mask 做方形 max-pool 膨胀后取反，等价于对有效区域腐蚀 shrink）。
+        shrink<=0 时等价于 ~mask。
+        """
+        if shrink <= 0:
+            return ~mask
+        pad = mask.to(dtype=torch.float32, device=mask.device).unsqueeze(1)
+        k = 2 * shrink + 1
+        dilated = F.max_pool2d(pad, kernel_size=k, stride=1, padding=shrink)
+        dilated = dilated.squeeze(1)
 
-    def _build_signed_gate(self, evi_pos, evi_neg, a_pos, a_neg, gate_bias, gate_tau, lambda_neg, mask=None):
+        # 把四周边缘也都设置为1 
+        dilated[:, :shrink, :] = 1.0
+        dilated[:, -shrink:, :] = 1.0
+        dilated[:, :, :shrink] = 1.0
+        dilated[:, :, -shrink:] = 1.0
+
+        return ~(dilated > 0.5)
+
+    def _build_signed_gate(self, evi_pos, evi_neg, a_pos, a_neg, gate_bias, gate_tau, lambda_neg, mask=None, gate_valid_shrink_pixels=0):
         """
         evi_pos/evi_neg: [B, K, H, W]
         a_pos/a_neg    : [B, T, K, H, W]
@@ -967,17 +1049,43 @@ class SCEM(nn.Module):
             support/suppress: [B, T, H, W]
         """
         support = (a_pos * evi_pos.unsqueeze(1)).sum(dim=2)      # [B,T,H,W]
-        suppress = (a_neg * evi_neg.unsqueeze(1)).sum(dim=2)     # [B,T,H,W]
+        # tau = F.softplus(gate_tau) + 1e-4
+        # gate = F.softplus((support - gate_bias) / tau)
+        # if mask is not None:
+            # gate = gate.masked_fill(mask.unsqueeze(1), 0.0)
 
-        pool_logits = support - lambda_neg * suppress
+        if mask is None:
+            raise ValueError("mask is None")
 
-        tau = F.softplus(gate_tau) + 1e-4
-        gate = F.softplus((pool_logits - gate_bias) / tau)
+        valid_interior = self._valid_interior_from_mask(mask, gate_valid_shrink_pixels)
+        # 仅在收缩后的有效带上算阈值并保留 gate，削弱贴 padding 一圈的边界响应
+        gate = support.masked_fill(~valid_interior.unsqueeze(1), 0.0)
+        valid_f = valid_interior.to(dtype=support.dtype).unsqueeze(1)  # [B,1,H,W]
 
-        if mask is not None:
-            gate = gate.masked_fill(mask.unsqueeze(1), 0.0)
+        # 非 mask 区域将 gate 归一化总和为 1 时，单像素均值为 1/N；阈值取该均值的 某 倍 =>
+        # gate_norm < 3/N  <=>  gate < 3 * (sum/N) = 3 * mean(gate on valid)
+        count = valid_f.sum(dim=(-2, -1), keepdim=True).clamp_min(1.0)
+        sum_gt = (gate * valid_f).sum(dim=(-2, -1), keepdim=True)
+        mean_gt = sum_gt / count
+        thr = 1.1 * mean_gt
+        gate = torch.where(gate < thr, torch.zeros_like(gate), gate)
+        gate = gate.masked_fill(~valid_interior.unsqueeze(1), 0.0)
 
-        return gate, pool_logits, support, suppress
+        return gate, a_pos, support, None
+
+
+        # support = (a_pos * evi_pos.unsqueeze(1)).sum(dim=2)      # [B,T,H,W]
+        # suppress = (a_neg * evi_neg.unsqueeze(1)).sum(dim=2)     # [B,T,H,W]
+
+        # pool_logits = support - lambda_neg * suppress
+
+        # tau = F.softplus(gate_tau) + 1e-4
+        # gate = F.softplus((pool_logits - gate_bias) / tau)
+
+        # if mask is not None:
+        #     gate = gate.masked_fill(mask.unsqueeze(1), 0.0)
+
+        # return gate, pool_logits, support, suppress
 
 
     def _masked_softmax_spatial(
@@ -1088,8 +1196,9 @@ class SCEM(nn.Module):
         pw = F.normalize(pw, dim=-1)
 
         sim = torch.matmul(pw, pw.transpose(1, 2))  # [B,T,T]
-        eye = torch.eye(sim.size(-1), device=sim.device, dtype=torch.bool).unsqueeze(0)
-        loss = sim.masked_select(~eye).mean()
+        # loss取不带对角线的上三角并求均值
+        upper_mask = torch.triu(torch.ones_like(sim, dtype=torch.bool), diagonal=1)
+        loss = sim.masked_select(upper_mask).mean()
         return loss
 
     def _loss_token_diversity(self, tokens):
@@ -1102,7 +1211,7 @@ class SCEM(nn.Module):
         loss = sim.masked_select(~eye).mean()
         return loss
 
-    def _loss_gamma_coverage(self, pool_weights, gamma_i, mask=None):
+    def _loss_gamma_coverage(self, pool_weights, gamma_i, mask=None, eps=1e-8):
         """
         pool_weights: [B, T, H, W]
         gamma_i:      [B, 1, H, W] or [B, H, W]
@@ -1115,10 +1224,18 @@ class SCEM(nn.Module):
             pw = pw.masked_fill(mask.unsqueeze(1), 0.0)
             gamma_i = gamma_i.masked_fill(mask.unsqueeze(1), 0.0)
 
-        # 联合覆盖，而不是简单sum
+        # 联合覆盖，只要有大的值，结果就比较大
         cover = 1.0 - torch.prod(1.0 - pw.clamp(0.0, 1.0), dim=1, keepdim=True)  # [B,1,H,W]
 
-        loss = F.l1_loss(cover, gamma_i)
+        # ---------- 3) 展平为空间分布 ----------
+        B = cover.shape[0]
+        c = cover.flatten(1)   # [B, HW] 已经归一化
+        g = gamma_i.flatten(1)   # [B, HW]
+        g = g / (g.sum(dim=1, keepdim=True) + eps) #归一化
+
+        # soft CE
+        loss = -(g * torch.log(c + eps)).sum(dim=1).mean()
+        # loss = F.l1_loss(cover, gamma_i)
         return loss
 
     def _loss_token_entropy_roles(self, pool_weights, target_entropy):
