@@ -2,7 +2,7 @@
 
 AVAILABLE_GPUS: "6"
 
-PARENT_CONFIG: ./default.yaml
+PARENT_CONFIG: ../../configs_hsmot_spectral_embed_197/default.yaml
 OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260331_debug_4
 SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260331_debug_4
 USE_CHECKPOINT: False

@@ -190,26 +190,28 @@ def train(config: dict):
         elif save_checkpoint_enabled:
             if should_save_epoch_checkpoint:
                 checkpoint_path = os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth")
-                save_checkpoint(
-                    model=model,
-                    path=checkpoint_path,
-                    states=train_states,
-                    optimizer=optimizer,
-                    scheduler=scheduler
-                )
-                shutil.copy2(checkpoint_path, os.path.join(config["OUTPUTS_DIR"], "last.pth"))
+                if is_main_process():
+                    save_checkpoint(
+                        model=model,
+                        path=checkpoint_path,
+                        states=train_states,
+                        optimizer=optimizer,
+                        scheduler=scheduler
+                    )
+                    shutil.copy2(checkpoint_path, os.path.join(config["OUTPUTS_DIR"], "last.pth"))
         else:
             # 兼容原逻辑：关闭 SAVE_CHECKPOINT 时仍保留最后一个 epoch，并同步保存 last.pth
             if epoch == config["EPOCHS"] - 1:
                 checkpoint_path = os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth")
-                save_checkpoint(
-                    model=model,
-                    path=checkpoint_path,
-                    states=train_states,
-                    optimizer=optimizer,
-                    scheduler=scheduler
-                )
-                shutil.copy2(checkpoint_path, os.path.join(config["OUTPUTS_DIR"], "last.pth"))
+                if is_main_process():
+                    save_checkpoint(
+                        model=model,
+                        path=checkpoint_path,
+                        states=train_states,
+                        optimizer=optimizer,
+                        scheduler=scheduler
+                    )
+                    shutil.copy2(checkpoint_path, os.path.join(config["OUTPUTS_DIR"], "last.pth"))
             train_logger.show(head="No periodic checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml")
             train_logger.write(head="No periodic checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml", filename="log.txt", mode="a")
 

@@ -2,9 +2,12 @@
 查看 scem 模块的输入输出。实现风格与 debug/debug.py 一致：同一套 config/checkpoint 加载，
 对 scem_module 注册 forward hook 同时捕获输入与输出，并打印/保存 CSV/热力图。
 
+说明：PyTorch forward_hook 的 input 仅为「位置参数」元组，不含 keyword。
+因此 MeMOTR 里 scem_module 调用必须把 specs（spectral_weights）按第 3 个位置参数传入，
+否则不会出现 scem_module.in.2.*，只会出现 in.0.*（features）与 in.1.*（masks）。
 """
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 
 import sys
@@ -52,6 +55,11 @@ def _tensors_from_obj(obj, prefix: str, captured: Dict[str, torch.Tensor]) -> No
 
 def _parse_csv_patterns(raw: str) -> List[str]:
     return [s.strip().lower() for s in str(raw).split(",") if s.strip()]
+
+
+def _skip_image_write(path: str, skip_if_exists: bool) -> bool:
+    """若 skip_if_exists 且 path 已是文件，则跳过写入（返回 True）。"""
+    return bool(skip_if_exists and os.path.isfile(path))
 
 
 def _resolve_train_config_path(train_config_arg: str) -> str:
@@ -103,12 +111,19 @@ def _infer_hook_vis_mode(name_lower: str, tensor: torch.Tensor, args) -> str:
     return "None"
 
 
-def _save_scem_token_debug_maps(token_debug: Dict[str, Any], map_out_dir: str, seq: str):
+def _save_scem_token_debug_maps(
+    token_debug: Dict[str, Any],
+    map_out_dir: str,
+    seq: str,
+    skip_existing_images: bool = False,
+):
     """
     Save per-token SCEM debug visualizations:
     1) evidence_weights mean map and pool_weights map for each token.
     2) token-feature correlation maps across all feature levels.
     3) spectral_evidence_multilevel per-channel maps.
+    4) support_map（阈值前 gate 的 support）per-token heatmap。
+    5) feature_fusion_feat_list：每层 featE + PCA；feature_fusion_spec_list：每层逐通道 heatmap。
     """
     if not isinstance(token_debug, dict):
         return
@@ -117,6 +132,7 @@ def _save_scem_token_debug_maps(token_debug: Dict[str, Any], map_out_dir: str, s
     pool_weights_levels = token_debug.get("pool_weights", [])
     pool_logits_levels = token_debug.get("pool_logits", [])
     gate_levels = token_debug.get("gate", [])
+    support_map_levels = token_debug.get("support_map", [])
     evidence_tokens_levels = token_debug.get("evidence_tokens", [])
     corr_levels = token_debug.get("token_feature_corr", [])
     spectral_evidence_levels = token_debug.get("spectral_evidence_multilevel", [])
@@ -146,6 +162,7 @@ def _save_scem_token_debug_maps(token_debug: Dict[str, Any], map_out_dir: str, s
             continue
         pl_lvl = pool_logits_levels[src_lvl] if src_lvl < len(pool_logits_levels) else None
         gate_lvl = gate_levels[src_lvl] if src_lvl < len(gate_levels) else None
+        support_lvl = support_map_levels[src_lvl] if src_lvl < len(support_map_levels) else None
         num_tokens = min(ew_pos.shape[1], pw_lvl.shape[1])
         for tok_idx in range(num_tokens):
             ew_tok_pos = ew_pos[0, tok_idx]     # [K,H,W]
@@ -175,27 +192,48 @@ def _save_scem_token_debug_maps(token_debug: Dict[str, Any], map_out_dir: str, s
                 map_out_dir,
                 f"{seq}__scem_tokdbg_srcL{src_lvl}_tok{tok_idx}__gate.png",
             )
-            db.save_scalar_heatmap(ew_pos_mean, ew_path, vmin=float(ew_pos_mean.min()), vmax=float(ew_pos_mean.max()), cmap="jet")
-            db.save_scalar_heatmap(pw_map, pw_path, vmin=float(pw_map.min()), vmax=float(pw_map.max()), cmap="jet")
+            support_path = os.path.join(
+                map_out_dir,
+                f"{seq}__scem_tokdbg_srcL{src_lvl}_tok{tok_idx}__support_map.png",
+            )
+            wrote = False
+            if not _skip_image_write(ew_path, skip_existing_images):
+                db.save_scalar_heatmap(ew_pos_mean, ew_path, vmin=float(ew_pos_mean.min()), vmax=float(ew_pos_mean.max()), cmap="jet")
+                wrote = True
+            if not _skip_image_write(pw_path, skip_existing_images):
+                db.save_scalar_heatmap(pw_map, pw_path, vmin=float(pw_map.min()), vmax=float(pw_map.max()), cmap="jet")
+                wrote = True
             if torch.is_tensor(ew_neg) and tok_idx < ew_neg.shape[1]:
                 ew_neg_mean = ew_neg[0, tok_idx].mean(dim=0).detach().cpu().numpy()
-                db.save_scalar_heatmap(
-                    ew_neg_mean,
-                    ew_neg_path,
-                    vmin=float(ew_neg_mean.min()),
-                    vmax=float(ew_neg_mean.max()),
-                    cmap="jet",
-                )
+                if not _skip_image_write(ew_neg_path, skip_existing_images):
+                    db.save_scalar_heatmap(
+                        ew_neg_mean,
+                        ew_neg_path,
+                        vmin=float(ew_neg_mean.min()),
+                        vmax=float(ew_neg_mean.max()),
+                        cmap="jet",
+                    )
+                    wrote = True
             if torch.is_tensor(pl_lvl) and pl_lvl.dim() == 4 and tok_idx < pl_lvl.shape[1]:
                 pl_map = pl_lvl[0, tok_idx].detach().cpu().numpy()
-                db.save_scalar_heatmap(pl_map, pl_path, vmin=float(pl_map.min()), vmax=float(pl_map.max()), cmap="jet")
+                if not _skip_image_write(pl_path, skip_existing_images):
+                    db.save_scalar_heatmap(pl_map, pl_path, vmin=float(pl_map.min()), vmax=float(pl_map.max()), cmap="jet")
+                    wrote = True
             if torch.is_tensor(gate_lvl) and gate_lvl.dim() == 4 and tok_idx < gate_lvl.shape[1]:
                 gate_map = gate_lvl[0, tok_idx].detach().cpu().numpy()
-                db.save_scalar_heatmap(gate_map, gate_path, vmin=float(gate_map.min()), vmax=float(gate_map.max()), cmap="jet")
-            print(
-                f"Saved token debug Info: Save evidence_weights / pool_weights / pool_logits / gate maps "
-                f"done for seq {seq} and tok {tok_idx}"
-            )
+                if not _skip_image_write(gate_path, skip_existing_images):
+                    db.save_scalar_heatmap(gate_map, gate_path, vmin=float(gate_map.min()), vmax=float(gate_map.max()), cmap="jet")
+                    wrote = True
+            if torch.is_tensor(support_lvl) and support_lvl.dim() == 4 and tok_idx < support_lvl.shape[1]:
+                smap = support_lvl[0, tok_idx].detach().cpu().numpy()
+                if not _skip_image_write(support_path, skip_existing_images):
+                    db.save_scalar_heatmap(smap, support_path, vmin=float(smap.min()), vmax=float(smap.max()), cmap="jet")
+                    wrote = True
+            if wrote or not skip_existing_images:
+                print(
+                    f"Saved token debug Info: Save evidence_weights / pool_weights / pool_logits / gate / support_map maps "
+                    f"done for seq {seq} and tok {tok_idx}"
+                )
 
     # 相关性图: src_level -> token -> tgt_level -> [B,1,H,W]
     for src_lvl, token_list in enumerate(corr_levels):
@@ -205,6 +243,7 @@ def _save_scem_token_debug_maps(token_debug: Dict[str, Any], map_out_dir: str, s
             if not isinstance(per_tgt_levels, (list, tuple)):
                 continue
             last_tgt_lvl = -1
+            corr_wrote = False
             for tgt_lvl, corr_map in enumerate(per_tgt_levels):
                 if not torch.is_tensor(corr_map):
                     continue
@@ -219,8 +258,10 @@ def _save_scem_token_debug_maps(token_debug: Dict[str, Any], map_out_dir: str, s
                     map_out_dir,
                     f"{seq}__scem_tokdbg_srcL{src_lvl}_tok{tok_idx}__corr_toL{tgt_lvl}.png",
                 )
-                db.save_scalar_heatmap(arr2d, corr_path, vmin=float(arr2d.min()), vmax=float(arr2d.max()), cmap="jet")
-            if last_tgt_lvl >= 0:
+                if not _skip_image_write(corr_path, skip_existing_images):
+                    db.save_scalar_heatmap(arr2d, corr_path, vmin=float(arr2d.min()), vmax=float(arr2d.max()), cmap="jet")
+                    corr_wrote = True
+            if last_tgt_lvl >= 0 and (corr_wrote or not skip_existing_images):
                 print(
                     f"Saved token debug Info: Save token-feature correlation maps done "
                     f"for seq {seq} and tok {tok_idx} and tgt level {last_tgt_lvl}"
@@ -264,9 +305,10 @@ def _save_scem_token_debug_maps(token_debug: Dict[str, Any], map_out_dir: str, s
                 map_out_dir,
                 f"{seq}__scem_tokdbg_all_levels__all_tokens_corr_heatmap.png",
             )
-            plt.savefig(out_path, dpi=300)
+            if not _skip_image_write(out_path, skip_existing_images):
+                plt.savefig(out_path, dpi=300)
+                print(f"Saved token debug Info: all-level all-token correlation heatmap done for seq {seq}")
             plt.close()
-            print(f"Saved token debug Info: all-level all-token correlation heatmap done for seq {seq}")
 
     # spectral_evidence_multilevel: level -> [B,K,H,W], 逐通道保存
     for lvl, spec_evi in enumerate(spectral_evidence_levels):
@@ -282,14 +324,52 @@ def _save_scem_token_debug_maps(token_debug: Dict[str, Any], map_out_dir: str, s
                 map_out_dir,
                 f"{seq}__scem_tokdbg_specEvi_L{lvl}_ch{ch}.png",
             )
-            db.save_scalar_heatmap(
-                arr2d,
-                out_path,
-                vmin=float(arr2d.min()),
-                vmax=float(arr2d.max()),
-                cmap="jet",
-            )
+            if not _skip_image_write(out_path, skip_existing_images):
+                db.save_scalar_heatmap(
+                    arr2d,
+                    out_path,
+                    vmin=float(arr2d.min()),
+                    vmax=float(arr2d.max()),
+                    cmap="jet",
+                )
     print(f'Saved token debug Info: Save spectral_evidence_multilevel maps done')
+
+    # SCEM feature_fusion：feat_list / spec_list（对齐主尺度且 proj 后、feat_fuse/spec 融合前）
+    feat_fusion_list = token_debug.get("feature_fusion_feat_list", [])
+    spec_fusion_list = token_debug.get("feature_fusion_spec_list", [])
+
+    for lvl, ft in enumerate(feat_fusion_list):
+        if not torch.is_tensor(ft) or ft.dim() != 4:
+            continue
+        fe_path = os.path.join(map_out_dir, f"{seq}__scem_featfuse_featL{lvl}__featE.png")
+        pca_path = os.path.join(map_out_dir, f"{seq}__scem_featfuse_featL{lvl}__pca.png")
+        try:
+            if not _skip_image_write(fe_path, skip_existing_images):
+                db.save_feature_energy_heatmap(ft, fe_path)
+            if not _skip_image_write(pca_path, skip_existing_images):
+                db.save_feature_pca_rgb(ft, pca_path)
+        except Exception as e:
+            print(f"[Warn] feat_fusion feat_list level {lvl}: {e}")
+
+    for lvl, sp in enumerate(spec_fusion_list):
+        if not torch.is_tensor(sp) or sp.dim() != 4:
+            continue
+        sp0 = sp[0]
+        for ch in range(sp0.shape[0]):
+            arr2d = sp0[ch].detach().cpu().numpy()
+            out_path = os.path.join(
+                map_out_dir,
+                f"{seq}__scem_featfuse_specL{lvl}_ch{ch}.png",
+            )
+            if not _skip_image_write(out_path, skip_existing_images):
+                db.save_scalar_heatmap(
+                    arr2d,
+                    out_path,
+                    vmin=float(arr2d.min()),
+                    vmax=float(arr2d.max()),
+                    cmap="jet",
+                )
+    print(f"Saved token debug Info: Save feature_fusion feat_list / spec_list maps done")
 
 
 def run_forward_once_scem(
@@ -359,7 +439,7 @@ def main():
     parser.add_argument(
         "--train-config",
         type=str,
-        default="20260331_2.yaml",
+        default="20260331_4.yaml",
         help=(
             "Train config yaml path. "
             "Absolute path is used directly; "
@@ -379,8 +459,12 @@ def main():
     parser.add_argument(
         "--data-root",
         type=str,
-        default="/data/users/litianhao/hsmot_code/data",
-        help="DATA_ROOT for dataset.",
+        default=None,
+        help=(
+            "DATA_ROOT for dataset. "
+            "If omitted, uses DATA_ROOT from the loaded train config "
+            "(relative paths in yaml are resolved from the train config file directory)."
+        ),
     )
     parser.add_argument(
         "--dataset-name",
@@ -436,6 +520,13 @@ def main():
         action="store_true",
         default=True,
         help="Save 2D heatmaps for 4D tensors (e.g. 1xCxHxW).",
+    )
+    parser.add_argument(
+        "--skip-existing-images",
+        action="store_true",
+        help="If a PNG output path already exists, skip writing that image.",
+        #TODO设置是否跳过
+        # default=True,
     )
     parser.add_argument(
         "--dump-json",
@@ -536,6 +627,10 @@ def main():
                     "scem_module.posterior.pi_head.space_to_spec_gate.in",
                     "scem_module.posterior.pi_head.space_to_spec_gate.out",
                     "spec_pi.in",
+                    "scem_module.in.0",
+                    "scem_module.in.2",
+                    "pi_head.in.0",
+                    "pi_head.in.1",
                     "pi_head.out.1"
                 ]),
         help="Comma-separated hook-name patterns mapped to feature energy + PCA visualization.",
@@ -564,6 +659,21 @@ def main():
     if not os.path.isfile(train_cfg_path):
         raise FileNotFoundError(f"Config not found: {train_cfg_path}")
     train_config = load_yaml_with_inheritance(path=train_cfg_path)
+    data_root_arg = args.data_root
+    if data_root_arg is None:
+        args.data_root = train_config.get("DATA_ROOT", "") or ""
+    if not args.data_root:
+        raise ValueError(
+            "DATA_ROOT is empty: set DATA_ROOT in the train config or pass --data-root."
+        )
+    if not os.path.isabs(args.data_root):
+        if data_root_arg is None:
+            args.data_root = os.path.abspath(
+                os.path.join(os.path.dirname(train_cfg_path), args.data_root)
+            )
+        else:
+            args.data_root = os.path.abspath(args.data_root)
+
     config_name = os.path.splitext(os.path.basename(train_cfg_path))[0]
     csv_output_dir = os.path.join(CURRENT_DIR, config_name, "csvs")
     heatmap_dir = os.path.join(CURRENT_DIR, config_name, "heatmaps")
@@ -627,15 +737,18 @@ def main():
                         vmin, vmax = t_np.min(), t_np.max()
 
                         # 1) heatmap（N×8）
-                        db.save_heatmap(
-                            t_np,
-                            os.path.join(param_map_dir, f"{safe_name}__heatmap.png"),
-                            vmin=vmin,
-                            vmax=vmax,
-                            add_colorbar=True,
-                        )
+                        heat_p = os.path.join(param_map_dir, f"{safe_name}__heatmap.png")
+                        if not _skip_image_write(heat_p, args.skip_existing_images):
+                            db.save_heatmap(
+                                t_np,
+                                heat_p,
+                                vmin=vmin,
+                                vmax=vmax,
+                                add_colorbar=True,
+                            )
 
                         # 2) 每个 [1,8] 画一条曲线，共 N 条
+                        lines_p = os.path.join(param_map_dir, f"{safe_name}__lines.png")
                         plt.figure(figsize=(6, 4))
                         x = np.arange(8)
                         for i in range(N):
@@ -645,7 +758,8 @@ def main():
                         plt.title(f"{safe_name} line curves (N={N})")
                         plt.grid(True, alpha=0.3)
                         plt.tight_layout()
-                        plt.savefig(os.path.join(param_map_dir, f"{safe_name}__lines.png"), dpi=300)
+                        if not _skip_image_write(lines_p, args.skip_existing_images):
+                            plt.savefig(lines_p, dpi=300)
                         plt.close()
 
                         # 3) PCA 降到二维并散点图显示
@@ -658,6 +772,7 @@ def main():
                         W = U[:, :2]              # [8,2]
                         X2 = Xc @ W               # [N,2]
 
+                        pca2_p = os.path.join(param_map_dir, f"{safe_name}__pca2.png")
                         plt.figure(figsize=(4, 4))
                         plt.scatter(X2[:, 0], X2[:, 1], s=10, alpha=0.7)
                         plt.xlabel("PC1")
@@ -665,44 +780,53 @@ def main():
                         plt.title(f"{safe_name} PCA-2D (N={N})")
                         plt.grid(True, alpha=0.3)
                         plt.tight_layout()
-                        plt.savefig(os.path.join(param_map_dir, f"{safe_name}__pca2.png"), dpi=300)
+                        if not _skip_image_write(pca2_p, args.skip_existing_images):
+                            plt.savefig(pca2_p, dpi=300)
                         plt.close()
 
                     else:
                         # 默认可视化逻辑
                         if t_np.ndim == 1:
-                            db.save_heatmap(
-                                t_np.reshape(1, -1, 1),
-                                os.path.join(param_map_dir, f"{safe_name}.png"),
-                                vmin=t_np.min(),
-                                vmax=t_np.max(),
-                                add_colorbar=True,
-                            )
-                        elif t_np.ndim == 2:
-                            db.save_heatmap(
-                                t_np,
-                                os.path.join(param_map_dir, f"{safe_name}.png"),
-                                vmin=t_np.min(),
-                                vmax=t_np.max(),
-                                add_colorbar=True,
-                            )
-                        elif t_np.ndim == 4 and t_np.shape[0] == 1:
-                            for c in range(min(16, t_np.shape[1])):
+                            p1 = os.path.join(param_map_dir, f"{safe_name}.png")
+                            if not _skip_image_write(p1, args.skip_existing_images):
                                 db.save_heatmap(
-                                    t_np[0, c],
-                                    os.path.join(param_map_dir, f"{safe_name}_ch{c}.png"),
+                                    t_np.reshape(1, -1, 1),
+                                    p1,
                                     vmin=t_np.min(),
                                     vmax=t_np.max(),
                                     add_colorbar=True,
                                 )
+                        elif t_np.ndim == 2:
+                            p2 = os.path.join(param_map_dir, f"{safe_name}.png")
+                            if not _skip_image_write(p2, args.skip_existing_images):
+                                db.save_heatmap(
+                                    t_np,
+                                    p2,
+                                    vmin=t_np.min(),
+                                    vmax=t_np.max(),
+                                    add_colorbar=True,
+                                )
+                        elif t_np.ndim == 4 and t_np.shape[0] == 1:
+                            for c in range(min(16, t_np.shape[1])):
+                                pch = os.path.join(param_map_dir, f"{safe_name}_ch{c}.png")
+                                if not _skip_image_write(pch, args.skip_existing_images):
+                                    db.save_heatmap(
+                                        t_np[0, c],
+                                        pch,
+                                        vmin=t_np.min(),
+                                        vmax=t_np.max(),
+                                        add_colorbar=True,
+                                    )
                         elif t_np.ndim == 3 and t_np.shape[0] == 1:
-                            db.save_heatmap(
-                                t_np[0],
-                                os.path.join(param_map_dir, f"{safe_name}.png"),
-                                vmin=t_np.min(),
-                                vmax=t_np.max(),
-                                add_colorbar=True,
-                            )
+                            p3 = os.path.join(param_map_dir, f"{safe_name}.png")
+                            if not _skip_image_write(p3, args.skip_existing_images):
+                                db.save_heatmap(
+                                    t_np[0],
+                                    p3,
+                                    vmin=t_np.min(),
+                                    vmax=t_np.max(),
+                                    add_colorbar=True,
+                                )
             print(f"  Saved to CSV dir: {param_csv_dir}, heatmap dir: {param_map_dir}")
         else:
             print(f"[Warn] No params/buffers matched for hook-params: {hook_param_patterns}")
@@ -759,13 +883,15 @@ def main():
                         v_np = v.detach().cpu().numpy()
                         for c in range(min(8, v_np.shape[1])):
                             arr2d = v_np[0, c]
-                            db.save_heatmap(
-                                arr2d,
-                                os.path.join(map_out_dir, f"{seq}__out_{k}__ch{c}.png"),
-                                vmin=v_np.min(),
-                                vmax=v_np.max(),
-                                add_colorbar=True,
-                            )
+                            out_ch_path = os.path.join(map_out_dir, f"{seq}__out_{k}__ch{c}.png")
+                            if not _skip_image_write(out_ch_path, args.skip_existing_images):
+                                db.save_heatmap(
+                                    arr2d,
+                                    out_ch_path,
+                                    vmin=v_np.min(),
+                                    vmax=v_np.max(),
+                                    add_colorbar=True,
+                                )
                     if args.save_csv:
                         db.save_tensor_to_csv(f"{seq}__out_{k}", v, csv_out_dir)
                 else:
@@ -778,7 +904,12 @@ def main():
         # 1.5) 保存 token 级别调试图（evidence_weights / pool_weights / corr maps）
         if isinstance(outputs, dict) and "scem_token_debug" in outputs:
             try:
-                _save_scem_token_debug_maps(outputs["scem_token_debug"], map_out_dir, seq)
+                _save_scem_token_debug_maps(
+                    outputs["scem_token_debug"],
+                    map_out_dir,
+                    seq,
+                    skip_existing_images=args.skip_existing_images,
+                )
                 print("  Saved token debug maps: evidence_weights / pool_weights / correlation maps")
             except Exception as e:
                 print(f"[Warn] Failed to save scem token debug maps: {e}")
@@ -810,7 +941,8 @@ def main():
                     if args.save_heatmaps:
                         out_path = os.path.join(map_out_dir, f"{seq}__{safe_name}__mask.png")
                         # 0/1 → 灰度 mask，可视化有效/无效区域
-                        db.save_scalar_heatmap(arr2d, out_path, vmin=0.0, vmax=1.0, cmap="gray")
+                        if not _skip_image_write(out_path, args.skip_existing_images):
+                            db.save_scalar_heatmap(arr2d, out_path, vmin=0.0, vmax=1.0, cmap="gray")
 
                     if args.save_csv:
                         # 将 bool 转成 float 保存，便于后续分析
@@ -851,7 +983,8 @@ def main():
                                     map_out_dir,
                                     f"{seq}__{safe_name}__att_lvl{lvl}.png",
                                 )
-                                db.save_scalar_heatmap(tiled, out_path, vmin=vmin, vmax=vmax, cmap="jet")
+                                if not _skip_image_write(out_path, args.skip_existing_images):
+                                    db.save_scalar_heatmap(tiled, out_path, vmin=vmin, vmax=vmax, cmap="jet")
                         # attention 已按专门规则可视化，仍然按原样保存 CSV
                         if args.save_csv:
                             db.save_tensor_to_csv(f"{seq}__hook_{safe_name}", t_det, csv_out_dir)
@@ -877,7 +1010,8 @@ def main():
                         continue
                     vmin, vmax = float(np.min(arr)), float(np.max(arr))
                     out_path = os.path.join(map_out_dir, f"{seq}__{safe_name}__value.png")
-                    db.save_value_heatmap(arr, out_path, vmin=vmin, vmax=vmax, cmap="jet", fmt=".3f")
+                    if not _skip_image_write(out_path, args.skip_existing_images):
+                        db.save_value_heatmap(arr, out_path, vmin=vmin, vmax=vmax, cmap="jet", fmt=".3f")
                     continue
 
                 # 3) 判别型量：直接 heatmap
@@ -891,7 +1025,8 @@ def main():
                         out_path = os.path.join(
                             map_out_dir, f"{seq}__{safe_name}__disc.png"
                         )
-                        db.save_scalar_heatmap(arr2d, out_path, vmin=vmin, vmax=vmax, cmap="jet")
+                        if not _skip_image_write(out_path, args.skip_existing_images):
+                            db.save_scalar_heatmap(arr2d, out_path, vmin=vmin, vmax=vmax, cmap="jet")
                     continue
                   
 
@@ -909,14 +1044,16 @@ def main():
                                 map_out_dir, f"{seq}__{safe_name}__allch{c}.png"
                             )
                             # Keep raw channel values; only color-map for display.
-                            db.save_scalar_heatmap(arr2d, out_path, vmin=vmin, vmax=vmax, cmap="jet")
+                            if not _skip_image_write(out_path, args.skip_existing_images):
+                                db.save_scalar_heatmap(arr2d, out_path, vmin=vmin, vmax=vmax, cmap="jet")
                     elif tt.dim() == 2:
                         arr2d = tt.cpu().numpy()
                         vmin, vmax = float(arr2d.min()), float(arr2d.max())
                         out_path = os.path.join(
                             map_out_dir, f"{seq}__{safe_name}__allch0.png"
                         )
-                        db.save_scalar_heatmap(arr2d, out_path, vmin=vmin, vmax=vmax, cmap="jet")
+                        if not _skip_image_write(out_path, args.skip_existing_images):
+                            db.save_scalar_heatmap(arr2d, out_path, vmin=vmin, vmax=vmax, cmap="jet")
                     continue
 
                 # 5) 特征型量：feature energy + PCA
@@ -926,13 +1063,19 @@ def main():
                         if tt.dim() == 3:
                             tt = tt.unsqueeze(0)
                         fe_path = os.path.join(map_out_dir, f"{seq}__{safe_name}__featE.png")
-                        db.save_feature_energy_heatmap(tt, fe_path)
+                        if not _skip_image_write(fe_path, args.skip_existing_images):
+                            db.save_feature_energy_heatmap(tt, fe_path)
                         pca_path = os.path.join(map_out_dir, f"{seq}__{safe_name}__pca.png")
-                        db.save_feature_pca_rgb(tt, pca_path)
+                        if not _skip_image_write(pca_path, args.skip_existing_images):
+                            db.save_feature_pca_rgb(tt, pca_path)
                     except Exception as e:
                         print(f"[Warn] feature visualization failed: {k}, shape={list(t_det.shape)}, err={e}")
                     continue
-                    
+
+                if vis_mode == "None":
+                    continue
+                else:
+                    print(f"[Warn] {vis_mode} mode not supported for {k}, shape={list(t_det.shape)}")
 
 
         else:

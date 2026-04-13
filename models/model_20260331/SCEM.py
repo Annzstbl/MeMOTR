@@ -617,20 +617,20 @@ class SCEM(nn.Module):
         # nn.Conv2d(self.evi_hidden_dim, num_tokens * self.spectral_database_num, kernel_size=1, bias=True)
         # for num_tokens in [8, 4, 2, 1]
         # ])
-        # 每层一个负证据抑制系数，初值 0.5
-        self.lambda_neg = nn.Parameter(torch.full((4,), 0.5))
+        # # 每层一个负证据抑制系数，初值 0.5
+        # self.lambda_neg = nn.Parameter(torch.full((4,), 0.5))
 
-        # 每层每个token一个gate偏置，抬阈值压背景
-        self.gate_bias = nn.ParameterList([
-            nn.Parameter(torch.zeros(1, num_tokens, 1, 1))
-            for num_tokens in [8, 4, 2, 1]
-        ])
+        # # 每层每个token一个gate偏置，抬阈值压背景
+        # self.gate_bias = nn.ParameterList([
+        #     nn.Parameter(torch.zeros(1, num_tokens, 1, 1))
+        #     for num_tokens in [8, 4, 2, 1]
+        # ])
 
-        # 每层每个token一个空间温度，初值 0.5
-        self.gate_tau = nn.ParameterList([
-            nn.Parameter(torch.full((1, num_tokens, 1, 1), 0.5))
-            for num_tokens in [8, 4, 2, 1]
-        ])
+        # # 每层每个token一个空间温度，初值 0.5
+        # self.gate_tau = nn.ParameterList([
+        #     nn.Parameter(torch.full((1, num_tokens, 1, 1), 0.5))
+        #     for num_tokens in [8, 4, 2, 1]
+        # ])
 
         # token输出后做norm，再和feature token拼接
         self.evidence_token_norms = nn.ModuleList([
@@ -846,9 +846,9 @@ class SCEM(nn.Module):
                 evi_neg=evi_neg,
                 a_pos=a_pos,
                 a_neg=a_neg,
-                gate_bias=self.gate_bias[i],
-                gate_tau=self.gate_tau[i],
-                lambda_neg=self.lambda_neg[i],
+                # gate_bias=self.gate_bias[i],
+                # gate_tau=self.gate_tau[i],
+                # lambda_neg=self.lambda_neg[i],
                 mask=mask,
                 gate_valid_shrink_pixels=self.gate_valid_shrink_pixels[i],
             )  # gate: [B,T,H,W]
@@ -1039,7 +1039,7 @@ class SCEM(nn.Module):
 
         return ~(dilated > 0.5)
 
-    def _build_signed_gate(self, evi_pos, evi_neg, a_pos, a_neg, gate_bias, gate_tau, lambda_neg, mask=None, gate_valid_shrink_pixels=0):
+    def _build_signed_gate(self, evi_pos, evi_neg, a_pos, a_neg, mask=None, gate_valid_shrink_pixels=0):
         """
         evi_pos/evi_neg: [B, K, H, W]
         a_pos/a_neg    : [B, T, K, H, W]

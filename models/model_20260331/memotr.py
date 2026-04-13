@@ -103,7 +103,7 @@ class MeMOTR(nn.Module):
         else:
             raise NotImplementedError("Box refine is not implemented yet.")
 
-        self.num_evidence_tokens = [8, 4, 2, 1]
+        self.num_evidence_tokens = [8, 4, 2, 2]
         self.evidence_token_pos_embed = [nn.Parameter(torch.randn(self.hidden_dim, num + 1)) for num in self.num_evidence_tokens]
 
     def forward(self, frame: NestedTensor, tracks: List[TrackInstances],
