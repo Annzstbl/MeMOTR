@@ -7,7 +7,7 @@
 否则不会出现 scem_module.in.2.*，只会出现 in.0.*（features）与 in.1.*（masks）。
 """
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 
 import sys
@@ -439,7 +439,7 @@ def main():
     parser.add_argument(
         "--train-config",
         type=str,
-        default="20260331.yaml",
+        default="debug_20260413.yaml",
         help=(
             "Train config yaml path. "
             "Absolute path is used directly; "
@@ -483,8 +483,7 @@ def main():
         type=str,
         default=",".join(
             [
-                "all",
-                # "data39-1", 
+                "data39-1", 
                 # "data48-1", 
                 # "data46-12", 
                 # "data36-13", 

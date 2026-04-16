@@ -1,10 +1,15 @@
-PROJECT: "20260331模型第一次训练, token数量设置为8422, LOSS_SCEM_GAMMA_COVER损失使用softCE权重设置为0.5"
+PROJECT: "20260414模型第一次训练, 在0331的基础上，把transofmer的系数修改了"
 
-AVAILABLE_GPUS: "2"
+PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/20260414/checkpoint_29.pth
+RESUME: /data4/litianhao/hsmot/memotr/spectralemb/20260414/checkpoint_29.pth
+RESUME_SCHEDULER: True
 
-PARENT_CONFIG: ../../configs_hsmot_spectral_embed_197/default.yaml
-OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260331
-SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260331
+
+AVAILABLE_GPUS: "3,4,5"
+
+PARENT_CONFIG: ./default.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260414_resume
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260414_resume
 USE_CHECKPOINT: False
 DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
 CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
@@ -93,9 +98,9 @@ EVALUATE_FORCE_EPOCHS: []
 
 STEM: conv3d_se_v4
 
-MEMOTR_VERSION: '20260331'
+MEMOTR_VERSION: '20260414'
 
 
-# python main.py --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/debug_20260331.yaml
+# python main.py --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/debug_20260414.yaml
 # 多卡
-# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260331.yaml
+# python -m torch.distributed.run --nproc_per_node=3 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260414_resume.yaml

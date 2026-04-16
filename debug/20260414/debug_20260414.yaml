@@ -1,10 +1,16 @@
-PROJECT: "20260331模型第一次训练, token数量设置为8422, LOSS_SCEM_GAMMA_COVER损失使用softCE权重设置为0.5"
+
 
 AVAILABLE_GPUS: "2"
 
 PARENT_CONFIG: ../../configs_hsmot_spectral_embed_197/default.yaml
-OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260331
-SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260331
+
+
+
+PROJECT: "20260414模型第二次训练, 修改transformer的weights,让原有token以alpha 和 1-alpha权重输出，add token以1权重输出"
+
+
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260414-2
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260414-2
 USE_CHECKPOINT: False
 DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
 CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
@@ -93,7 +99,7 @@ EVALUATE_FORCE_EPOCHS: []
 
 STEM: conv3d_se_v4
 
-MEMOTR_VERSION: '20260331'
+MEMOTR_VERSION: '20260414'
 
 
 # python main.py --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/debug_20260331.yaml
