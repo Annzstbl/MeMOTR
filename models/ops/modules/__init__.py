@@ -15,3 +15,4 @@ from .ms_deform_attn_spectral import MSDeformAttnSpectral
 from .ms_deform_attn_global import MSDeformAttnGlobal
 from .ms_deform_attn_20260317 import MSDeformAttn20260317
 from .ms_deform_attn_20260414 import MSDeformAttn20260414
+from .ms_deform_attn_20260416 import MSDeformAttnAddTokenSharedLogits as MSDeformAttn20260416

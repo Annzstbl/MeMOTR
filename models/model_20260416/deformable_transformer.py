@@ -88,7 +88,7 @@ class DeformableTransformer(nn.Module):
             spectral_embeds_flatten.append(self.spectral_embed(spectral_weight.flatten(2).transpose(1, 2)))
             lvl_pos_embed_flatten.append(pos_embed + self.level_embed[lvl].view(1, 1, -1))
 
-            add_token_num = additional_token.shape[-1]#TODO 这里是错的，后边好像没用到
+            add_token_num = additional_token.shape[-1]
             additional_token_nums.append(add_token_num)
             additional_tokens_flatten.append(additional_token)
             additional_specs_flatten.append(self.spectral_embed(additional_spec))

@@ -1,5 +1,5 @@
 import math
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -171,7 +171,7 @@ class MeMOTR(nn.Module):
 
 
         additional_pos_embeds = [p.unsqueeze(0).expand(srcs[0].shape[0], -1, -1).to(srcs[0].device) for p in self.evidence_token_pos_embed]
-        additional_tokens = [torch.cat((evi_token, global_tok.unsqueeze(1)), dim=1) for evi_token, global_tok in zip[tuple[Any, Any]](evidence_tokens, global_token)]
+        additional_tokens = [torch.cat((evi_token, global_tok.unsqueeze(1)), dim=1) for evi_token, global_tok in zip(evidence_tokens, global_token)]
         additional_specs = [torch.cat((evi_spec, global_spec.unsqueeze(1)), dim=1) for evi_spec, global_spec in zip(evidence_tokens_spectral_part, global_token_spectral_part)]
 
         reference_points = self.get_reference_points(tracks=tracks).to(srcs[0].device)
