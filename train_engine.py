@@ -35,6 +35,24 @@ def train(config: dict):
     train_logger.write(log=config, filename="config.yaml", mode="w")
     train_logger.tb_add_git_version(git_version=config["GIT_VERSION"])
 
+    loss_label_type = str(config.get("LOSS_LABEL_TYPE", "sigmoid_focal_loss"))
+    normalized_loss_label_type = loss_label_type.lower()
+    valid_loss_label_types = {"sigmoid_focal_loss", "eql_lossv2_nobg"}
+    if normalized_loss_label_type not in valid_loss_label_types:
+        raise ValueError(
+            f"Unsupported LOSS_LABEL_TYPE '{loss_label_type}', only support "
+            f"{sorted(valid_loss_label_types)}"
+        )
+    train_logger.show(head=f"LOSS_LABEL_TYPE={loss_label_type}")
+    train_logger.write(head=f"LOSS_LABEL_TYPE={loss_label_type}", filename="log.txt", mode="a")
+    if normalized_loss_label_type == "eql_lossv2_nobg":
+        train_logger.show(head=f"LOSS_LABEL_EQLV2_NOBG={config.get('LOSS_LABEL_EQLV2_NOBG', {})}")
+        train_logger.write(
+            head=f"LOSS_LABEL_EQLV2_NOBG={config.get('LOSS_LABEL_EQLV2_NOBG', {})}",
+            filename="log.txt",
+            mode="a"
+        )
+
     set_seed(config["SEED"])
 
     model = build_model(config=config)

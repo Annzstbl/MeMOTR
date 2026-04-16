@@ -20,6 +20,7 @@ import torch.distributed
 from typing import List, Tuple, Dict
 
 from .matcher import build as build_matcher, HungarianMatcher, pairwise_min_permuted_segment_loss
+from .eql_lossV2_nobg import EQLv2NoBg
 from structures.track_instances import TrackInstances
 from utils.box_ops import generalized_box_iou, box_cxcywh_to_xyxy, box_iou_union
 from utils.utils import is_distributed, distributed_world_size
@@ -31,7 +32,7 @@ from utils.edge_swap import EdgeSwap
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
                  max_frame_length: int, n_aux: int, merge_det_track_layer: int = 0, aux_weights: List = None,
-                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = False, scem: bool = False, loss_nll_config:dict = None, edge_swap: bool = False):
+                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = False, scem: bool = False, loss_nll_config:dict = None, edge_swap: bool = False, label_loss_type: str = "sigmoid_focal_loss", eql_loss_config: dict | None = None):
         """
         Init a criterion function.
 
@@ -67,6 +68,23 @@ class ClipCriterion:
         self.decoder_spectral_mse = decoder_spectral
         self.scem = scem
         self.loss_nll_config = loss_nll_config
+        self.label_loss_type = label_loss_type.lower()
+        self.eql_loss_config = eql_loss_config or {}
+        self.eqlv2_nobg_loss: EQLv2NoBg | None = None
+
+        if self.label_loss_type == "eql_lossv2_nobg":
+            self.eqlv2_nobg_loss = EQLv2NoBg(
+                num_classes=self.num_classes,
+                loss_weight=1.0,
+                gamma=self.eql_loss_config.get("GAMMA", 12),
+                mu=self.eql_loss_config.get("MU", 0.8),
+                alpha=self.eql_loss_config.get("ALPHA", 4.0),
+            )
+        elif self.label_loss_type != "sigmoid_focal_loss":
+            raise ValueError(
+                f"Unsupported LOSS_LABEL_TYPE '{label_loss_type}', only support "
+                f"'sigmoid_focal_loss' and 'eql_lossV2_nobg'."
+            )
 
     def set_epoch(self, epoch: int):
         '''
@@ -82,6 +100,8 @@ class ClipCriterion:
 
     def set_device(self, device: torch.device):
         self.device = device
+        if self.eqlv2_nobg_loss is not None:
+            self.eqlv2_nobg_loss = self.eqlv2_nobg_loss.to(self.device)
 
     def init_a_clip(self, batch: Dict, hidden_dim: int, num_classes: int, device: torch.device):
         """
@@ -641,13 +661,18 @@ class ClipCriterion:
                 = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
         pred_logits = torch.cat(pred_logits)
         gt_labels = torch.cat(gt_labels)
-        gt_labels_one_hot = F.one_hot(gt_labels, self.num_classes+1)[:, :-1]\
-            .to(pred_logits.dtype).to(pred_logits.device)
+        if self.label_loss_type == "eql_lossv2_nobg":
+            if self.eqlv2_nobg_loss is None:
+                raise RuntimeError("EQLv2NoBg loss is not initialized.")
+            loss = self.eqlv2_nobg_loss(cls_score=pred_logits, label=gt_labels)
+        else:
+            gt_labels_one_hot = F.one_hot(gt_labels, self.num_classes+1)[:, :-1]\
+                .to(pred_logits.dtype).to(pred_logits.device)
 
-        loss = sigmoid_focal_loss(inputs=pred_logits,
-                                  targets=gt_labels_one_hot,
-                                  alpha=0.25,
-                                  gamma=2)
+            loss = sigmoid_focal_loss(inputs=pred_logits,
+                                      targets=gt_labels_one_hot,
+                                      alpha=0.25,
+                                      gamma=2)
 
         return loss
 
@@ -859,5 +884,7 @@ def build(config: dict):
         use_dab=config["USE_DAB"],
         decoder_spectral=config["DECODER_SPECTRAL"],
         scem = config["SCEM"]["ENABLE"],
-        loss_nll_config=config["LOSS_NLL_CONFIG"]
+        loss_nll_config=config["LOSS_NLL_CONFIG"],
+        label_loss_type=config.get("LOSS_LABEL_TYPE", "sigmoid_focal_loss"),
+        eql_loss_config=config.get("LOSS_LABEL_EQLV2_NOBG", {}),
     )

@@ -100,7 +100,7 @@ def build_onepic_dataset(dataset_root, vid_name, frame_id, repeat_num, output_ro
 if __name__ == "__main__":
 
     dataset_root = "./data/hsmot"  # 原数据集目录
-    vid_name = "data39-1"           # 视频名
+    vid_name = "data52-4"           # 视频名
     frame_id = 1              # 选取帧
     repeat_num = 20             # 复制次数
 
@@ -108,5 +108,6 @@ if __name__ == "__main__":
         dataset_root,
         vid_name,
         frame_id,
-        repeat_num
+        repeat_num,
+        output_root="OnePic_52_4"
     )
