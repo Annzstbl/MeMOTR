@@ -20,7 +20,8 @@ import torch.distributed
 from typing import List, Tuple, Dict
 
 from .matcher import build as build_matcher, HungarianMatcher, pairwise_min_permuted_segment_loss
-from .eql_lossV2_nobg import EQLv2NoBg
+from .loss.eql_lossV2_nobg import EQLv2NoBg
+from .loss.efl_loss import EqualizedFocalLoss
 from structures.track_instances import TrackInstances
 from utils.box_ops import generalized_box_iou, box_cxcywh_to_xyxy, box_iou_union
 from utils.utils import is_distributed, distributed_world_size
@@ -32,7 +33,7 @@ from utils.edge_swap import EdgeSwap
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
                  max_frame_length: int, n_aux: int, merge_det_track_layer: int = 0, aux_weights: List = None,
-                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = False, scem: bool = False, loss_nll_config:dict = None, edge_swap: bool = False, label_loss_type: str = "sigmoid_focal_loss", eql_loss_config: dict | None = None):
+                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = False, scem: bool = False, loss_nll_config:dict = None, edge_swap: bool = False, label_loss_type: str = "sigmoid_focal_loss", eql_loss_config: dict | None = None, efl_loss_config: dict | None = None, num_decoder_layers: int = 6):
         """
         Init a criterion function.
 
@@ -70,7 +71,10 @@ class ClipCriterion:
         self.loss_nll_config = loss_nll_config
         self.label_loss_type = label_loss_type.lower()
         self.eql_loss_config = eql_loss_config or {}
+        self.efl_loss_config = efl_loss_config or {}
+        self.num_decoder_layers = num_decoder_layers
         self.eqlv2_nobg_loss: EQLv2NoBg | None = None
+        self.efl_loss: EqualizedFocalLoss | None = None
 
         if self.label_loss_type == "eql_lossv2_nobg":
             self.eqlv2_nobg_loss = EQLv2NoBg(
@@ -80,10 +84,27 @@ class ClipCriterion:
                 mu=self.eql_loss_config.get("MU", 0.8),
                 alpha=self.eql_loss_config.get("ALPHA", 4.0),
             )
+        elif self.label_loss_type == "efl_loss":
+            if (not self.aux_loss) and self.num_decoder_layers > 1:
+                raise ValueError(
+                    "LOSS_LABEL_TYPE='efl_loss' requires AUX_LOSS=True when NUM_DEC_LAYERS>1, "
+                    "otherwise EFL gradient hooks and label loss calls are inconsistent."
+                )
+            self.efl_loss = EqualizedFocalLoss(
+                reduction='mean',
+                loss_weight=1.0,
+                ignore_index=self.efl_loss_config.get("IGNORE_INDEX", -2),
+                num_classes=self.num_classes,
+                focal_gamma=self.efl_loss_config.get("FOCAL_GAMMA", 2.0),
+                focal_alpha=self.efl_loss_config.get("FOCAL_ALPHA", 0.25),
+                scale_factor=self.efl_loss_config.get("SCALE_FACTOR", 8.0),
+                num_decoder_layers=self.num_decoder_layers,
+                eps=self.efl_loss_config.get("EPS", 1e-8),
+            )
         elif self.label_loss_type != "sigmoid_focal_loss":
             raise ValueError(
                 f"Unsupported LOSS_LABEL_TYPE '{label_loss_type}', only support "
-                f"'sigmoid_focal_loss' and 'eql_lossV2_nobg'."
+                f"'sigmoid_focal_loss', 'eql_lossV2_nobg' and 'efl_loss'."
             )
 
     def set_epoch(self, epoch: int):
@@ -102,6 +123,8 @@ class ClipCriterion:
         self.device = device
         if self.eqlv2_nobg_loss is not None:
             self.eqlv2_nobg_loss = self.eqlv2_nobg_loss.to(self.device)
+        if self.efl_loss is not None:
+            self.efl_loss = self.efl_loss.to(self.device)
 
     def init_a_clip(self, batch: Dict, hidden_dim: int, num_classes: int, device: torch.device):
         """
@@ -647,25 +670,51 @@ class ClipCriterion:
         """
         Compute the classification loss.
         """
-        pred_logits = [
+        pred_logits_per_batch = [
             preds[~mask] for preds, mask in zip(outputs["pred_logits"], outputs["query_mask"])
         ]
-        gt_labels = [
-            torch.full((pred_logits[b].shape[:1]),
+        gt_labels_per_batch = [
+            torch.full((pred_logits_per_batch[b].shape[:1]),
                        self.num_classes,
                        dtype=torch.int64,
                        device=self.device) for b in range(len(gt_trackinstances))
         ]
-        for b in range(len(pred_logits)):
-            gt_labels[b][idx_to_gts_idx[b][0][idx_to_gts_idx[b][1] >= 0]] \
+        for b in range(len(pred_logits_per_batch)):
+            gt_labels_per_batch[b][idx_to_gts_idx[b][0][idx_to_gts_idx[b][1] >= 0]] \
                 = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
-        pred_logits = torch.cat(pred_logits)
-        gt_labels = torch.cat(gt_labels)
-        if self.label_loss_type == "eql_lossv2_nobg":
+
+        if self.label_loss_type == "efl_loss":
+            if self.efl_loss is None:
+                raise RuntimeError("EqualizedFocalLoss is not initialized.")
+            pred_logits = outputs["pred_logits"]
+            query_mask = outputs["query_mask"]
+            B, Q, _ = pred_logits.shape
+            gt_labels = torch.full(
+                (B, Q),
+                -1,
+                dtype=torch.int64,
+                device=self.device,
+            )
+            gt_labels[query_mask] = self.efl_loss.ignore_index
+
+            for b in range(B):
+                valid_pos = torch.nonzero(~query_mask[b], as_tuple=False).squeeze(1)
+                matched = idx_to_gts_idx[b][1] >= 0
+                if matched.any():
+                    matched_outputs_filtered = idx_to_gts_idx[b][0][matched]
+                    matched_outputs_raw = valid_pos[matched_outputs_filtered]
+                    gt_labels[b][matched_outputs_raw] = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][matched]]
+
+            loss = self.efl_loss(pred_logits=pred_logits, target_classes=gt_labels, normalizer=1)#不要进行平均，会在外边统一除以GT进行
+        elif self.label_loss_type == "eql_lossv2_nobg":
             if self.eqlv2_nobg_loss is None:
                 raise RuntimeError("EQLv2NoBg loss is not initialized.")
+            pred_logits = torch.cat(pred_logits_per_batch)
+            gt_labels = torch.cat(gt_labels_per_batch)
             loss = self.eqlv2_nobg_loss(cls_score=pred_logits, label=gt_labels)
         else:
+            pred_logits = torch.cat(pred_logits_per_batch)
+            gt_labels = torch.cat(gt_labels_per_batch)
             gt_labels_one_hot = F.one_hot(gt_labels, self.num_classes+1)[:, :-1]\
                 .to(pred_logits.dtype).to(pred_logits.device)
 
@@ -887,4 +936,6 @@ def build(config: dict):
         loss_nll_config=config["LOSS_NLL_CONFIG"],
         label_loss_type=config.get("LOSS_LABEL_TYPE", "sigmoid_focal_loss"),
         eql_loss_config=config.get("LOSS_LABEL_EQLV2_NOBG", {}),
+        efl_loss_config=config.get("LOSS_LABEL_EFL", {}),
+        num_decoder_layers=config["NUM_DEC_LAYERS"],
     )

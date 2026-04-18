@@ -25,6 +25,7 @@ from torch.optim.lr_scheduler import MultiStepLR, CosineAnnealingLR
 from log.logger import Logger, ProgressLogger
 from log.log import MetricLog
 from models.utils import load_pretrained_model
+from models.loss.efl_loss_help import SimpleGradientCollector
 from utils.vis_val import visualize_validation_metrics
 from utils.vis_train_loss import visualize_train_loss
 
@@ -37,7 +38,7 @@ def train(config: dict):
 
     loss_label_type = str(config.get("LOSS_LABEL_TYPE", "sigmoid_focal_loss"))
     normalized_loss_label_type = loss_label_type.lower()
-    valid_loss_label_types = {"sigmoid_focal_loss", "eql_lossv2_nobg"}
+    valid_loss_label_types = {"sigmoid_focal_loss", "eql_lossv2_nobg", "efl_loss"}
     if normalized_loss_label_type not in valid_loss_label_types:
         raise ValueError(
             f"Unsupported LOSS_LABEL_TYPE '{loss_label_type}', only support "
@@ -49,6 +50,13 @@ def train(config: dict):
         train_logger.show(head=f"LOSS_LABEL_EQLV2_NOBG={config.get('LOSS_LABEL_EQLV2_NOBG', {})}")
         train_logger.write(
             head=f"LOSS_LABEL_EQLV2_NOBG={config.get('LOSS_LABEL_EQLV2_NOBG', {})}",
+            filename="log.txt",
+            mode="a"
+        )
+    elif normalized_loss_label_type == "efl_loss":
+        train_logger.show(head=f"LOSS_LABEL_EFL={config.get('LOSS_LABEL_EFL', {})}")
+        train_logger.write(
+            head=f"LOSS_LABEL_EFL={config.get('LOSS_LABEL_EFL', {})}",
             filename="log.txt",
             mode="a"
         )
@@ -129,6 +137,44 @@ def train(config: dict):
     evaluate_tail_epochs = config["EVALUATE_TAIL_EPOCHS"] if "EVALUATE_TAIL_EPOCHS" in config else 5
     evaluate_force_epochs = config["EVALUATE_FORCE_EPOCHS"] if "EVALUATE_FORCE_EPOCHS" in config else []
     evaluate_force_epochs = set(evaluate_force_epochs if evaluate_force_epochs is not None else [])
+
+    # criterion hook收集梯度
+    gradient_collector = None
+    if normalized_loss_label_type == "efl_loss":
+        if criterion.efl_loss is None:
+            raise RuntimeError("LOSS_LABEL_TYPE='efl_loss' but criterion.efl_loss is not initialized.")
+        class_embed_modules = get_model(model).class_embed
+        if isinstance(class_embed_modules, nn.ModuleList):
+            hook_modules = []
+            seen_module_ids = set()
+            for module in class_embed_modules:
+                module_id = id(module)
+                if module_id in seen_module_ids:
+                    continue
+                seen_module_ids.add(module_id)
+                hook_modules.append(module)
+        else:
+            hook_modules = [class_embed_modules]
+
+        # def debug_forward_hook(module, inp, out):
+        #     print("[forward hook triggered]", module.__class__.__name__,
+        #         "out shape:", out.shape if torch.is_tensor(out) else type(out))
+        # debug_handles = []
+        # for m in hook_modules:
+        #     debug_handles.append(m.register_forward_hook(debug_forward_hook))
+
+        gradient_collector = SimpleGradientCollector(
+            target_modules=hook_modules,
+            collect_func=criterion.efl_loss.collect_grad,
+            grad_type='output'
+        )
+        train_logger.show(head=f"EFL gradient collector enabled, hooked {len(hook_modules)} class_embed layers.")
+        train_logger.write(
+            head=f"EFL gradient collector enabled, hooked {len(hook_modules)} class_embed layers.",
+            filename="log.txt",
+            mode="a"
+        )
+
 
     # 打印config使用情况
     train_logger.show(head=f"config使用情况: {config.access_summary()}")
@@ -243,6 +289,12 @@ def train(config: dict):
             submit_during_train(config=config, epoch=epoch, model=model, only_train_detr=config["ONLY_TRAIN_DETR"], train_logger=train_logger)
 
         train_logger.flush_buffers()
+
+    if gradient_collector is not None:
+        gradient_collector.remove()
+        train_logger.show(head="EFL gradient collector removed.")
+        train_logger.write(head="EFL gradient collector removed.", filename="log.txt", mode="a")
+
     # log记录结束时间
     train_logger.write(head=f"训练结束 End Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", filename="log.txt", mode="a")
     train_logger.show(head=f"训练结束 End Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
