@@ -11,16 +11,18 @@ class TrackInstances:
     #static properities
     use_spectral_decoder = True
     decoder_spectral_weights_dim = 8
+    use_dab = True
 
     @staticmethod
-    def set_static_properties(use_spectral_decoder: bool = True, decoder_spectral_weights_dim: int = 8):
+    def set_static_properties(use_spectral_decoder: bool = True, decoder_spectral_weights_dim: int = 8, use_dab: bool = True):
         TrackInstances.use_spectral_decoder = use_spectral_decoder
         TrackInstances.decoder_spectral_weights_dim = decoder_spectral_weights_dim
+        TrackInstances.use_dab = use_dab
 
 
     def __init__(self, frame_height: float = 1.0, frame_width: float = 1.0,
-                 hidden_dim: int = 256, num_classes: int = 1, use_dab: bool = False):
-        self.use_dab = use_dab
+                 hidden_dim: int = 256, num_classes: int = 1):
+        self.use_dab = TrackInstances.use_dab
         self.frame_height = frame_height
         self.frame_width = frame_width
         self.hidden_dim = hidden_dim
@@ -78,7 +80,7 @@ class TrackInstances:
 
     # 只在初始化GT时候使用
     @staticmethod
-    def init_tracks(batch: dict, hidden_dim: int, num_classes: int, device="cpu", use_dab: bool = False):
+    def init_tracks(batch: dict, hidden_dim: int, num_classes: int, device="cpu"):
         """
         Init tracks for a batch.
         """
@@ -92,8 +94,7 @@ class TrackInstances:
                 frame_height=float(batch["imgs"][i][0].shape[-2] / h_max),
                 frame_width=float(batch["imgs"][i][0].shape[-1] / w_max),
                 hidden_dim=hidden_dim,
-                num_classes=num_classes,
-                use_dab=use_dab
+                num_classes=num_classes
             ).to(device))
         return tracks_list
 

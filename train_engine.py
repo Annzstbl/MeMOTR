@@ -382,7 +382,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
 
     criterion.set_epoch(epoch)
     
-    TrackInstances.set_static_properties(False,)
+    TrackInstances.set_static_properties(False, use_dab=use_dab)
 
     if only_train_detr:
         for i, batch in enumerate(dataloader):
@@ -392,7 +392,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             tracks = TrackInstances.init_tracks(batch=batch,
                                                 hidden_dim=get_model(model).hidden_dim,
                                                 num_classes=get_model(model).num_classes,
-                                                device=device, use_dab=use_dab,
+                                                device=device,
                                                 )
             criterion.init_a_clip(batch=batch,
                                 hidden_dim=get_model(model).hidden_dim,
@@ -511,7 +511,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             tracks = TrackInstances.init_tracks(batch=batch,
                                                 hidden_dim=get_model(model).hidden_dim,
                                                 num_classes=get_model(model).num_classes,
-                                                device=device, use_dab=use_dab,
+                                                device=device,
                                                 )
             criterion.init_a_clip(batch=batch,
                                 hidden_dim=get_model(model).hidden_dim,
