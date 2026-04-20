@@ -26,12 +26,10 @@ class TrackInstances:
         self.hidden_dim = hidden_dim
         self.num_classes = num_classes
         if self.use_dab:
-            self.ref_pts = torch.zeros((0, 5))
-            self.query_embed = torch.zeros((0, hidden_dim))
+            self.ref_pts = torch.zeros((0, 5)) # 最后一层decoder layer的输入ref_pts
+            self.query_embed = torch.zeros((0, hidden_dim)) # 最后一层decoder layer的输入query_embed, 之后由query_updater更新
         else:
-            # self.ref_pts = torch.zeros((0, 2))
-            self.ref_pts = torch.zeros((0, 4))
-            self.query_embed = torch.zeros((0, 2 * hidden_dim))
+            raise NotImplementedError("Not Support for no DAB.")
         self.ids = torch.zeros((0,), dtype=torch.long)
         self.boxes = torch.zeros((0, 5))
         self.labels = torch.zeros((0,), dtype=torch.long)

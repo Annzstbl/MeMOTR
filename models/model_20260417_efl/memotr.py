@@ -209,13 +209,61 @@ class MeMOTR(nn.Module):
         output_classes = torch.stack(output_classes, dim=0)
         output_bboxes = torch.stack(output_bboxes, dim=0)
 
+        decoder_states = self.build_decoder_states(
+            query_in=inter_queries,
+            query_out=outputs,
+            init_reference=init_reference,
+            ref_out=inter_references,
+        )
+
+        # forward 输出说明（便于排查/对齐 criterion 与 runtime_tracker）:
+        # - pred_logits: (B, Q, num_classes)
+        #   最后一层 decoder 分类 logits，Q = Nd + Ntrack_max。
+        # - pred_bboxes: (B, Q, 5)
+        #   最后一层 decoder 旋转框预测（sigmoid 后的归一化坐标）。
+        # - last_ref_pts: (B, Q, 2/5)
+        #   下一帧 track 的 reference points（最后一层 decoder 的输入 ref，inverse_sigmoid 空间）。
+        # - query_mask: (B, Q)
+        #   query 有效掩码：False=有效 query，True=padding query。
+        # - det_query_embed: (Nd, Cq)
+        #   检测 query 的初始 embedding（不含 track queries）。
+        # - init_ref_pts: (B, Q, 2/5)
+        #   decoder 初始 reference points（inverse_sigmoid 空间）。
+        # - decoder_states:
+        #   统一的 decoder 级联语义容器:
+        #   - query_in:  (L, B, Q, C) 每层输入 query
+        #   - query_out: (L, B, Q, C) 每层输出 query
+        #   - ref_in:    (L, B, Q, 2/5) 每层输入 ref（sigmoid 空间）
+        #   - ref_out:   (L, B, Q, 2/5) 每层输出 ref（sigmoid 空间）
+        #
+        # 条件项:
+        # - aux_outputs: List[Dict], len=n_dec_layers-1（self.aux_loss=True）
+        #   每层辅助监督输出（不含最后一层），含 pred_logits/pred_bboxes/query_mask/queries。
+        #   其中 queries 对应该层的输出 query（decoder_states["query_out"][:-1]）。
+        #
+        # - outputs: (B, Q, C)
+        #   最后一层 query 输出（decoder_states["query_out"][-1]，兼容旧接口）。
+        # - spectral_weights: List[(B, C_spec, H_l, W_l)], len=n_feature_levels
+        #   多尺度特征图的光谱权重（供损失/分析使用）。
+        # - scem_gamma: (B, T, K), scem_log_mix: (B, T, K)
+        #   SCEM 混合参数（用于光谱证据建模）。
+        # - scem_aux_losses: Dict[str, Tensor]（若 SCEM 返回）
+        #   SCEM 的辅助损失项。
+        #
+        # debug=True 额外项:
+        # - inter_references: (L, B, Q, 2/5)（兼容字段，等价 decoder_states["ref_out"]）
+        # - inter_queries: (L, B, Q, C)（兼容字段，等价 decoder_states["query_in"]）
+        # - init_reference: (B, Q, 2/5)（sigmoid 空间）
+        # - all_outputs: (L, B, Q, C)（兼容字段，等价 decoder_states["query_out"]）
+        # - scem_token_debug: SCEM 内部 token 调试信息（若存在）
         res = {
             "pred_logits": output_classes[-1],
             "pred_bboxes": output_bboxes[-1],
-            "last_ref_pts": inverse_sigmoid(inter_references[-2, :, :, :]),
+            "last_ref_pts": inverse_sigmoid(decoder_states["ref_in"][-1]),
             "query_mask": query_mask,
             "det_query_embed": query_embed[0][:self.n_det_queries],
             "init_ref_pts": inverse_sigmoid(init_reference),
+            "decoder_states": decoder_states,
         }
 
         if self.aux_loss:
@@ -223,16 +271,16 @@ class MeMOTR(nn.Module):
                 output_classes=output_classes,
                 output_bboxes=output_bboxes,
                 query_mask=query_mask,
-                queries=inter_queries,
+                decoder_states=decoder_states,
             )
 
-        res["outputs"] = outputs[-1]
+        res["outputs"] = decoder_states["query_out"][-1]
         res["spectral_weights"] = spectral_weights
         if debug:
-            res["inter_references"] = inter_references
-            res["inter_queries"] = inter_queries
+            res["inter_references"] = decoder_states["ref_out"]
+            res["inter_queries"] = decoder_states["query_in"]
             res["init_reference"] = init_reference
-            res["all_outputs"] = outputs
+            res["all_outputs"] = decoder_states["query_out"]
             if scem_token_debug is not None:
                 res["scem_token_debug"] = scem_token_debug
         res["scem_gamma"] = gamma
@@ -245,11 +293,34 @@ class MeMOTR(nn.Module):
         self.use_checkpoint = enable
         self.transformer.enable_checkpoint(enable)
 
+    @staticmethod
+    def build_decoder_states(query_in: torch.Tensor, query_out: torch.Tensor,
+                             init_reference: torch.Tensor, ref_out: torch.Tensor) -> dict:
+        if query_in.dim() != 4 or query_out.dim() != 4:
+            raise ValueError("query_in/query_out are expected to be 4D tensors: (L, B, Q, C).")
+        if ref_out.dim() != 4 or init_reference.dim() != 3:
+            raise ValueError("ref_out/init_reference shapes are expected as (L, B, Q, R) and (B, Q, R).")
+        if query_in.shape[0] != query_out.shape[0]:
+            raise ValueError(f"query_in/query_out layer count mismatch: {query_in.shape[0]} vs {query_out.shape[0]}.")
+        if ref_out.shape[0] != query_out.shape[0]:
+            raise ValueError(f"ref_out/query_out layer count mismatch: {ref_out.shape[0]} vs {query_out.shape[0]}.")
+        if ref_out.shape[0] < 1:
+            raise ValueError("ref_out must contain at least one decoder layer.")
+
+        # layer_input.ref[0] = init_reference; layer_input.ref[l] = layer_output.ref[l-1] (l>0).
+        ref_in = torch.cat((init_reference.unsqueeze(0), ref_out[:-1]), dim=0)
+        return {
+            "query_in": query_in,
+            "query_out": query_out,
+            "ref_in": ref_in,
+            "ref_out": ref_out,
+        }
+
     @torch.jit.unused
-    def set_aux_loss(self, output_classes, output_bboxes, query_mask, queries):
+    def set_aux_loss(self, output_classes, output_bboxes, query_mask, decoder_states):
         return [
             {"pred_logits": a, "pred_bboxes": b, "query_mask": query_mask, "queries": c}
-            for a, b, c in zip(output_classes[:-1], output_bboxes[:-1], queries[1:])
+            for a, b, c in zip(output_classes[:-1], output_bboxes[:-1], decoder_states["query_out"][:-1])
         ]
 
     def get_det_reference_points(self) -> torch.Tensor:

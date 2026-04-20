@@ -86,7 +86,8 @@ class QueryUpdater(nn.Module):
                 unmatched_dets: List[TrackInstances] | None,
                 no_augment: bool = False):
         # scores> update_threshold 或者 active_tracks.ids>=0的会列为active_tracks
-        # iou<0.5的track的id会被置为-1
+        # 不active的会直接消失
+        # iou<0.5的 active_tracks会将track_id=-1
         tracks = self.select_active_tracks(previous_tracks, new_tracks, unmatched_dets, no_augment=no_augment)
         tracks = self.update_tracks_embedding(tracks=tracks)
 
@@ -96,18 +97,6 @@ class QueryUpdater(nn.Module):
         for b in range(len(tracks)):
             scores = torch.max(logits_to_scores(logits=tracks[b].logits), dim=1).values
             is_pos = scores > self.update_threshold #之前在选择active的时候按照 scores>update_threshold 或者 id>0来筛选，这里选择scores足够高的部分进行更新
-            # if self.visualize:
-            #     os.makedirs("./outputs/visualize_tmp/query_updater/", exist_ok=True)
-            #     torch.save(tracks[b].ref_pts.cpu(), "./outputs/visualize_tmp/query_updater/current_ref_pts.tensor")
-            #     # torch.save(tracks[b].query_embed[:, :].cpu(),
-            #     #            "./outputs/visualize_tmp/query_updater/current_query_pos.tensor")
-            #     # torch.save(tracks[b].query_embed[:, :].cpu(),
-            #     #            "./outputs/visualize_tmp/query_updater/current_query_feat.tensor")
-            #     torch.save(tracks[b].query_embed.cpu(),
-            #                "./outputs/visualize_tmp/query_updater/current_query_feat.tensor")
-            #     torch.save(tracks[b].ids.cpu(), "./outputs/visualize_tmp/query_updater/current_ids.tensor")
-            #     torch.save(tracks[b].labels.cpu(), "./outputs/visualize_tmp/query_updater/current_labels.tensor")
-            #     torch.save(scores.cpu(), "./outputs/visualize_tmp/query_updater/current_scores.tensor")
             if self.use_dab:
                 tracks[b].ref_pts[is_pos] = inverse_sigmoid(tracks[b][is_pos].boxes.detach().clone())
             else:
@@ -165,6 +154,7 @@ class QueryUpdater(nn.Module):
             if self.use_dab:
                 tracks[b].query_embed[is_pos] = query_feat[is_pos]
             else:
+                raise NotImplementedError("Not Support for no DAB.")
                 tracks[b].query_embed[:, self.hidden_dim:][is_pos] = query_feat[is_pos]
                 # Update query pos, which is not appeared in DAB-D-DETR framework:
                 new_query_pos = self.linear_pos2(self.activation(self.linear_pos1(output_embed)))
@@ -172,20 +162,91 @@ class QueryUpdater(nn.Module):
                 query_pos = query_pos + new_query_pos
                 query_pos = self.norm_pos(query_pos)
                 tracks[b].query_embed[:, :self.hidden_dim][is_pos] = query_pos[is_pos]
-
-            # if self.visualize:
-            #     torch.save(tracks[b].ref_pts.cpu(), "./outputs/visualize_tmp/query_updater/next_ref_pts.tensor")
-            #     # torch.save(tracks[b].query_embed[:, :self.hidden_dim].cpu(),
-            #     #            "./outputs/visualize_tmp/query_updater/next_query_pos.tensor")
-            #     # torch.save(tracks[b].query_embed[:, self.hidden_dim:].cpu(),
-            #     #            "./outputs/visualize_tmp/query_updater/next_query_feat.tensor")
-            #     torch.save(tracks[b].query_embed.cpu(),
-            #                "./outputs/visualize_tmp/query_updater/next_query_feat.tensor")
-            #     torch.save(tracks[b].ids.cpu(), "./outputs/visualize_tmp/query_updater/next_ids.tensor")
-            #     torch.save(tracks[b].labels.cpu(), "./outputs/visualize_tmp/query_updater/next_labels.tensor")
-            #     torch.save(scores.cpu(), "./outputs/visualize_tmp/query_updater/next_scores.tensor")
-
         return tracks
+
+    def _init_track_memory_fields(self, track_instances: TrackInstances):
+        track_instances.last_output = track_instances.output_embed
+        if self.use_dab:
+            track_instances.long_memory = track_instances.query_embed
+        else:
+            track_instances.long_memory = track_instances.query_embed[:, self.hidden_dim:]
+
+    def _select_active_tracks_no_aug(self, previous_tracks: TrackInstances,
+                                     new_tracks: TrackInstances,
+                                     unmatched_dets: TrackInstances) -> TrackInstances:
+        """Select active tracks for training without augmentation.
+
+        Pipeline:
+        1) Merge `previous_tracks` and `new_tracks`.
+        2) Append `unmatched_dets` (their ids are -1 by design, used as hard negatives).
+        3) Keep tracks that are confident (`score > update_threshold`) OR already have valid ids (`id >= 0`).
+        4) Apply an IoU gate: tracks with `iou < 0.5` are marked as invalid by setting `id = -1`.
+
+        Why set `id = -1`:
+        - It marks a track as inactive/unreliable identity in current frame.
+        - Downstream logic treats negative ids as non-confirmed tracks, so they are excluded
+          from the persistent active set in later filtering/postprocess steps.
+        """
+        active_tracks = TrackInstances.cat_tracked_instances(previous_tracks, new_tracks)
+        # ids of unmatched_dets are always -1, but their features may be used as hard negatives.
+        active_tracks = TrackInstances.cat_tracked_instances(active_tracks, unmatched_dets)
+        scores = torch.max(logits_to_scores(logits=active_tracks.logits), dim=1).values
+        keep_idxes = (scores > self.update_threshold) | (active_tracks.ids >= 0)
+        active_tracks = active_tracks[keep_idxes]
+        active_tracks.ids[active_tracks.iou < 0.5] = -1 #TODO 0.5这个阈值太大了
+        return active_tracks
+
+    def _select_active_tracks_with_aug(self, previous_tracks: TrackInstances,
+                                       new_tracks: TrackInstances,
+                                       unmatched_dets: TrackInstances,
+                                       no_augment: bool) -> TrackInstances:
+        active_tracks = TrackInstances.cat_tracked_instances(previous_tracks, new_tracks)
+        active_tracks = active_tracks[(active_tracks.iou > 0.5) & (active_tracks.ids >= 0)]
+
+        if self.tp_drop_ratio > 0.0 and not no_augment and len(active_tracks) > 0:
+            tp_keep_idx = torch.rand((len(active_tracks), )) > self.tp_drop_ratio
+            active_tracks = active_tracks[tp_keep_idx]
+
+        if self.fp_insert_ratio > 0.0 and not no_augment:
+            selected_active_tracks = active_tracks[
+                torch.bernoulli(torch.ones((len(active_tracks), )) * self.fp_insert_ratio).bool()
+            ]
+            if len(unmatched_dets) > 0 and len(selected_active_tracks) > 0:
+                fp_num = len(selected_active_tracks)
+                if fp_num >= len(unmatched_dets):
+                    insert_fp = unmatched_dets
+                else:
+                    selected_active_boxes = box_cxcywh_to_xyxy(selected_active_tracks.boxes)
+                    unmatched_boxes = box_cxcywh_to_xyxy(unmatched_dets.boxes)
+                    iou, _ = box_iou_union(unmatched_boxes, selected_active_boxes)
+                    fp_idx = torch.max(iou, dim=0).indices
+                    fp_idx = torch.unique(fp_idx)
+                    insert_fp = unmatched_dets[fp_idx]
+                active_tracks = TrackInstances.cat_tracked_instances(active_tracks, insert_fp)
+        return active_tracks
+
+    def _build_fake_tracks(self, n_classes: int) -> TrackInstances:
+        device = next(self.query_feat_ffn.parameters()).device
+        fake_tracks = TrackInstances(frame_height=1.0, frame_width=1.0, hidden_dim=self.hidden_dim).to(device=device)
+        if self.use_dab:
+            fake_tracks.query_embed = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
+            fake_tracks.ref_pts = torch.randn((1, 5), dtype=torch.float, device=device)
+        else:
+            fake_tracks.query_embed = torch.randn((1, 2 * self.hidden_dim), dtype=torch.float, device=device)
+            # fake_tracks.ref_pts = torch.randn((1, 2), dtype=torch.float, device=device)
+            fake_tracks.ref_pts = torch.randn((1, 4), dtype=torch.float, device=device)
+        fake_tracks.output_embed = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
+        fake_tracks.ids = torch.as_tensor([-2], dtype=torch.long, device=device)  # fake tracks sentinel id
+        fake_tracks.matched_idx = torch.as_tensor([-2], dtype=torch.long, device=device)
+        fake_tracks.boxes = torch.randn((1, 5), dtype=torch.float, device=device)
+        fake_tracks.logits = torch.randn((1, n_classes), dtype=torch.float, device=device)
+        fake_tracks.iou = torch.zeros((1,), dtype=torch.float, device=device)
+        fake_tracks.last_output = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
+        fake_tracks.long_memory = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
+        if self.decoder_spectral:
+            fake_tracks.pred_spectral_weights = torch.randn((1, self.query_spectral_weights_dim), dtype=torch.float, device=device)
+            fake_tracks.query_spectral_weights = torch.randn((1, self.query_spectral_weights_dim), dtype=torch.float, device=device)
+        return fake_tracks
 
     def select_active_tracks(self, previous_tracks: List[TrackInstances],
                              new_tracks: List[TrackInstances],
@@ -194,90 +255,30 @@ class QueryUpdater(nn.Module):
         tracks = []
         if self.training:
             for b in range(len(new_tracks)):
-                # Update fields last_output long_memory
-                new_tracks[b].last_output = new_tracks[b].output_embed
-                if self.use_dab:
-                    new_tracks[b].long_memory = new_tracks[b].query_embed
-                else:
-                    new_tracks[b].long_memory = new_tracks[b].query_embed[:, self.hidden_dim:]
-                unmatched_dets[b].last_output = unmatched_dets[b].output_embed
-                if self.use_dab:
-                    unmatched_dets[b].long_memory = unmatched_dets[b].query_embed
-                else:
-                    unmatched_dets[b].long_memory = unmatched_dets[b].query_embed[:, self.hidden_dim:]
-                
-                
+                self._init_track_memory_fields(new_tracks[b])
+                self._init_track_memory_fields(unmatched_dets[b])
+
                 if self.tp_drop_ratio == 0.0 and self.fp_insert_ratio == 0.0:
-                    active_tracks = TrackInstances.cat_tracked_instances(previous_tracks[b], new_tracks[b])
-                    # ids of unmatched_dets always be -1. 这里的Cat看起来没有作用
-                    active_tracks = TrackInstances.cat_tracked_instances(active_tracks, unmatched_dets[b])
-                    scores = torch.max(logits_to_scores(logits=active_tracks.logits), dim=1).values
-                    keep_idxes = (scores > self.update_threshold) | (active_tracks.ids >= 0) #控制逻辑
-                    active_tracks = active_tracks[keep_idxes]
-                    active_tracks.ids[active_tracks.iou < 0.5] = -1 #额外iou控制
-                # 暂时不管
+                    active_tracks = self._select_active_tracks_no_aug(
+                        previous_tracks=previous_tracks[b],
+                        new_tracks=new_tracks[b],
+                        unmatched_dets=unmatched_dets[b],
+                    )
                 else:
-                    active_tracks = TrackInstances.cat_tracked_instances(previous_tracks[b], new_tracks[b])
-                    active_tracks = active_tracks[(active_tracks.iou > 0.5) & (active_tracks.ids >= 0)]
-                    if self.tp_drop_ratio > 0.0 and not no_augment:
-                        if len(active_tracks) > 0:
-                            tp_keep_idx = torch.rand((len(active_tracks), )) > self.tp_drop_ratio
-                            active_tracks = active_tracks[tp_keep_idx]
-                    if self.fp_insert_ratio > 0.0 and not no_augment:
-                        selected_active_tracks = active_tracks[
-                            torch.bernoulli(
-                                torch.ones((len(active_tracks), )) * self.fp_insert_ratio
-                            ).bool()
-                        ]
-                        if len(unmatched_dets[b]) > 0 and len(selected_active_tracks) > 0:
-                            fp_num = len(selected_active_tracks)
-                            if fp_num >= len(unmatched_dets[b]):
-                                insert_fp = unmatched_dets[b]
-                            else:
-                                selected_active_boxes = box_cxcywh_to_xyxy(selected_active_tracks.boxes)
-                                unmatched_boxes = box_cxcywh_to_xyxy(unmatched_dets[b].boxes)
-                                iou, _ = box_iou_union(unmatched_boxes, selected_active_boxes)
-                                fp_idx = torch.max(iou, dim=0).indices
-                                fp_idx = torch.unique(fp_idx)
-                                insert_fp = unmatched_dets[b][fp_idx]
-                            active_tracks = TrackInstances.cat_tracked_instances(active_tracks, insert_fp)
+                    active_tracks = self._select_active_tracks_with_aug(
+                        previous_tracks=previous_tracks[b],
+                        new_tracks=new_tracks[b],
+                        unmatched_dets=unmatched_dets[b],
+                        no_augment=no_augment,
+                    )
 
                 if len(active_tracks) == 0:
-                    device = next(self.query_feat_ffn.parameters()).device
-                    fake_tracks = TrackInstances(frame_height=1.0, frame_width=1.0, hidden_dim=self.hidden_dim).to(
-                        device=device)
-                    if self.use_dab:
-                        fake_tracks.query_embed = torch.randn((1, self.hidden_dim), dtype=torch.float,
-                                                              device=device)
-                    else:
-                        fake_tracks.query_embed = torch.randn((1, 2 * self.hidden_dim), dtype=torch.float, device=device)
-                    fake_tracks.output_embed = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
-                    if self.use_dab:
-                        fake_tracks.ref_pts = torch.randn((1, 5), dtype=torch.float, device=device)
-                    else:
-                        # fake_tracks.ref_pts = torch.randn((1, 2), dtype=torch.float, device=device)
-                        fake_tracks.ref_pts = torch.randn((1, 4), dtype=torch.float, device=device)
-                    fake_tracks.ids = torch.as_tensor([-2], dtype=torch.long, device=device)# fake_tracks的id设置为-2
-                    fake_tracks.matched_idx = torch.as_tensor([-2], dtype=torch.long, device=device)
-                    fake_tracks.boxes = torch.randn((1, 5), dtype=torch.float, device=device)
-                    fake_tracks.logits = torch.randn((1, active_tracks.logits.shape[1]), dtype=torch.float, device=device)
-                    fake_tracks.iou = torch.zeros((1,), dtype=torch.float, device=device)
-                    fake_tracks.last_output = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
-                    fake_tracks.long_memory = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
-                    if self.decoder_spectral:
-                        fake_tracks.pred_spectral_weights = torch.randn((1, self.query_spectral_weights_dim), dtype=torch.float, device=device)
-                        fake_tracks.query_spectral_weights = torch.randn((1, self.query_spectral_weights_dim), dtype=torch.float, device=device)
-                    active_tracks = fake_tracks
+                    active_tracks = self._build_fake_tracks(n_classes=active_tracks.logits.shape[1])
                 tracks.append(active_tracks)
         else:
             # Eval only has B=1.
             assert len(previous_tracks) == 1 and len(new_tracks) == 1
-            new_tracks[0].last_output = new_tracks[0].output_embed
-            # new_tracks[0].long_memory = new_tracks[0].query_embed
-            if self.use_dab:
-                new_tracks[0].long_memory = new_tracks[0].query_embed
-            else:
-                new_tracks[0].long_memory = new_tracks[0].query_embed[:, self.hidden_dim:]
+            self._init_track_memory_fields(new_tracks[0])
             active_tracks = TrackInstances.cat_tracked_instances(previous_tracks[0], new_tracks[0])
             active_tracks = active_tracks[active_tracks.ids >= 0]
             tracks.append(active_tracks)

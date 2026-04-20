@@ -31,7 +31,11 @@ class DeformableDecoder(nn.Module):
     def forward(self, tgt, reference_points, src, src_spatial_shapes, src_level_start_index, src_valid_ratios,
                 query_pos, query_mask, src_padding_mask):
         output = tgt
-        intermediate, intermediate_reference_points, intermediate_queries = [], [], []
+        # 统一语义:
+        # - layer_input_queries[l]:  第 l 层 decoder 的输入 query（进入 layer 之前）
+        # - layer_output_queries[l]: 第 l 层 decoder 的输出 query（经过 layer 之后）
+        # - layer_output_refs[l]:    第 l 层 decoder 更新后的 reference points（层后）
+        layer_output_queries, layer_output_refs, layer_input_queries = [], [], []
         for lid, layer in enumerate(self.layers):
             if (lid == 0) and (self.use_dab is False):
                 ref_pts_backup = reference_points.clone()
@@ -49,7 +53,7 @@ class DeformableDecoder(nn.Module):
                 raw_query_pos = self.ref_point_head(anchor_embed)
                 pos_scale = self.query_scale(output) if lid != 0 else 1
                 query_pos = pos_scale * raw_query_pos
-            intermediate_queries.append(output)
+            layer_input_queries.append(output)
 
             if self.use_checkpoint:
                 from torch.utils.checkpoint import checkpoint
@@ -83,11 +87,15 @@ class DeformableDecoder(nn.Module):
                     reference_points = new_reference_points.detach()
 
             if self.return_intermediate:
-                intermediate.append(output)
-                intermediate_reference_points.append(reference_points)
+                layer_output_queries.append(output)
+                layer_output_refs.append(reference_points)
 
         if self.return_intermediate:
-            return torch.stack(intermediate), torch.stack(intermediate_reference_points), torch.stack(intermediate_queries)
+            return (
+                torch.stack(layer_output_queries),
+                torch.stack(layer_output_refs),
+                torch.stack(layer_input_queries),
+            )
         raise NotImplementedError("Not Support for no Inter Outputs.")
 
 

@@ -125,12 +125,16 @@ class DeformableTransformer(nn.Module):
         reference_points = ref_pts.sigmoid()
         init_reference_points = reference_points
 
-        output, res_reference_points, inter_queries = self.decoder(
+        # decoder 返回:
+        # - layer_output_queries: (L, B, Q, C)
+        # - layer_output_refs:    (L, B, Q, 2/5)
+        # - layer_input_queries:  (L, B, Q, C)
+        layer_output_queries, layer_output_refs, layer_input_queries = self.decoder(
             tgt=tgt, reference_points=init_reference_points, src=memory, src_spatial_shapes=spatial_shapes,
             src_level_start_index=level_start_index, src_valid_ratios=valid_ratios, query_pos=query_embed,
             query_mask=query_mask, src_padding_mask=mask_flatten
         )
-        return output, init_reference_points, res_reference_points, inter_queries
+        return layer_output_queries, init_reference_points, layer_output_refs, layer_input_queries
 
     def get_d_model(self):
         return self.d_model
