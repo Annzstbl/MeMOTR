@@ -2,6 +2,7 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.init import normal_
 
 from ..mlp import MLP
@@ -41,6 +42,9 @@ class DeformableTransformer(nn.Module):
 
         self.level_embed = nn.Parameter(torch.Tensor(n_feature_levels, d_model))
         self.spectral_embed = MLP(input_dim=8, hidden_dim=self.d_model, output_dim=self.d_model, num_layers=2)
+        self.q_spec_obs_embed = MLP(input_dim=8*n_feature_levels, hidden_dim=self.d_model, output_dim=self.d_model, num_layers=2)
+        self.q_spec_fuse = MLP(input_dim=2 * self.d_model, hidden_dim=2 * self.d_model, output_dim=self.d_model, num_layers=2)
+        self.q_spec_norm = nn.LayerNorm(self.d_model)
         if two_stage:
             assert False, "two stage is not supported"
         else:
@@ -70,6 +74,63 @@ class DeformableTransformer(nn.Module):
         valid_h = torch.sum(~mask[:, :, 0], 1)
         valid_w = torch.sum(~mask[:, 0, :], 1)
         return torch.stack([valid_w.float() / w, valid_h.float() / h], -1)
+
+    def _sample_query_spectral_obs(
+        self,
+        spectral_weights: List[torch.Tensor],
+        reference_points: torch.Tensor,
+        valid_ratios: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        从多尺度 spectral_weights 中，为每个 query 采样 query-aligned spectral observation。
+        reference_points: [B, Q, 2] or [B, Q, 5]
+        valid_ratios:     [B, L, 2]
+        return:           [B, Q, 8 * L]
+        """
+        # 只用旋转框中心来对齐采样
+        query_centers = reference_points[..., :2].detach()   # [B, Q, 2]
+
+        sampled_specs = []
+        for lvl, lvl_spectral_weight in enumerate(spectral_weights):
+            # 对齐到当前 level 的 valid region
+            lvl_centers = query_centers * valid_ratios[:, None, lvl, :]   # [B, Q, 2]
+
+            # grid_sample 需要 [-1, 1]
+            lvl_grid = (lvl_centers * 2.0 - 1.0).clamp(
+                min=-1.0 + 1e-6,
+                max=1.0 - 1e-6
+            ).unsqueeze(2)   # [B, Q, 1, 2]
+
+            lvl_sampled = F.grid_sample(
+                input=lvl_spectral_weight,     # [B, 8, H, W]
+                grid=lvl_grid,                 # [B, Q, 1, 2]
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=False,
+            )   # [B, 8, Q, 1]
+
+            lvl_sampled = lvl_sampled.squeeze(-1).transpose(1, 2)  # [B, Q, 8]
+            sampled_specs.append(lvl_sampled)
+
+        # 多尺度拼接，而不是直接均值
+        pooled_spec = torch.cat(sampled_specs, dim=-1)   # [B, Q, 8 * L]
+        return pooled_spec
+
+
+
+
+    # 只用光谱信息
+    def _build_query_spectral_state(
+        self,
+        spectral_weights: List[torch.Tensor],
+        reference_points: torch.Tensor,
+        tgt: torch.Tensor,
+        valid_ratios: torch.Tensor,
+    ):
+        pooled_spec = self._sample_query_spectral_obs(spectral_weights, reference_points, valid_ratios)
+        pooled_spec_embed = self.q_spec_obs_embed(pooled_spec)
+        q_spec0 = self.q_spec_norm(pooled_spec_embed)
+        return q_spec0
 
     def forward(self, srcs: List[torch.Tensor], masks: List[torch.Tensor], pos_embeds: Optional[List[torch.Tensor]],
                 query_embed, ref_pts, query_mask, spectral_weights: List[torch.Tensor],
@@ -125,6 +186,11 @@ class DeformableTransformer(nn.Module):
         reference_points = ref_pts.sigmoid()
         init_reference_points = reference_points
 
+        q_spec = self._build_query_spectral_state(
+            spectral_weights=spectral_weights, reference_points=init_reference_points, tgt=tgt, valid_ratios=valid_ratios
+        )
+
+
         # decoder 返回:
         # - layer_output_queries: (L, B, Q, C)
         # - layer_output_refs:    (L, B, Q, 2/5)
@@ -132,8 +198,9 @@ class DeformableTransformer(nn.Module):
         layer_output_queries, layer_output_refs, layer_input_queries = self.decoder(
             tgt=tgt, reference_points=init_reference_points, src=memory, src_spatial_shapes=spatial_shapes,
             src_level_start_index=level_start_index, src_valid_ratios=valid_ratios, query_pos=query_embed,
-            query_mask=query_mask, src_padding_mask=mask_flatten
+            query_mask=query_mask, src_padding_mask=mask_flatten, q_spec=q_spec
         )
+        # TODO: expose q_spec for downstream tracking-state propagation in a future patch if needed.
         return layer_output_queries, init_reference_points, layer_output_refs, layer_input_queries
 
     def get_d_model(self):

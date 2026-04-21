@@ -44,9 +44,11 @@ class MeMOTR(nn.Module):
         self.aux_loss = aux_loss
         self.with_box_refine = with_box_refine
         self.use_checkpoint = use_checkpoint
-        self.checkpoint_level = checkpoint_level
+        # 三级策略：1=encoder, 2=encoder+decoder, 3=encoder+decoder+backbone
+        self.checkpoint_level = max(1, min(3, int(checkpoint_level)))
         self.use_dab = use_dab
         self.visualize = visualize
+        self.use_q_spec = bool(getattr(transformer, "use_q_spec", False))
 
         self.backbone = backbone
         self.transformer = transformer
@@ -109,7 +111,7 @@ class MeMOTR(nn.Module):
     def forward(self, frame: NestedTensor, tracks: List[TrackInstances],
                 debug: bool = False, heatmap: Optional[torch.Tensor] = None,
                 gmc: Optional[torch.Tensor] = None):
-        if self.use_checkpoint and self.checkpoint_level != 3:
+        if self.use_checkpoint and self.checkpoint_level >= 3:
             feature_tuple = checkpoint(self.backbone, frame, use_reentrant=False)
         else:
             feature_tuple = self.backbone(frame)
@@ -178,7 +180,10 @@ class MeMOTR(nn.Module):
         query_embed = self.get_query_embed(tracks=tracks).to(srcs[0].device)
         query_mask = self.get_query_mask(tracks=tracks).to(srcs[0].device)
 
-        outputs, init_reference, inter_references, inter_queries = self.transformer(
+        track_q_spec = None
+        if self.use_q_spec:
+            track_q_spec = self.get_track_q_spec(tracks=tracks).to(srcs[0].device)
+        outputs, init_reference, inter_references, inter_queries, init_q_spec, obs_q_spec = self.transformer(
             srcs=srcs,
             masks=masks,
             pos_embeds=pos,
@@ -189,6 +194,7 @@ class MeMOTR(nn.Module):
             additional_tokens=additional_tokens,
             additional_specs=additional_specs,
             additional_pos_embeds=additional_pos_embeds,
+            track_q_spec=track_q_spec,
         )
 
         output_classes, output_bboxes = [], []
@@ -276,6 +282,10 @@ class MeMOTR(nn.Module):
 
         res["outputs"] = decoder_states["query_out"][-1]
         res["spectral_weights"] = spectral_weights
+        if init_q_spec is not None:
+            res["init_q_spec"] = init_q_spec # = cat( new det spec, track_spec)
+        if obs_q_spec is not None:
+            res["obs_q_spec"] = obs_q_spec # = 根据这轮预测生成的q_spec
         if debug:
             res["inter_references"] = decoder_states["ref_out"]
             res["inter_queries"] = decoder_states["query_in"]
@@ -292,6 +302,10 @@ class MeMOTR(nn.Module):
     def enable_checkpoint(self, enable: bool):
         self.use_checkpoint = enable
         self.transformer.enable_checkpoint(enable)
+
+    def set_checkpoint_level(self, checkpoint_level: int):
+        self.checkpoint_level = max(1, min(3, int(checkpoint_level)))
+        self.transformer.set_checkpoint_level(self.checkpoint_level)
 
     @staticmethod
     def build_decoder_states(query_in: torch.Tensor, query_out: torch.Tensor,
@@ -341,6 +355,14 @@ class MeMOTR(nn.Module):
         for i in range(len(tracks)):
             query_embed[i, : len(tracks[i].query_embed), :] = tracks[i].query_embed
         return query_embed
+
+    def get_track_q_spec(self, tracks: List[TrackInstances]) -> torch.Tensor:
+        max_len = max([len(t.query_embed) for t in tracks])
+        q_spec = torch.zeros((len(tracks), max_len, self.hidden_dim))
+        for i in range(len(tracks)):
+            if len(tracks[i].query_q_spec) > 0:
+                q_spec[i, : len(tracks[i].query_q_spec), :] = tracks[i].query_q_spec
+        return q_spec
 
     def get_reference_points(self, tracks: List[TrackInstances]) -> torch.Tensor:
         det_references = self.get_det_reference_points().repeat(len(tracks), 1, 1)

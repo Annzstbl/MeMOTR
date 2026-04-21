@@ -22,6 +22,12 @@ from typing import List, Tuple, Dict
 from .matcher import build as build_matcher, HungarianMatcher, pairwise_min_permuted_segment_loss
 from .loss.eql_lossV2_nobg import EQLv2NoBg
 from .loss.efl_loss import EqualizedFocalLoss
+from .loss.efl_loss_closure import EqualizedFocalLoss as EqualizedFocalLossClosure
+from .model_output_accessors import (
+    get_last_layer_input_query,
+    get_last_layer_input_ref,
+    get_last_layer_output_query,
+)
 from structures.track_instances import TrackInstances
 from utils.box_ops import generalized_box_iou, box_cxcywh_to_xyxy, box_iou_union
 from utils.utils import is_distributed, distributed_world_size
@@ -84,13 +90,14 @@ class ClipCriterion:
                 mu=self.eql_loss_config.get("MU", 0.8),
                 alpha=self.eql_loss_config.get("ALPHA", 4.0),
             )
-        elif self.label_loss_type == "efl_loss":
+        elif self.label_loss_type in {"efl_loss", "efl_loss_closure"}:
             if (not self.aux_loss) and self.num_decoder_layers > 1:
                 raise ValueError(
-                    "LOSS_LABEL_TYPE='efl_loss' requires AUX_LOSS=True when NUM_DEC_LAYERS>1, "
+                    f"LOSS_LABEL_TYPE='{self.label_loss_type}' requires AUX_LOSS=True when NUM_DEC_LAYERS>1, "
                     "otherwise EFL gradient hooks and label loss calls are inconsistent."
                 )
-            self.efl_loss = EqualizedFocalLoss(
+            efl_cls = EqualizedFocalLoss if self.label_loss_type == "efl_loss" else EqualizedFocalLossClosure
+            self.efl_loss = efl_cls(
                 reduction='mean',
                 loss_weight=1.0,
                 ignore_index=self.efl_loss_config.get("IGNORE_INDEX", -2),
@@ -104,7 +111,7 @@ class ClipCriterion:
         elif self.label_loss_type != "sigmoid_focal_loss":
             raise ValueError(
                 f"Unsupported LOSS_LABEL_TYPE '{label_loss_type}', only support "
-                f"'sigmoid_focal_loss', 'eql_lossV2_nobg' and 'efl_loss'."
+                f"'sigmoid_focal_loss', 'eql_lossV2_nobg', 'efl_loss' and 'efl_loss_closure'."
             )
 
     def set_epoch(self, epoch: int):
@@ -310,6 +317,9 @@ class ClipCriterion:
         """
 
         batch_size = len(tracked_instances)
+        last_layer_input_query = get_last_layer_input_query(model_outputs=model_outputs)
+        last_layer_output_query = get_last_layer_output_query(model_outputs=model_outputs)
+        last_layer_input_ref = get_last_layer_input_ref(model_outputs=model_outputs)
 
         # 1. Get the GTs in current t frame.
         gt_trackinstances = self.gt_trackinstances_list[frame_idx]
@@ -342,16 +352,16 @@ class ClipCriterion:
             })
         num_disappeared_tracked_gts = 0
         for b in range(batch_size):
-            gt_idx = []
+            tracked_to_cur_gt_idx = []
             if len(tracked_instances[b]) > 0:
                 for gt_id in tracked_instances[b].ids.tolist():
                     if gt_id in gt_ids_to_idx[b]:
-                        gt_idx.append(gt_ids_to_idx[b][gt_id])
+                        tracked_to_cur_gt_idx.append(gt_ids_to_idx[b][gt_id])
                     else:
-                        gt_idx.append(-1)
+                        tracked_to_cur_gt_idx.append(-1)
                         num_disappeared_tracked_gts += 1
             #根据上一帧的id和这一帧的gt匹配情况，更新matched_idx
-            tracked_instances[b].matched_idx = torch.as_tensor(data=gt_idx,
+            tracked_instances[b].matched_idx = torch.as_tensor(data=tracked_to_cur_gt_idx,
                                                                dtype=tracked_instances[b].matched_idx.dtype)
         # 4.+ Filter the gts that not in the tracked instances:
         gt_full_idx = []
@@ -393,21 +403,20 @@ class ClipCriterion:
             gt_idx = torch.as_tensor([gt_ids_to_idx[b][gt_id.item()] for gt_id in gt_ids], dtype=torch.long)
             trackinstances.ids = gt_ids
             trackinstances.matched_idx = gt_idx
-            # trackinstances.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
             if self.use_dab:
-                trackinstances.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
+                trackinstances.query_embed = last_layer_input_query[b][output_idx]
             else:
-                trackinstances.query_embed = torch.cat(
-                    (
-                        model_outputs["det_query_embed"][output_idx][:, :self.hidden_dim],
-                        model_outputs["aux_outputs"][-1]["queries"][b][output_idx]
-                    ),
-                    dim=-1
-                )
-            trackinstances.ref_pts = model_outputs["last_ref_pts"][b][output_idx]#TODO 这里是最后一层layer的输入
-            trackinstances.output_embed = model_outputs["outputs"][b][output_idx]#TODO 这里按理来说应该和query_embed一致，请坐检查
+                raise NotImplementedError("Not Support for no DAB.")
+            trackinstances.ref_pts = last_layer_input_ref[b][output_idx]
+            trackinstances.output_embed = last_layer_output_query[b][output_idx]
             trackinstances.boxes = model_outputs["pred_bboxes"][b][output_idx]
             trackinstances.logits = model_outputs["pred_logits"][b][output_idx]
+            if "obs_q_spec" in model_outputs:
+                trackinstances.obs_q_spec = model_outputs["obs_q_spec"][b][output_idx]
+            # 新匹配到的目标，要第一次建立init_q_spec
+            # TODO但是这里的init_q_spec应该非常不准确
+            if "init_q_spec" in model_outputs:
+                trackinstances.query_q_spec = model_outputs["init_q_spec"][b][output_idx]
             trackinstances.iou = torch.zeros((len(gt_idx),), dtype=torch.float)
             if self.decoder_spectral_mse:
                 trackinstances.pred_spectral_weights = model_outputs["pred_spectral_weights"][b][output_idx]
@@ -543,27 +552,25 @@ class ClipCriterion:
             unmatched_indexes = list(indexes - matched_indexes)
             unmatched_indexes = torch.as_tensor(unmatched_indexes, dtype=torch.long)
             detections = TrackInstances(
-                hidden_dim=model_outputs["outputs"].shape[-1],
+                hidden_dim=last_layer_output_query.shape[-1],
                 num_classes=model_outputs["pred_logits"].shape[-1]
-            ).to(model_outputs["outputs"].device)
+            ).to(last_layer_output_query.device)
             detections.ref_pts = model_outputs["init_ref_pts"][b][unmatched_indexes]
-            detections.output_embed = model_outputs["outputs"][b][unmatched_indexes]
+            detections.output_embed = last_layer_output_query[b][unmatched_indexes]
             detections.logits = model_outputs["pred_logits"][b][unmatched_indexes]
             detections.boxes = model_outputs["pred_bboxes"][b][unmatched_indexes]
+            if "obs_q_spec" in model_outputs:
+                detections.obs_q_spec = model_outputs["obs_q_spec"][b][unmatched_indexes]
+            if "init_q_spec" in model_outputs:
+                detections.query_q_spec = model_outputs["init_q_spec"][b][unmatched_indexes]
             if self.decoder_spectral_mse:
                 detections.pred_spectral_weights = model_outputs["pred_spectral_weights"][b][unmatched_indexes]
                 detections.query_spectral_weights = model_outputs["init_query_spectral_weights"][b][unmatched_indexes]
-            # detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
             if self.use_dab:
-                detections.query_embed = model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
+                detections.query_embed = last_layer_input_query[b][unmatched_indexes]
             else:
-                detections.query_embed = torch.cat(
-                    (
-                        model_outputs["det_query_embed"][unmatched_indexes][:, :self.hidden_dim],
-                        model_outputs["aux_outputs"][-1]["queries"][b][unmatched_indexes]
-                    ),
-                    dim=-1
-                )
+                raise NotImplementedError("Not Support for no DAB.")
+
             detections.ids = -torch.ones((len(detections.query_embed),), dtype=torch.long, device=self.device)
             detections.matched_idx = -torch.ones((len(detections.query_embed),), dtype=torch.long, device=self.device)
             detections.iou = torch.zeros((len(detections.ids,)), dtype=torch.float, device=self.device)
@@ -652,13 +659,17 @@ class ClipCriterion:
         """
         Update tracked instances.
         """
+        last_layer_output_query = get_last_layer_output_query(model_outputs=model_outputs)
         for b in range(len(tracked_instances)):
             if len(tracked_instances[b]) > 0:
                 track_mask = model_outputs["query_mask"][b][self.n_det_queries:]
                 tracked_instances[b].boxes = model_outputs["pred_bboxes"][b][self.n_det_queries:][~track_mask]
                 tracked_instances[b].logits = model_outputs["pred_logits"][b][self.n_det_queries:][~track_mask]
                 # Query embed and ref_pts will be updated in the query_updater module.
-                tracked_instances[b].output_embed = model_outputs["outputs"][b][self.n_det_queries:][~track_mask]
+                tracked_instances[b].output_embed = last_layer_output_query[b][self.n_det_queries:][~track_mask]
+                # 设置所有track instnaces的obs_q_spec，这来自于decoder最后预测的ref_pts推理得到的
+                if "obs_q_spec" in model_outputs:
+                    tracked_instances[b].obs_q_spec = model_outputs["obs_q_spec"][b][self.n_det_queries:][~track_mask]
                 tracked_instances[b].matched_idx = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
                 tracked_instances[b].labels = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
                 # query_spectral_weights update in query_updater
@@ -683,7 +694,7 @@ class ClipCriterion:
             gt_labels_per_batch[b][idx_to_gts_idx[b][0][idx_to_gts_idx[b][1] >= 0]] \
                 = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
 
-        if self.label_loss_type == "efl_loss":
+        if self.label_loss_type in {"efl_loss", "efl_loss_closure"}:
             if self.efl_loss is None:
                 raise RuntimeError("EqualizedFocalLoss is not initialized.")
             pred_logits = outputs["pred_logits"]

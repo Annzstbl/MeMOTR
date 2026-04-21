@@ -69,6 +69,11 @@ class Submitter:
         self.only_train_detr = only_train_detr
         self.draw_pic_dir = draw_pic_dir
         self.epoch = epoch
+        TrackInstances.set_static_properties(
+            use_spectral_decoder=decoder_spectral,
+            use_dab=use_dab,
+            use_q_spec=bool(getattr(get_model(self.model), "use_q_spec", False)),
+        )
 
         # 对路径进行一些操作
         os.makedirs(self.predict_dir, exist_ok=True)
@@ -112,7 +117,6 @@ class Submitter:
             # 单帧图像
             tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
                                     num_classes=get_model(self.model).num_classes,
-                                    use_dab=self.use_dab,
                                     ).to(self.device)]
 
             effective_img_shape = ori_image.shape[1:4]  # (H, W, C), pre-pad valid area
@@ -203,7 +207,6 @@ class Submitter:
         """Inference path using learned prior map (SCEM prior_mode != None)."""
         tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
                                  num_classes=get_model(self.model).num_classes,
-                                 use_dab=self.use_dab,
                                  ).to(self.device)]
 
         txt_lines = []
@@ -270,7 +273,6 @@ class Submitter:
         """Inference path that consumes GT heatmap as SCEM supervision (debug/eval)."""
         tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
                                  num_classes=get_model(self.model).num_classes,
-                                 use_dab=self.use_dab,
                                  ).to(self.device)]
 
         txt_lines = []
@@ -330,7 +332,6 @@ class Submitter:
         """Default inference path: no prior map, optional motion compensation."""
         tracks = [TrackInstances(hidden_dim=get_model(self.model).hidden_dim,
                                  num_classes=get_model(self.model).num_classes,
-                                 use_dab=self.use_dab,
                                  ).to(self.device)]
 
         txt_lines = []

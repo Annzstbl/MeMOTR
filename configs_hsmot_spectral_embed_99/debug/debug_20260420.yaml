@@ -1,0 +1,106 @@
+
+
+AVAILABLE_GPUS: "1"
+
+PARENT_CONFIG: ../default99.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260420
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260420
+USE_CHECKPOINT: False
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
+CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
+                                  # As the number increases (from 1 to 4), the memory cost increases.
+                                  # We have deleted many comments in this official code simplicity,
+                                  # if you have any questions, feel free to contact with the author.
+SAMPLE_LENGTHS: [1,1,1,1]
+
+
+ENCODER_SPECTRAL: True
+# ENCODER_GLOBAL_TOKEN: False
+# ROPE_POS: False
+TRAIN_HALF: False
+# VID_WHITE_LIST: ["data39-4"]
+# resume
+# RESUME: /data4/litianhao/hsmot/memotr/spectralemb/12_global/checkpoint_19.pth
+# RESUME_SCHEDULER: True
+# PRETRAINED_MODEL: 
+# EPOCHS: 25
+# ONLY_TRAIN_QUERY_UPDATER_AFTER: 20
+# LR_DROP_RATE: 0.1
+# LR_DROP_MILESTONES: [12]
+
+ONLY_TRAIN_DETR: True
+
+BATCH_SIZE: 2
+EPOCHS: 40
+
+EDGE_SWAP: True
+
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [12, 24]
+
+PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/20260417-efl/last.pth
+
+DATASET_VERSION: OnePic_52_4
+
+
+TRANSFORMS_CONFIG:
+  CROP_SIZE:
+    - 800
+    - 1200
+  FLIP_RATIO: 0.5
+  RESIZE:
+    # - 880
+    # - 960
+    # - 1040
+    # - 1120
+    - 1200
+    # - 1280
+
+
+SCEM:
+  ENABLE: True
+  USE_GT: False
+  PRIOR_MODE: gate
+  USE_SPECTRAL_PI: True
+  SPECTRAL_DATABASE_NUM: 32
+  SPECTRAL_TYPE: "pi"
+
+LOSS_SCEM_NLL: 1
+LOSS_SCEM_BCE: 1
+LOSS_SCEM_DICE: 1
+LOSS_NLL_CONFIG:
+  TYPE: focal # focal or mean
+  ALPHA_POS: 1.0
+  ALPHA_NEG: 0.1
+  GAMMA_POS: 2.0
+  GAMMA_NEG: 0.0
+
+LOSS_SCEM_POOL_DIV: 1
+LOSS_SCEM_GAMMA_COVER: 0.5
+LOSS_LABEL_TYPE: efl_loss #sigmoid_focal_loss
+
+
+
+
+
+CHECKPOINT_EVERY_N_EPOCHS: 10
+CHECKPOINT_TAIL_EPOCHS: 1
+
+# EVALUATE
+# 每 N 个 epoch 评估一次；<=0 表示关闭间隔评估
+EVALUATE_EVERY_N_EPOCHS: 5
+# 最后多少个 epoch 每个都评估
+EVALUATE_TAIL_EPOCHS: 1
+# 指定必须评估的 epoch（1-based），例如 [1, 10, 20]
+EVALUATE_FORCE_EPOCHS: []
+
+
+
+STEM: conv3d_se_v4
+
+MEMOTR_VERSION: '20260420'
+
+
+# python main.py --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/debug_20260417.yaml
+# 多卡
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_99/debug_20260417.yaml

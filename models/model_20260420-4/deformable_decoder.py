@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from ..mlp import MLP
-from ..ops.modules import MSDeformAttn_Rotate as MSDeformAttn
+from ..ops.modules import MSDeformAttn_Rotate_20260420 as MSDeformAttn
 from ..utils import get_activation_layer, get_clones, pos_to_pos_embed_rotated
 from utils.utils import inverse_sigmoid
 
@@ -29,7 +29,7 @@ class DeformableDecoder(nn.Module):
             self.ref_point_head = MLP(self.d_model * 2 + 2, self.d_model, self.d_model, 2)
 
     def forward(self, tgt, reference_points, src, src_spatial_shapes, src_level_start_index, src_valid_ratios,
-                query_pos, query_mask, src_padding_mask):
+                query_pos, query_mask, src_padding_mask, q_spec=None):
         output = tgt
         # 统一语义:
         # - layer_input_queries[l]:  第 l 层 decoder 的输入 query（进入 layer 之前）
@@ -59,13 +59,14 @@ class DeformableDecoder(nn.Module):
                 from torch.utils.checkpoint import checkpoint
                 output = checkpoint(
                     layer, output, query_pos, reference_points_input, src, src_spatial_shapes, src_level_start_index,
-                    query_mask, src_padding_mask, (lid >= self.merge_det_track_layer), use_reentrant=False
+                    query_mask, src_padding_mask, (lid >= self.merge_det_track_layer), q_spec, use_reentrant=False
                 )
             else:
                 output = layer(
                     tgt=output, query_pos=query_pos, reference_points=reference_points_input, src=src,
                     src_spatial_shapes=src_spatial_shapes, level_start_index=src_level_start_index,
-                    query_mask=query_mask, src_padding_mask=src_padding_mask, merge_det_track=(lid >= self.merge_det_track_layer)
+                    query_mask=query_mask, src_padding_mask=src_padding_mask, merge_det_track=(lid >= self.merge_det_track_layer),
+                    q_spec=q_spec,
                 )
 
             if self.bbox_embed is not None:
@@ -147,20 +148,27 @@ class DeformableDecoderLayer(nn.Module):
         return self.norm3(tgt + self.dropout4(tgt2))
 
     def forward(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index, query_mask,
-                src_padding_mask=None, merge_det_track=False):
+                src_padding_mask=None, merge_det_track=False, q_spec=None):
+        assert q_spec is not None
+
         if merge_det_track is False:
             track_tgt = tgt[:, self.n_det_queries:, :]
             tgt = tgt[:, :self.n_det_queries, :]
             query_pos = query_pos[:, :self.n_det_queries, :]
             reference_points = reference_points[:, :self.n_det_queries, :, :]
             query_mask = query_mask[:, :self.n_det_queries]
+            q_spec = q_spec[:, :self.n_det_queries, :]
+
         if self.extra_track_attn:
+            assert False, "Not Support for extra track attn."
             tgt = self.forward_track_attn(tgt, query_pos, query_mask)
+
         tgt = self.forward_self_attn(tgt, query_pos, query_mask)
         tgt2 = self.cross_attn(
             query=self.with_pos_embed(tgt, query_pos), reference_points=reference_points,
             input_flatten=src, input_spatial_shapes=src_spatial_shapes, input_level_start_index=level_start_index,
-            input_padding_mask=src_padding_mask
+            input_padding_mask=src_padding_mask,
+            q_spec = q_spec
         )
         tgt = self.norm1(tgt + self.dropout1(tgt2))
         tgt = self.forward_ffn(tgt)
