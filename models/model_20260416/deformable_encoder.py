@@ -91,7 +91,7 @@ class DeformableEncoderLayer(nn.Module):
             reference_points, src, spatial_shapes, level_start_index, padding_mask,
             self.with_spectral_embed(self.with_pos_embed(add_tokens, add_pos_embeds), add_specs),
             add_tokens,
-            alpha=0.7
+            alpha=0.6
         )
         src2 = torch.cat([output, add_output], dim=-2)
         src = torch.cat([src, add_tokens], dim=-2)
