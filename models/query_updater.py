@@ -21,9 +21,9 @@ class QueryUpdater(nn.Module):
                  dropout: float,
                  use_checkpoint: bool, use_dab: bool,
                  update_threshold: float, long_memory_lambda: float,
+                 q_spec_lambda: float = 0,
                  visualize: bool = False,
-                 query_spectral_weights_dim: int = 8, 
-                 decoder_spectral: bool = True):
+                 ):
         super(QueryUpdater, self).__init__()
         self.hidden_dim = hidden_dim
         self.ffn_dim = ffn_dim
@@ -37,6 +37,7 @@ class QueryUpdater(nn.Module):
 
         self.update_threshold = update_threshold
         self.long_memory_lambda = long_memory_lambda
+        self.q_spec_lambda = q_spec_lambda
 
         self.confidence_weight_net = nn.Sequential(
             MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=self.hidden_dim, num_layers=2),
@@ -70,9 +71,6 @@ class QueryUpdater(nn.Module):
             self.norm_pos = nn.LayerNorm(256)
             self.activation = nn.ReLU(inplace=True)
         
-        self.query_spectral_weights_dim = query_spectral_weights_dim
-        self.decoder_spectral = decoder_spectral
-
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -102,8 +100,18 @@ class QueryUpdater(nn.Module):
             else:
                 tracks[b].ref_pts[is_pos] = inverse_sigmoid(tracks[b][is_pos].boxes.detach().clone())
 
-            if self.decoder_spectral:
+            if TrackInstances.use_spectral_decoder:
                 tracks[b].query_spectral_weights[is_pos] = tracks[b][is_pos].pred_spectral_weights.detach().clone()
+
+            if TrackInstances.use_q_spec:
+                obs_q_spec = tracks[b].obs_q_spec.detach()
+                prev_q_spec = tracks[b].query_q_spec
+                # Gate EMA by confidence to align with track feature temporal update.
+                # conf_gate = scores.clamp(min=0.0, max=1.0).unsqueeze(-1)
+                ema_gate = self.q_spec_lambda
+                updated_q_spec = prev_q_spec * (1.0 - ema_gate) + obs_q_spec * ema_gate
+                tracks[b].query_q_spec = prev_q_spec * ~is_pos.reshape((is_pos.shape[0], 1)) + \
+                                         updated_q_spec * is_pos.reshape((is_pos.shape[0], 1))
 
 
             output_embed = tracks[b].output_embed
@@ -170,6 +178,10 @@ class QueryUpdater(nn.Module):
             track_instances.long_memory = track_instances.query_embed
         else:
             track_instances.long_memory = track_instances.query_embed[:, self.hidden_dim:]
+        if TrackInstances.use_q_spec:
+            # obs_q_spec在criterion.py中会统一更新
+            track_instances.query_q_spec = track_instances.obs_q_spec.detach().clone()
+
 
     def _select_active_tracks_no_aug(self, previous_tracks: TrackInstances,
                                      new_tracks: TrackInstances,
@@ -243,9 +255,12 @@ class QueryUpdater(nn.Module):
         fake_tracks.iou = torch.zeros((1,), dtype=torch.float, device=device)
         fake_tracks.last_output = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
         fake_tracks.long_memory = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
-        if self.decoder_spectral:
-            fake_tracks.pred_spectral_weights = torch.randn((1, self.query_spectral_weights_dim), dtype=torch.float, device=device)
-            fake_tracks.query_spectral_weights = torch.randn((1, self.query_spectral_weights_dim), dtype=torch.float, device=device)
+        if TrackInstances.use_q_spec:
+            fake_tracks.obs_q_spec = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
+            fake_tracks.query_q_spec = torch.randn((1, self.hidden_dim), dtype=torch.float, device=device)
+        if TrackInstances.use_spectral_decoder:
+            fake_tracks.pred_spectral_weights = torch.randn((1, TrackInstances.decoder_spectral_weights_dim), dtype=torch.float, device=device)
+            fake_tracks.query_spectral_weights = torch.randn((1, TrackInstances.decoder_spectral_weights_dim), dtype=torch.float, device=device)
         return fake_tracks
 
     def select_active_tracks(self, previous_tracks: List[TrackInstances],
@@ -299,7 +314,6 @@ def build(config: dict):
             update_threshold=config["UPDATE_THRESH"],
             long_memory_lambda=config["LONG_MEMORY_LAMBDA"],
             visualize=config["VISUALIZE"],
-            query_spectral_weights_dim=config["DECODER_SPECTRAL_CLUSTERS"] * 8,
-            decoder_spectral=config["DECODER_SPECTRAL"]
+            q_spec_lambda=config["Q_SPEC_LAMBDA"] if "Q_SPEC_LAMBDA" in config else 0.0,
         )
 

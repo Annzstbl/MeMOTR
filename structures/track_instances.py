@@ -12,12 +12,15 @@ class TrackInstances:
     use_spectral_decoder = True
     decoder_spectral_weights_dim = 8
     use_dab = True
+    use_q_spec = False
 
     @staticmethod
-    def set_static_properties(use_spectral_decoder: bool = True, decoder_spectral_weights_dim: int = 8, use_dab: bool = True):
+    def set_static_properties(use_spectral_decoder: bool = True, decoder_spectral_weights_dim: int = 8,
+                              use_dab: bool = True, use_q_spec: bool = False):
         TrackInstances.use_spectral_decoder = use_spectral_decoder
         TrackInstances.decoder_spectral_weights_dim = decoder_spectral_weights_dim
         TrackInstances.use_dab = use_dab
+        TrackInstances.use_q_spec = use_q_spec
 
 
     def __init__(self, frame_height: float = 1.0, frame_width: float = 1.0,
@@ -44,6 +47,10 @@ class TrackInstances:
         self.iou = torch.zeros((0,), dtype=torch.float)
         self.last_output = torch.zeros((0, self.hidden_dim), dtype=torch.float)
         self.long_memory = torch.zeros((0, self.hidden_dim), dtype=torch.float)
+        if TrackInstances.use_q_spec:
+            # Query-level spectral latent state used by model_20260421 q_spec path.
+            self.query_q_spec = torch.zeros((0, self.hidden_dim), dtype=torch.float) #于query_updater中设置更新
+            self.obs_q_spec = torch.zeros((0, self.hidden_dim), dtype=torch.float) #于criterion.py中统一更新
         self.last_appear_boxes = torch.zeros((0, 4))
         if TrackInstances.use_spectral_decoder:
             self.query_spectral_weights = torch.zeros((0, TrackInstances.decoder_spectral_weights_dim), dtype=torch.float)# 如果参与预测，使用的query。不一定是最后预测的光谱权重，可能没更新。

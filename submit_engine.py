@@ -69,7 +69,11 @@ class Submitter:
         self.only_train_detr = only_train_detr
         self.draw_pic_dir = draw_pic_dir
         self.epoch = epoch
-        TrackInstances.set_static_properties(use_spectral_decoder=decoder_spectral, use_dab=use_dab)
+        TrackInstances.set_static_properties(
+            use_spectral_decoder=decoder_spectral,
+            use_dab=use_dab,
+            use_q_spec=bool(getattr(get_model(self.model), "use_q_spec", False)),
+        )
 
         # 对路径进行一些操作
         os.makedirs(self.predict_dir, exist_ok=True)

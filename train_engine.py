@@ -38,7 +38,7 @@ def train(config: dict):
 
     loss_label_type = str(config.get("LOSS_LABEL_TYPE", "sigmoid_focal_loss"))
     normalized_loss_label_type = loss_label_type.lower()
-    valid_loss_label_types = {"sigmoid_focal_loss", "eql_lossv2_nobg", "efl_loss"}
+    valid_loss_label_types = {"sigmoid_focal_loss", "eql_lossv2_nobg", "efl_loss", "efl_loss_closure"}
     if normalized_loss_label_type not in valid_loss_label_types:
         raise ValueError(
             f"Unsupported LOSS_LABEL_TYPE '{loss_label_type}', only support "
@@ -53,7 +53,7 @@ def train(config: dict):
             filename="log.txt",
             mode="a"
         )
-    elif normalized_loss_label_type == "efl_loss":
+    elif normalized_loss_label_type in {"efl_loss", "efl_loss_closure"}:
         train_logger.show(head=f"LOSS_LABEL_EFL={config.get('LOSS_LABEL_EFL', {})}")
         train_logger.write(
             head=f"LOSS_LABEL_EFL={config.get('LOSS_LABEL_EFL', {})}",
@@ -174,6 +174,15 @@ def train(config: dict):
             filename="log.txt",
             mode="a"
         )
+    elif normalized_loss_label_type == "efl_loss_closure":
+        if criterion.efl_loss is None:
+            raise RuntimeError("LOSS_LABEL_TYPE='efl_loss_closure' but criterion.efl_loss is not initialized.")
+        train_logger.show(head="EFL closure mode enabled, using pred_logits.register_hook for grad collection.")
+        train_logger.write(
+            head="EFL closure mode enabled, using pred_logits.register_hook for grad collection.",
+            filename="log.txt",
+            mode="a"
+        )
 
 
     # 打印config使用情况
@@ -219,10 +228,11 @@ def train(config: dict):
                     break
 
         sample_length = dataset_train.sample_length
-        if sample_length >= config["DYNAMIC_USE_CHECKPOINT_THRESHOLD"]:
-            dynamic_use_checkpoint = True
-        else:
-            dynamic_use_checkpoint = False
+        dynamic_use_checkpoint, dynamic_checkpoint_level = resolve_dynamic_checkpoint_policy(
+            config=config,
+            sample_length=sample_length,
+            use_checkpoint=use_checkpoint
+        )
 
         train_one_epoch(
             model=model,
@@ -240,6 +250,7 @@ def train(config: dict):
             no_grad_frames=no_grad_frames,
             decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
             dynamic_use_checkpoint=dynamic_use_checkpoint and use_checkpoint,
+            dynamic_checkpoint_level=dynamic_checkpoint_level,
             only_train_detr=config["ONLY_TRAIN_DETR"]
         )
         scheduler.step()
@@ -341,6 +352,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     no_grad_frames: int | None = None,
                     decoder_spectral_clusters: int=1,
                     dynamic_use_checkpoint: bool = False,
+                    dynamic_checkpoint_level: int | None = None,
                     only_train_detr: bool = False):
     """
     Args:
@@ -366,12 +378,19 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     device = next(get_model(model).parameters()).device
 
     # set using checkpoint
+    model_core = get_model(model)
     if dynamic_use_checkpoint:
-        get_model(model).enable_checkpoint(True)
-        logger.write(head=f"--Epoch={epoch} Settings: Enable using checkpoint", filename="log.txt", mode="a")
-        logger.show(head=f"--Epoch={epoch} Settings: Enable using checkpoint")
+        if dynamic_checkpoint_level is not None and hasattr(model_core, "set_checkpoint_level"):
+            model_core.set_checkpoint_level(dynamic_checkpoint_level)
+        model_core.enable_checkpoint(True)
+        logger.write(
+            head=f"--Epoch={epoch} Settings: Enable using checkpoint (level={dynamic_checkpoint_level})",
+            filename="log.txt",
+            mode="a"
+        )
+        logger.show(head=f"--Epoch={epoch} Settings: Enable using checkpoint (level={dynamic_checkpoint_level})")
     else:
-        get_model(model).enable_checkpoint(False)
+        model_core.enable_checkpoint(False)
         logger.write(head=f"--Epoch={epoch} Settings: Disable using checkpoint", filename="log.txt", mode="a")
         logger.show(head=f"--Epoch={epoch} Settings: Disable using checkpoint")
     dataloader_len = len(dataloader)
@@ -382,7 +401,11 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
 
     criterion.set_epoch(epoch)
     
-    TrackInstances.set_static_properties(False, use_dab=use_dab)
+    TrackInstances.set_static_properties(
+        False,
+        use_dab=use_dab,
+        use_q_spec=bool(getattr(get_model(model), "use_q_spec", False)),
+    )
 
     if only_train_detr:
         for i, batch in enumerate(dataloader):
@@ -442,6 +465,8 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             metric_log.update(name="total_loss", value=loss.item())
             loss = loss / accumulation_steps
             loss.backward()
+            if getattr(criterion, "label_loss_type", "") == "efl_loss_closure" and criterion.efl_loss is not None:
+                criterion.efl_loss.finalize_backward()
 
             for name, p in get_model(model).named_parameters():
                 if p.requires_grad and p.grad is None:
@@ -488,8 +513,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 # 同步输出并记录所有损失（包括 aux 和 class）到日志文件
                 if is_main_process():
                     detail_items = ", ".join([f"{k}:{v[0]:.4f}" for k, v in log_dict.items()])
-                    logger.show(head="detail_loss", log=detail_items)
-                    logger.write(head="detail_loss", log=detail_items, filename="log.txt", mode="a")
+                    # logger.write(head="detail_loss", log=detail_items, filename="log.txt", mode="a")
                 # logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
                             #  log=metric_log, filename="log.txt", mode="a")
                 logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
@@ -581,6 +605,8 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             metric_log.update(name="total_loss", value=loss.item())
             loss = loss / accumulation_steps
             loss.backward()
+            if getattr(criterion, "label_loss_type", "") == "efl_loss_closure" and criterion.efl_loss is not None:
+                criterion.efl_loss.finalize_backward()
 
             if (i + 1) % accumulation_steps == 0:
                 if max_norm > 0:
@@ -628,8 +654,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 # 同步输出并记录所有损失（包括 aux 和 class）到日志文件
                 if is_main_process():
                     detail_items = ", ".join([f"{k}:{v[0]:.4f}" for k, v in log_dict.items()])
-                    logger.show(head="detail_loss", log=detail_items)
-                    logger.write(head="detail_loss", log=detail_items, filename="log.txt", mode="a")
+                    # logger.write(head="detail_loss", log=detail_items, filename="log.txt", mode="a")
 
             if multi_checkpoint:
                 if i % 1 == 0 and is_main_process():
@@ -653,6 +678,60 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     logger.tb_add_metric_log(log=metric_log, steps=epoch, mode="epochs")
 
     return
+
+
+def resolve_dynamic_checkpoint_policy(config: dict, sample_length: int, use_checkpoint: bool) -> tuple[bool, int | None]:
+    """
+    根据 sample_length 解析动态 checkpoint 策略。
+    兼容两种配置形式：
+    1) 标量:
+       - DYNAMIC_USE_CHECKPOINT_THRESHOLD: int/float
+       - CHECKPOINT_LEVEL: int
+    2) 分阶段:
+       - DYNAMIC_USE_CHECKPOINT_THRESHOLD: List[int/float]
+       - CHECKPOINT_LEVEL: List[int]（与 threshold 一一对应）
+    """
+    if not use_checkpoint:
+        return False, None
+
+    thresholds_cfg = config.get("DYNAMIC_USE_CHECKPOINT_THRESHOLD", None)
+    levels_cfg = config.get("CHECKPOINT_LEVEL", 1)
+
+    if isinstance(thresholds_cfg, (list, tuple)):
+        thresholds = [float(x) for x in thresholds_cfg]
+        if len(thresholds) == 0:
+            return False, None
+
+        if isinstance(levels_cfg, (list, tuple)):
+            levels = [int(x) for x in levels_cfg]
+            if len(levels) != len(thresholds):
+                raise ValueError(
+                    "When DYNAMIC_USE_CHECKPOINT_THRESHOLD is a list, CHECKPOINT_LEVEL must be a list "
+                    "with the same length."
+                )
+        else:
+            levels = [int(levels_cfg)] * len(thresholds)
+
+        stage_pairs = sorted(zip(thresholds, levels), key=lambda x: x[0])
+        selected_level = None
+        for threshold, level in stage_pairs:
+            if sample_length >= threshold:
+                selected_level = level
+            else:
+                break
+
+        if selected_level is None:
+            return False, None
+        return True, max(1, min(3, int(selected_level)))
+
+    threshold = float(thresholds_cfg)
+    if sample_length >= threshold:
+        if isinstance(levels_cfg, (list, tuple)):
+            selected_level = int(levels_cfg[-1]) if len(levels_cfg) > 0 else 1
+        else:
+            selected_level = int(levels_cfg)
+        return True, max(1, min(3, selected_level))
+    return False, None
 
 
 def get_param_groups(config: dict, model: nn.Module, logger: Logger = None) -> Tuple[List[Dict], List[str]]:

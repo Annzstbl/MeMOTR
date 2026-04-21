@@ -1,10 +1,10 @@
-PROJECT: "DEBUG"
+PROJECT: "20260420模型, decoder中加入q_spec, 旋转框pool + tgt"
 
-AVAILABLE_GPUS: "1,2,3"
+AVAILABLE_GPUS: "3"
 
-PARENT_CONFIG: ../default99.yaml
-OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260421
-SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260421
+PARENT_CONFIG: ./default99.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260420-4
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260420-4
 USE_CHECKPOINT: False
 DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
 CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
@@ -101,9 +101,9 @@ EVALUATE_FORCE_EPOCHS: []
 
 STEM: conv3d_se_v4
 
-MEMOTR_VERSION: '20260420-3'
+MEMOTR_VERSION: '20260420-4'
 
 
-# python main.py --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/debug/debug.yaml
+# python main.py --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260420-4.yaml
 # 多卡
-# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/debug/debug.yaml
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260420-4.yaml

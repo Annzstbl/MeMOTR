@@ -113,8 +113,9 @@ class MSDeformAttn_Rotate(MSDeformAttn):
         sampling_offsets = self.sampling_offsets(query).view(N, Len_q, self.n_heads, self.n_levels, self.n_points, 2)# [Bs, len_q, head, lvl , point, 2]
         attention_weights = self.attention_weights(query).view(N, Len_q, self.n_heads, self.n_levels * self.n_points)
        
-        spec_logits = self.spec_attn_proj(self.spec_attn_norm(q_spec)).view(N, Len_q, self.n_heads, self.n_levels * self.n_points)
-        attention_weights = attention_weights + spec_logits * self.spec_attn_alpha
+        if q_spec is not None:
+            spec_logits = self.spec_attn_proj(self.spec_attn_norm(q_spec)).view(N, Len_q, self.n_heads, self.n_levels * self.n_points)
+            attention_weights = attention_weights + spec_logits * self.spec_attn_alpha
 
         if self.sigmoid_attn:
             attention_weights = attention_weights.sigmoid().view(N, Len_q, self.n_heads, self.n_levels, self.n_points)
