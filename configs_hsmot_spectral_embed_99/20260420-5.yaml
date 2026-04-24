@@ -1,0 +1,14 @@
+PROJECT: "20260420在4的基础上改为eql_closure损失函数"
+
+AVAILABLE_GPUS: "3"
+
+PARENT_CONFIG: ./20260420-4.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260420-5
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260420-5
+
+LOSS_LABEL_TYPE: efl_loss_closure #sigmoid_focal_loss
+
+
+# python main.py --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260420-5.yaml
+# 多卡
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260420-5.yaml

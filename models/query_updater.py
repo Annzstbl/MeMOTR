@@ -21,6 +21,7 @@ class QueryUpdater(nn.Module):
                  dropout: float,
                  use_checkpoint: bool, use_dab: bool,
                  update_threshold: float, long_memory_lambda: float,
+                 track_iou_threshold: float = 0.5,
                  q_spec_lambda: float = 0,
                  visualize: bool = False,
                  ):
@@ -37,6 +38,7 @@ class QueryUpdater(nn.Module):
 
         self.update_threshold = update_threshold
         self.long_memory_lambda = long_memory_lambda
+        self.track_iou_threshold = track_iou_threshold
         self.q_spec_lambda = q_spec_lambda
 
         self.confidence_weight_net = nn.Sequential(
@@ -205,7 +207,7 @@ class QueryUpdater(nn.Module):
         scores = torch.max(logits_to_scores(logits=active_tracks.logits), dim=1).values
         keep_idxes = (scores > self.update_threshold) | (active_tracks.ids >= 0)
         active_tracks = active_tracks[keep_idxes]
-        active_tracks.ids[active_tracks.iou < 0.5] = -1 #TODO 0.5这个阈值太大了
+        active_tracks.ids[active_tracks.iou < self.track_iou_threshold] = -1
         return active_tracks
 
     def _select_active_tracks_with_aug(self, previous_tracks: TrackInstances,
@@ -213,7 +215,7 @@ class QueryUpdater(nn.Module):
                                        unmatched_dets: TrackInstances,
                                        no_augment: bool) -> TrackInstances:
         active_tracks = TrackInstances.cat_tracked_instances(previous_tracks, new_tracks)
-        active_tracks = active_tracks[(active_tracks.iou > 0.5) & (active_tracks.ids >= 0)]
+        active_tracks = active_tracks[(active_tracks.iou > self.track_iou_threshold) & (active_tracks.ids >= 0)]
 
         if self.tp_drop_ratio > 0.0 and not no_augment and len(active_tracks) > 0:
             tp_keep_idx = torch.rand((len(active_tracks), )) > self.tp_drop_ratio
@@ -313,6 +315,7 @@ def build(config: dict):
             use_dab=config["USE_DAB"],
             update_threshold=config["UPDATE_THRESH"],
             long_memory_lambda=config["LONG_MEMORY_LAMBDA"],
+            track_iou_threshold=config.get("TRACK_IOU_THRESH", 0.5),
             visualize=config["VISUALIZE"],
             q_spec_lambda=config["Q_SPEC_LAMBDA"] if "Q_SPEC_LAMBDA" in config else 0.0,
         )

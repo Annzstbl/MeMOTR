@@ -3,8 +3,8 @@ PROJECT: "20260421模型"
 AVAILABLE_GPUS: "1,2"
 
 PARENT_CONFIG: ./default99.yaml
-OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260421
-SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260421
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260421-1
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260421-1
 
 # checkpoint
 USE_CHECKPOINT: True

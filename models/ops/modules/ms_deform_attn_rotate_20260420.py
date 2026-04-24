@@ -29,7 +29,7 @@ def _is_power_of_2(n):
 
 
 class MSDeformAttn_Rotate(MSDeformAttn):
-    def __init__(self, d_model=256, n_levels=4, n_heads=8, n_points=4, version='le135', sigmoid_attn=False):
+    def __init__(self, d_model=256, n_levels=4, n_heads=8, n_points=4, version='le135', sigmoid_attn=False, use_q_spec=True):
         """
         Multi-Scale Deformable Attention Module
         :param d_model      hidden dimension
@@ -53,16 +53,18 @@ class MSDeformAttn_Rotate(MSDeformAttn):
         self.n_levels = n_levels
         self.n_heads = n_heads
         self.n_points = n_points
+        self.use_q_spec = use_q_spec
 
         self.sampling_offsets = nn.Linear(d_model, n_heads * n_levels * n_points * 2)
         self.attention_weights = nn.Linear(d_model, n_heads * n_levels * n_points)
         self.value_proj = nn.Linear(d_model, d_model)
         self.output_proj = nn.Linear(d_model, d_model)
 
-        # spectral prior only modulates attention-weight logits
-        self.spec_attn_norm = nn.LayerNorm(d_model)
-        self.spec_attn_proj = nn.Linear(d_model, n_heads * n_levels * n_points)
-        self.spec_attn_alpha = nn.Parameter(torch.tensor(0.1))
+        if self.use_q_spec:
+            # spectral prior only modulates attention-weight logits
+            self.spec_attn_norm = nn.LayerNorm(d_model)
+            self.spec_attn_proj = nn.Linear(d_model, n_heads * n_levels * n_points)
+            self.spec_attn_alpha = nn.Parameter(torch.tensor(0.1))
 
         self.version = version
 
@@ -84,10 +86,10 @@ class MSDeformAttn_Rotate(MSDeformAttn):
         xavier_uniform_(self.output_proj.weight.data)
         constant_(self.output_proj.bias.data, 0.)
 
-
-        # start from near-zero spectral influence
-        constant_(self.spec_attn_proj.weight.data, 0.)
-        constant_(self.spec_attn_proj.bias.data, 0.)
+        if self.use_q_spec:
+            # start from near-zero spectral influence
+            constant_(self.spec_attn_proj.weight.data, 0.)
+            constant_(self.spec_attn_proj.bias.data, 0.)
 
     def forward(self, query, reference_points, input_flatten, input_spatial_shapes, input_level_start_index, input_padding_mask=None, q_spec=None):
         """
