@@ -1,0 +1,51 @@
+
+
+AVAILABLE_GPUS: "6,7"
+
+PARENT_CONFIG: ./default.yaml
+
+USE_CHECKPOINT: True
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
+# 这里好像可以到4，但是为了防止训练出问题，设为3
+CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
+                                  # As the number increases (from 1 to 4), the memory cost increases.
+                                  # We have deleted many comments in this official code simplicity,
+                                  # if you have any questions, feel free to contact with the author.
+# SAMPLE_LENGTHS: [5, 3, 4, 5]
+# NUM_FEATURE_LEVELS: 3
+RESIZE: [1184]
+
+ENCODER_SPECTRAL: True
+ENCODER_GLOBAL_TOKEN: False
+ROPE_POS: False
+TRAIN_HALF: False
+VID_WHITE_LIST: ["data23-2"]
+# resume
+# RESUME: /data4/litianhao/hsmot/memotr/spectralemb/12_global/checkpoint_19.pth
+# RESUME_SCHEDULER: True
+# PRETRAINED_MODEL: 
+# EPOCHS: 25
+# ONLY_TRAIN_QUERY_UPDATER_AFTER: 20
+# LR_DROP_RATE: 0.1
+# LR_DROP_MILESTONES: [12]
+
+EVALUATE_PER_EPOCH: 1
+SCEM:
+  ENABLE: True
+  USE_GT: False
+  PRIOR_MODE: gate
+  USE_SPECTRAL_PI: True
+  SPECTRAL_DATABASE_NUM: 128
+LOSS_SCEM_NLL: 1
+LOSS_SCEM_BCE: 1
+LOSS_SCEM_DICE: 1
+LOSS_NLL_CONFIG:
+  TYPE: focal # focal or mean
+  ALPHA_POS: 1.0
+  ALPHA_NEG: 0.1
+  GAMMA_POS: 2.0
+  GAMMA_NEG: 0.0
+
+
+PRETRAINED_MODEL: /data/users/litianhao/hsmot_code/workdir_2/memotr/spectralemb/debug_gpu/checkpoint_19.pth
+

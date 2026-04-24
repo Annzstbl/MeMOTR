@@ -1,0 +1,16 @@
+PROJECT: "20260421模型"
+
+AVAILABLE_GPUS: "4,5"
+
+PARENT_CONFIG: ./20260421-2.yaml
+
+#resume
+PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/20260421-2-197/last.pth
+RESUME: /data4/litianhao/hsmot/memotr/spectralemb/20260421-2-197/last.pth
+RESUME_SCHEDULER: True
+
+
+
+# python main.py --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260421-2-resume.yaml
+# 多卡
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260421-2-resume.yaml
