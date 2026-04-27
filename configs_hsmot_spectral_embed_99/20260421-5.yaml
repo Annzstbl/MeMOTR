@@ -9,8 +9,8 @@ SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260421-5
 TRACK_IOU_THRESH: 0.3
 LOSS_LABEL_EFL:
   WARMUP_EPOCHS: 2 
-
-
+LOSS_WEIGHT_FOCAL: 10
+MATCH_COST_CLASS: 10
 
 
 
