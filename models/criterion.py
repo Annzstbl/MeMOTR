@@ -719,7 +719,7 @@ class ClipCriterion:
                     matched_outputs_raw = valid_pos[matched_outputs_filtered]
                     gt_labels[b][matched_outputs_raw] = gt_trackinstances[b].labels[idx_to_gts_idx[b][1][matched]]
 
-            loss = self.efl_loss(pred_logits=pred_logits, target_classes=gt_labels, normalizer=1)#不要进行平均，会在外边统一除以GT进行
+            loss = self.efl_loss(pred_logits=pred_logits, target_classes=gt_labels, normalizer=self.efl_loss.num_classes)#不要进行平均，会在外边统一除以GT进行#在类别尺度平均
         elif self.label_loss_type == "eql_lossv2_nobg":
             if self.eqlv2_nobg_loss is None:
                 raise RuntimeError("EQLv2NoBg loss is not initialized.")
