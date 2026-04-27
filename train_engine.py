@@ -1,5 +1,3 @@
-# @Author       : Ruopeng Gao
-# @Date         : 2022/7/5
 import os
 import shutil
 import time
@@ -465,8 +463,9 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             metric_log.update(name="total_loss", value=loss.item())
             loss = loss / accumulation_steps
             loss.backward()
+            efl_pos_neg = None
             if getattr(criterion, "label_loss_type", "") == "efl_loss_closure" and criterion.efl_loss is not None:
-                criterion.efl_loss.finalize_backward()
+                efl_pos_neg = criterion.efl_loss.finalize_backward()
 
             for name, p in get_model(model).named_parameters():
                 if p.requires_grad and p.grad is None:
@@ -488,7 +487,6 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             iter_end_timestamp = time.time()
             metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
             metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
-            data_start_timestamp = time.time()
             # Outputs logs - 减少同步频率以避免NCCL超时
             if i % 2 == 0:  # 改为每10个iteration同步一次，而不是每次
                 metric_log.sync()
@@ -514,9 +512,14 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 if is_main_process():
                     detail_items = ", ".join([f"{k}:{v[0]:.4f}" for k, v in log_dict.items()])
                     # logger.write(head="detail_loss", log=detail_items, filename="log.txt", mode="a")
+                    if efl_pos_neg is not None:
+                        pos_neg_str = ", ".join([f"{x:.4f}" for x in efl_pos_neg.detach().cpu().tolist()])
+                        logger.show(head=f"efl_pos_neg: {pos_neg_str}")
+                        logger.write(head="efl_pos_neg", log=pos_neg_str, filename="log.txt", mode="a")
                 # logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
                             #  log=metric_log, filename="log.txt", mode="a")
                 logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
+            data_start_timestamp = time.time()
             if multi_checkpoint:
                 if i % 1 == 0 and is_main_process():
                     checkpoint_path = os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
@@ -605,8 +608,9 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             metric_log.update(name="total_loss", value=loss.item())
             loss = loss / accumulation_steps
             loss.backward()
+            efl_pos_neg = None
             if getattr(criterion, "label_loss_type", "") == "efl_loss_closure" and criterion.efl_loss is not None:
-                criterion.efl_loss.finalize_backward()
+                efl_pos_neg = criterion.efl_loss.finalize_backward()
 
             if (i + 1) % accumulation_steps == 0:
                 if max_norm > 0:
@@ -624,7 +628,6 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             iter_end_timestamp = time.time()
             metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
             metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
-            data_start_timestamp = time.time()
             # Outputs logs - 减少同步频率以避免NCCL超时
             if i % 2 == 0:  # 改为每10个iteration同步一次，而不是每次
                 metric_log.sync()
@@ -655,6 +658,11 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 if is_main_process():
                     detail_items = ", ".join([f"{k}:{v[0]:.4f}" for k, v in log_dict.items()])
                     # logger.write(head="detail_loss", log=detail_items, filename="log.txt", mode="a")
+                    if efl_pos_neg is not None:
+                        pos_neg_str = ", ".join([f"{x:.4f}" for x in efl_pos_neg.detach().cpu().tolist()])
+                        logger.show(head=f"efl_pos_neg: {pos_neg_str}")
+                        logger.write(head="efl_pos_neg", log=pos_neg_str, filename="log.txt", mode="a")
+            data_start_timestamp = time.time()
 
             if multi_checkpoint:
                 if i % 1 == 0 and is_main_process():

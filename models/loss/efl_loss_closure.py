@@ -4,7 +4,7 @@ import torch
 from torch.nn.modules.loss import _Loss
 import torch.distributed as dist
 import torch.nn as nn
-
+import torch.nn.functional as F
 
 # class BaseLoss(_Loss):
 #     # do not use syntax like `super(xxx, self).__init__,
@@ -69,6 +69,7 @@ class EqualizedFocalLoss(nn.Module):
                  focal_gamma=2.0,
                  focal_alpha=0.25,
                  scale_factor=8.0,
+                 warmup_epochs=0,
                  num_decoder_layers=6,
                  eps=1e-8
                  ):
@@ -79,6 +80,8 @@ class EqualizedFocalLoss(nn.Module):
         self.focal_alpha = focal_alpha
         self.scale_factor = scale_factor
         self.eps = eps
+        self.warmup_epochs = max(0, int(warmup_epochs))
+        self.epoch = 0
 
         # cfg for focal loss
         self.focal_gamma = focal_gamma
@@ -108,6 +111,8 @@ class EqualizedFocalLoss(nn.Module):
         # logger.info(f"build EqualizedFocalLoss, focal_alpha: {focal_alpha}, focal_gamma: {focal_gamma}, \
                     # scale_factor: {scale_factor}")
 
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
 
     def _expand_target(self, target_classes):
         """
@@ -141,7 +146,8 @@ class EqualizedFocalLoss(nn.Module):
         assert C == self.num_classes
 
         target, valid_mask = self._expand_target(target_classes)   # [B,Q,C], [B,Q]
-        if pred_logits.requires_grad:
+        in_warmup = self.epoch < self.warmup_epochs
+        if pred_logits.requires_grad and (not in_warmup):
             target_detached = target.detach()
             valid_mask_detached = valid_mask.detach()
             pred_logits.register_hook(
@@ -151,16 +157,19 @@ class EqualizedFocalLoss(nn.Module):
         prob = torch.sigmoid(pred_logits)
         pred_t = prob * target + (1.0 - prob) * (1.0 - target)    # [B,Q,C]
 
-        # 类别相关 gamma
-        map_val = 1.0 - self.pos_neg.detach()                      # [C]
-        dy_gamma = self.focal_gamma + self.scale_factor * map_val  # [C]
-
-        ff = dy_gamma.view(1, 1, C)                                # focusing factor
-        wf = (dy_gamma / self.focal_gamma).view(1, 1, C)           # weighting factor
-
         # focal-style CE
-        ce_loss = -torch.log(pred_t.clamp(min=self.eps))
-        cls_loss = ce_loss * torch.pow((1.0 - pred_t), ff.detach()) * wf.detach()
+        ce_loss = F.binary_cross_entropy_with_logits(pred_logits, target, reduction="none")
+        if in_warmup:
+            # warmup 阶段只使用普通 sigmoid focal loss
+            cls_loss = ce_loss * torch.pow((1.0 - pred_t), self.focal_gamma)
+        else:
+            # 类别相关 gamma
+            map_val = 1.0 - self.pos_neg.detach()                      # [C]
+            dy_gamma = self.focal_gamma + self.scale_factor * map_val  # [C]
+
+            ff = dy_gamma.view(1, 1, C)                                # focusing factor
+            wf = (dy_gamma / self.focal_gamma).view(1, 1, C)           # weighting factor
+            cls_loss = ce_loss * torch.pow((1.0 - pred_t), ff.detach()) * wf.detach()
 
         if self.focal_alpha >= 0:
             alpha_t = self.focal_alpha * target + (1.0 - self.focal_alpha) * (1.0 - target)
@@ -199,7 +208,6 @@ class EqualizedFocalLoss(nn.Module):
 
         # grad: [B, Q, C]
         grad = grad_in.detach().abs()
-
         vm = valid_mask.unsqueeze(-1).float()
 
         pos_grad = (grad * target * vm).sum(dim=(0, 1))
@@ -213,25 +221,31 @@ class EqualizedFocalLoss(nn.Module):
         """
         在一次 loss.backward() 结束后统一更新类别级统计。
         """
+        if self.epoch < self.warmup_epochs:
+            return None
         if self.cur_collect_idx == 0:
-            return
+            return None
 
         if dist.is_available() and dist.is_initialized():
             dist.all_reduce(self.tmp_pos_grad)
             dist.all_reduce(self.tmp_neg_grad)
 
-        self.pos_grad += self.tmp_pos_grad
-        self.neg_grad += self.tmp_neg_grad
+        momentum = 0.95
+
+        # 第一次更新时避免全 0 历史导致统计过慢
+        if (self.pos_grad.sum() + self.neg_grad.sum()) == 0:
+            self.pos_grad.copy_(self.tmp_pos_grad)
+            self.neg_grad.copy_(self.tmp_neg_grad)
+        else:
+            self.pos_grad.mul_(momentum).add_(self.tmp_pos_grad, alpha=1.0 - momentum)
+            self.neg_grad.mul_(momentum).add_(self.tmp_neg_grad, alpha=1.0 - momentum)
+
         self.pos_neg = torch.clamp(
-            self.pos_grad / (self.neg_grad + 1e-10), min=0.0, max=1.0
+            self.pos_grad / (self.neg_grad + 1e-10),
+            min=0.0,
+            max=1.0
         )
 
-        print(f'self.pos_neg: {self.pos_neg.detach().cpu().numpy()}')
         self.reset_collect_stats()
 
-
-
-
-
-
-
+        return self.pos_neg.detach()

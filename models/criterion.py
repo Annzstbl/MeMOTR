@@ -105,6 +105,7 @@ class ClipCriterion:
                 focal_gamma=self.efl_loss_config.get("FOCAL_GAMMA", 2.0),
                 focal_alpha=self.efl_loss_config.get("FOCAL_ALPHA", 0.25),
                 scale_factor=self.efl_loss_config.get("SCALE_FACTOR", 8.0),
+                warmup_epochs=self.efl_loss_config.get("WARMUP_EPOCHS", 0),
                 num_decoder_layers=self.num_decoder_layers,
                 eps=self.efl_loss_config.get("EPS", 1e-8),
             )
@@ -119,6 +120,8 @@ class ClipCriterion:
             设置一些随epoch变化的损失权重
         '''
         self.epoch = epoch
+        if self.efl_loss is not None and hasattr(self.efl_loss, "set_epoch"):
+            self.efl_loss.set_epoch(epoch)
         if self.epoch >= self.kl_cos_scheduler_epoch:
             self.weight["spectral_kl_loss"] = self.kl_weight_eta
         else:

@@ -1,13 +1,17 @@
-PROJECT: "20260421模型, Q_SPEC_LAMBDA=0.1"
+PROJECT: "20260421模型, TRACK_IOU_THRESH=0.3"
 
-AVAILABLE_GPUS: "5"
+AVAILABLE_GPUS: "4,5"
 
-PARENT_CONFIG: ../default.yaml
-OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260421-3-197
-SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260421-3-197
+PARENT_CONFIG: ./20260421-3.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260421-4-197
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260421-4-197
 
-# debug
-PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/20260421-3-197/last.pth
+
+#新增
+TRACK_IOU_THRESH: 0.3
+
+
+##不变
 
 # checkpoint
 USE_CHECKPOINT: True
@@ -72,7 +76,7 @@ LOSS_NLL_CONFIG:
   GAMMA_NEG: 0.0
 LOSS_SCEM_POOL_DIV: 1
 LOSS_SCEM_GAMMA_COVER: 1
-LOSS_LABEL_TYPE: efl_loss_closure
+LOSS_LABEL_TYPE: sigmoid_focal_loss
 LOSS_WEIGHT_FOCAL: 10 
 LOSS_WEIGHT_GIOU: 2
 MATCH_COST_CLASS: 10
@@ -97,6 +101,6 @@ EVALUATE_FORCE_EPOCHS: []
 
 
 
-# python main.py --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260421-3.yaml
+# python main.py --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260421-4.yaml
 # 多卡
-# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260421-3.yaml
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260421-4.yaml
