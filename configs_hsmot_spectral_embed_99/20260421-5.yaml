@@ -1,0 +1,21 @@
+PROJECT: "20260421模型 EFL损失采用EMA方式更新，WARMP_EPOCHS=2, TRACK_IOU_THRESH=0.3"
+
+AVAILABLE_GPUS: "1,2"
+
+PARENT_CONFIG: ./20260421-1.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260421-5
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260421-5
+
+TRACK_IOU_THRESH: 0.3
+LOSS_LABEL_EFL:
+  WARMUP_EPOCHS: 2 
+
+
+
+
+
+
+
+# python main.py --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260421-5.yaml
+# 多卡
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260421-5.yaml

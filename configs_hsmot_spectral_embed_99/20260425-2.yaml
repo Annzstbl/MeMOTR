@@ -1,0 +1,18 @@
+PROJECT: "20260421模型，占位 目前没有作用"
+
+AVAILABLE_GPUS: "2,3"
+
+PARENT_CONFIG: ./20260425-1.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260425-2
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260425-2
+
+MEMOTR_VERSION: '20260425'
+
+
+
+
+
+
+# python main.py --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260425-2.yaml
+# 多卡
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260425-2.yaml

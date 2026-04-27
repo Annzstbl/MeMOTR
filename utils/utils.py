@@ -136,18 +136,46 @@ class TrackedConfig(dict):
         super().__init__(*args, **kwargs)
         self._access_counts = defaultdict(int)
         self._access_locations = defaultdict(list)
+        self._this_file = os.path.abspath(__file__)
+        # 递归包装嵌套配置，保证子 dict 也可追踪访问
+        for key, value in list(super().items()):
+            super().__setitem__(key, self._wrap_value(value))
+
+    @classmethod
+    def _wrap_value(cls, value):
+        if isinstance(value, TrackedConfig):
+            return value
+        if isinstance(value, dict):
+            return cls(value)
+        if isinstance(value, list):
+            return [cls._wrap_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls._wrap_value(item) for item in value)
+        return value
+
+    def _find_business_caller(self):
+        frame = inspect.currentframe()
+        while frame is not None:
+            code = frame.f_code
+            filename = os.path.abspath(code.co_filename)
+            func_name = code.co_name
+            if not (
+                filename == self._this_file and
+                func_name in {"_find_business_caller", "_record_access", "__getitem__", "get"}
+            ):
+                return filename, frame.f_lineno
+            frame = frame.f_back
+        return None, None
 
     def _record_access(self, key):
-        frame = inspect.currentframe()
-        if frame is None:
+        filename, lineno = self._find_business_caller()
+        if filename is None or lineno is None:
             return
-        caller = frame.f_back
-        if caller is None:
-            return
-        filename = caller.f_code.co_filename
-        lineno = caller.f_lineno
         self._access_counts[key] += 1
         self._access_locations[key].append((filename, lineno))
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, self._wrap_value(value))
 
     def __getitem__(self, key):
         self._record_access(key)
@@ -158,7 +186,30 @@ class TrackedConfig(dict):
             self._record_access(key)
         return super().get(key, default)
 
+    def update(self, *args, **kwargs):
+        raw = dict(*args, **kwargs)
+        for key, value in raw.items():
+            self[key] = value
+
     # 便于后续分析使用情况的几个辅助方法
+    def _collect_access_summary(self, lines: list[str], prefix: str = "") -> None:
+        for k in sorted(self.keys(), key=str):
+            key_str = str(k)
+            full_key = f"{prefix}.{key_str}" if prefix else key_str
+            count = self._access_counts.get(k, 0)
+            locations = self._access_locations.get(k, [])
+            if locations:
+                last_fname, last_lineno = locations[-1]
+                lines.append(f"- {full_key}: count={count}, last={last_fname}:{last_lineno}")
+            else:
+                lines.append(f"- {full_key}: count={count}, last=(never)")
+            for fname, lineno in locations:
+                lines.append(f"    @ {fname}:{lineno}")
+
+            value = dict.__getitem__(self, k)
+            if isinstance(value, TrackedConfig):
+                value._collect_access_summary(lines=lines, prefix=full_key)
+
     def access_summary(self) -> str:
         """
         以人类可读的多行字符串形式返回：
@@ -166,20 +217,27 @@ class TrackedConfig(dict):
         """
         lines: list[str] = []
         lines.append("=== Config Access Summary ===")
-        for k in sorted(self.keys(), key=str):
-            count = self._access_counts.get(k, 0)
-            lines.append(f"- {k}: count={count}")
-            locations = self._access_locations.get(k, [])
-            for fname, lineno in locations:
-                lines.append(f"    @ {fname}:{lineno}")
+        self._collect_access_summary(lines=lines)
         return "\n".join(lines)
+
+    def _collect_unused_keys(self, unused: list[str], prefix: str = "") -> None:
+        for k in sorted(self.keys(), key=str):
+            key_str = str(k)
+            full_key = f"{prefix}.{key_str}" if prefix else key_str
+            if self._access_counts.get(k, 0) == 0:
+                unused.append(full_key)
+
+            value = dict.__getitem__(self, k)
+            if isinstance(value, TrackedConfig):
+                value._collect_unused_keys(unused=unused, prefix=full_key)
 
     def unused_keys(self) -> str:
         """
         以人类可读的多行字符串形式返回：
         所有从未被读取过的配置项 key，适合直接写入日志。
         """
-        unused = sorted([k for k in self.keys() if self._access_counts.get(k, 0) == 0], key=str)
+        unused: list[str] = []
+        self._collect_unused_keys(unused=unused)
         lines: list[str] = []
         lines.append("=== Unused Config Keys ===")
         if not unused:
