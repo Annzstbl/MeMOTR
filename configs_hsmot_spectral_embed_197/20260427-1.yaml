@@ -1,6 +1,6 @@
-PROJECT: "20260427模型"
+PROJECT: "20260427模型，没跑完，不要了"
 
-AVAILABLE_GPUS: "4,5"
+AVAILABLE_GPUS: "0"
 
 PARENT_CONFIG: ./default.yaml
 OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260427-197

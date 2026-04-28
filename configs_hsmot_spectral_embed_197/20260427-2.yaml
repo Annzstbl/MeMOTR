@@ -1,10 +1,10 @@
-PROJECT: "20260427模型"
+PROJECT: "20260427模型, 改了query的传播及更新模式，改了coverage的loss计算方式为KL散度"
 
-AVAILABLE_GPUS: "0"
+AVAILABLE_GPUS: "4,5"
 
-PARENT_CONFIG: ../default.yaml
-OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260427-197
-SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260427-197
+PARENT_CONFIG: ./default.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260427-2-197
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260427-2-197
 
 # checkpoint
 USE_CHECKPOINT: True
@@ -18,12 +18,12 @@ TRANSFORMS_CONFIG:
     - 1200
   FLIP_RATIO: 0.5
   RESIZE:
-    # - 880
-    # - 960
-    # - 1040
-    # - 1120
+    - 880
+    - 960
+    - 1040
+    - 1120
     - 1200
-    # - 1280
+    - 1280
 
 # --训练detr时候设置的参数，在训练MOT的时候由default直接给出默认值--
 # BATCH_SIZE: 2
@@ -46,7 +46,7 @@ EDGE_SWAP: True
 STEM: conv3d_se_v4
 MEMOTR_VERSION: '20260427'
 USE_Q_SPEC: True
-Q_SPEC_LAMBDA: 0.1
+Q_SPEC_LAMBDA: 0.1 #初始值会更新
 
 # -------------SCEM配置-------------
 SCEM:
@@ -95,6 +95,6 @@ EVALUATE_FORCE_EPOCHS: []
 
 
 
-# python main.py --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260421.yaml
+# python main.py --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260427-1.yaml
 # 多卡
-# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260421.yaml
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260427-1.yaml

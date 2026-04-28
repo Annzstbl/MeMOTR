@@ -404,10 +404,11 @@ class DeformableTransformer(nn.Module):
         # - layer_output_queries:    (L, B, Q, C)
         # - layer_output_refs:       (L, B, Q, 2/5)
         # - layer_input_queries:     (L, B, Q, C)
+        # - layer_input_q_specs:     (L, B, Q, C), strict per-layer input q_spec
         # - layer_cls_q_specs:       (L, B, Q, C), det: dynamic obs, track: stable memory
         # - layer_obs_q_specs:       (L, B, Q, C), det: dynamic obs, track: dynamic obs
         # - layer_track_obs_q_specs: (L, B, Nt, C), track dynamic obs only
-        layer_output_queries, layer_output_refs, layer_input_queries, layer_cls_q_specs, layer_obs_q_specs, layer_track_obs_q_specs = self.decoder(
+        layer_output_queries, layer_output_refs, layer_input_queries, layer_input_q_specs, layer_cls_q_specs, layer_obs_q_specs, layer_track_obs_q_specs = self.decoder(
             tgt=tgt, reference_points=init_reference_points, src=memory, src_spatial_shapes=spatial_shapes,
             src_level_start_index=level_start_index, src_valid_ratios=valid_ratios, query_pos=query_embed,
             query_mask=query_mask, src_padding_mask=mask_flatten,
@@ -418,11 +419,11 @@ class DeformableTransformer(nn.Module):
         )
         init_q_spec = None
         obs_q_spec = None
-        if self.use_q_spec and layer_cls_q_specs is not None:
-            # For new tracks: use final-layer cls q_spec
-            #   det part   -> final dynamic det observation
+        if self.use_q_spec and layer_input_q_specs is not None:
+            # For new tracks: use strict final-layer input q_spec
+            #   det part   -> det q_spec built from final-layer input refs
             #   track part -> stable track memory q_spec
-            init_q_spec = layer_cls_q_specs[-1]
+            init_q_spec = layer_input_q_specs[-1]
         if self.use_q_spec and layer_obs_q_specs is not None:
             # For frame-end update:
             #   det part   -> final dynamic det observation

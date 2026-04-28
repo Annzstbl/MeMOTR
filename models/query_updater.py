@@ -60,6 +60,19 @@ class QueryUpdater(nn.Module):
             output_dim=self.hidden_dim,
             num_layers=2
         )
+        self.q_spec_residual_mlp = MLP(
+            input_dim=4 * self.hidden_dim + 1,
+            hidden_dim=self.hidden_dim,
+            output_dim=self.hidden_dim,
+            num_layers=2,
+        )
+        self.q_spec_gate_mlp = MLP(
+            input_dim=4 * self.hidden_dim + 1,
+            hidden_dim=self.hidden_dim,
+            output_dim=self.hidden_dim,
+            num_layers=2,
+        )
+        self.q_spec_update_norm = nn.LayerNorm(self.hidden_dim)
         # self.query_spectral_head = MLP(
         #     input_dim=8,
         #     hidden_dim=self.hidden_dim,
@@ -79,6 +92,21 @@ class QueryUpdater(nn.Module):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
+        self._init_q_spec_updater_parameters()
+
+    def _init_q_spec_updater_parameters(self):
+        residual_last = self.q_spec_residual_mlp.layers[-1]
+        nn.init.zeros_(residual_last.weight)
+        nn.init.zeros_(residual_last.bias)
+
+        gate_last = self.q_spec_gate_mlp.layers[-1]
+        if self.q_spec_lambda > 0.0:
+            init_p = min(max(float(self.q_spec_lambda), 1e-4), 1.0 - 1e-4)
+            gate_bias = math.log(init_p / (1.0 - init_p))
+        else:
+            gate_bias = -3.0
+        nn.init.zeros_(gate_last.weight)
+        nn.init.constant_(gate_last.bias, gate_bias)
 
     def forward(self,
                 previous_tracks: List[TrackInstances],
@@ -106,14 +134,35 @@ class QueryUpdater(nn.Module):
                 tracks[b].query_spectral_weights[is_pos] = tracks[b][is_pos].pred_spectral_weights.detach().clone()
 
             if TrackInstances.use_q_spec:
-                obs_q_spec = tracks[b].obs_q_spec.detach()
-                prev_q_spec = tracks[b].query_q_spec
-                # Gate EMA by confidence to align with track feature temporal update.
-                # conf_gate = scores.clamp(min=0.0, max=1.0).unsqueeze(-1)
-                ema_gate = self.q_spec_lambda
-                updated_q_spec = prev_q_spec * (1.0 - ema_gate) + obs_q_spec * ema_gate
-                tracks[b].query_q_spec = prev_q_spec * ~is_pos.reshape((is_pos.shape[0], 1)) + \
-                                         updated_q_spec * is_pos.reshape((is_pos.shape[0], 1))
+                obs_q_spec = getattr(tracks[b], "obs_q_spec", None)
+                prev_q_spec = getattr(tracks[b], "query_q_spec", None)
+                if (
+                    obs_q_spec is not None
+                    and prev_q_spec is not None
+                    and obs_q_spec.shape == prev_q_spec.shape
+                    and obs_q_spec.numel() > 0
+                ):
+                    obs_q_spec = obs_q_spec.detach()
+                    pair = torch.cat(
+                        [
+                            prev_q_spec,
+                            obs_q_spec,
+                            obs_q_spec - prev_q_spec,
+                            obs_q_spec * prev_q_spec,
+                            scores.unsqueeze(-1),
+                        ],
+                        dim=-1,
+                    )
+                    residual = self.q_spec_residual_mlp(pair)
+                    candidate = obs_q_spec + residual
+                    gate = torch.sigmoid(self.q_spec_gate_mlp(pair))
+                    updated_q_spec = (1.0 - gate) * prev_q_spec + gate * candidate
+                    updated_q_spec = self.q_spec_update_norm(updated_q_spec)
+                    tracks[b].query_q_spec = torch.where(
+                        is_pos.unsqueeze(-1),
+                        updated_q_spec,
+                        prev_q_spec,
+                    )
 
 
             output_embed = tracks[b].output_embed

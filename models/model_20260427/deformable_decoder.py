@@ -42,6 +42,7 @@ class DeformableDecoder(nn.Module):
         # - layer_output_queries[l]: 第 l 层 decoder 的输出 query（经过 layer 之后）
         # - layer_output_refs[l]:    第 l 层 decoder 更新后的 reference points（层后）
         layer_output_queries, layer_output_refs, layer_input_queries = [], [], []
+        layer_input_q_specs = []
         layer_cls_q_specs, layer_obs_q_specs, layer_track_obs_q_specs = [], [], []
         num_total_queries = reference_points.shape[1]
         num_tracks = max(0, num_total_queries - self.n_det_queries)
@@ -85,6 +86,7 @@ class DeformableDecoder(nn.Module):
                     layer_q_spec = torch.cat((det_obs_q_spec, static_track_q_spec), dim=1)
                 else:
                     layer_q_spec = det_obs_q_spec
+            layer_input_q_specs.append(layer_q_spec)
 
             if self.use_checkpoint:
                 from torch.utils.checkpoint import checkpoint
@@ -154,6 +156,9 @@ class DeformableDecoder(nn.Module):
             stacked_cls_q_specs = None
             stacked_obs_q_specs = None
             stacked_track_obs_q_specs = None
+            stacked_input_q_specs = None
+            if self.use_q_spec and len(layer_input_q_specs) > 0 and layer_input_q_specs[0] is not None:
+                stacked_input_q_specs = torch.stack(layer_input_q_specs)
             if self.use_q_spec and len(layer_cls_q_specs) > 0 and layer_cls_q_specs[0] is not None:
                 stacked_cls_q_specs = torch.stack(layer_cls_q_specs)
                 stacked_obs_q_specs = torch.stack(layer_obs_q_specs)
@@ -163,6 +168,7 @@ class DeformableDecoder(nn.Module):
                 torch.stack(layer_output_queries),
                 torch.stack(layer_output_refs),
                 torch.stack(layer_input_queries),
+                stacked_input_q_specs,
                 stacked_cls_q_specs,
                 stacked_obs_q_specs,
                 stacked_track_obs_q_specs,

@@ -420,8 +420,8 @@ class ClipCriterion:
             trackinstances.logits = model_outputs["pred_logits"][b][output_idx]
             if last_layer_output_q_spec is not None:
                 trackinstances.obs_q_spec = last_layer_output_q_spec[b][output_idx]
-            # 新匹配到的目标，要第一次建立init_q_spec
-            # TODO但是这里的init_q_spec应该非常不准确
+            # 新匹配到的目标，要第一次query_q_spec
+            # 其实这里都会由query_updater更新为 obs_q_spec,详见 @query_updater.py: _init_track_memory_fields
             if last_layer_input_q_spec is not None:
                 trackinstances.query_q_spec = last_layer_input_q_spec[b][output_idx]
             trackinstances.iou = torch.zeros((len(gt_idx),), dtype=torch.float)

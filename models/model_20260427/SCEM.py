@@ -1229,12 +1229,15 @@ class SCEM(nn.Module):
 
         # ---------- 3) 展平为空间分布 ----------
         B = cover.shape[0]
-        c = cover.flatten(1)   # [B, HW] 已经归一化
+        c = cover.flatten(1)   # [B, HW] 
+        c = c / (c.sum(dim=1, keepdim=True) + eps) #归一化
         g = gamma_i.flatten(1)   # [B, HW]
         g = g / (g.sum(dim=1, keepdim=True) + eps) #归一化
 
+        loss = (g * (torch.log(g + eps) - torch.log(c + eps))).sum(dim=1).mean() # KL
+
         # soft CE
-        loss = -(g * torch.log(c + eps)).sum(dim=1).mean()
+        # loss = -(g * torch.log(c + eps)).sum(dim=1).mean()
         # loss = F.l1_loss(cover, gamma_i)
         return loss
 
