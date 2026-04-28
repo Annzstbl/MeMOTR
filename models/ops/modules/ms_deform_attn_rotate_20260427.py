@@ -132,16 +132,16 @@ class MSDeformAttn_Rotate(MSDeformAttn):
             value = value.masked_fill(input_padding_mask[..., None], float(0))
         value = value.view(N, Len_in, self.n_heads, self.d_model // self.n_heads)
         sampling_offsets = self.sampling_offsets(query).view(N, Len_q, self.n_heads, self.n_levels, self.n_points, 2)# [Bs, len_q, head, lvl , point, 2]
-        attention_weights = self.attention_weights(query).view(N, Len_q, self.n_heads, self.n_levels * self.n_points)
+        content_logits = self.attention_weights(query).view(N, Len_q, self.n_heads, self.n_levels * self.n_points)
         
         if self.sigmoid_attn:
-            attention_weights = attention_weights.sigmoid().view(N, Len_q, self.n_heads, self.n_levels, self.n_points)
+            content_logits = content_logits.sigmoid().view(N, Len_q, self.n_heads, self.n_levels, self.n_points)
         else:
-            attention_weights = F.softmax(attention_weights, -1).view(N, Len_q, self.n_heads, self.n_levels, self.n_points)
+            content_logits = F.softmax(content_logits, -1).view(N, Len_q, self.n_heads, self.n_levels, self.n_points)
 
         if self.use_q_spec:
-            content_level_attn = attention_weights.sum(dim=-1) # [N, Len_q, H, L]  points求和 实际上所有level的所有points加起来等于1
-            content_point_attn = attention_weights / (
+            content_level_attn = content_logits.sum(dim=-1) # [N, Len_q, H, L]  points求和 实际上所有level的所有points加起来等于1
+            content_point_attn = content_logits / (
                 content_level_attn.unsqueeze(-1) + 1e-6
             )
             # [N, Len_q, H, L, P]  每个level内归一化

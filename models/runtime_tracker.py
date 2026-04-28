@@ -8,6 +8,8 @@ from .model_output_accessors import (
     get_last_layer_input_query,
     get_last_layer_input_ref,
     get_last_layer_output_query,
+    get_last_layer_input_q_spec,
+    get_last_layer_output_q_spec,
 )
 from .utils import logits_to_scores
 from .motion import Motion
@@ -38,6 +40,8 @@ class RuntimeTracker:
         last_layer_input_query = get_last_layer_input_query(model_outputs=model_outputs)
         last_layer_output_query = get_last_layer_output_query(model_outputs=model_outputs)
         last_layer_input_ref = get_last_layer_input_ref(model_outputs=model_outputs)
+        last_layer_input_q_spec = get_last_layer_input_q_spec(model_outputs=model_outputs)
+        last_layer_output_q_spec = get_last_layer_output_q_spec(model_outputs=model_outputs)
         n_dets = len(model_outputs["det_query_embed"])
 
         if self.visualize:
@@ -49,8 +53,8 @@ class RuntimeTracker:
         tracks[0].logits = model_outputs["pred_logits"][0][n_dets:]
         tracks[0].output_embed = last_layer_output_query[0][n_dets:]
         tracks[0].scores = logits_to_scores(tracks[0].logits)
-        if "obs_q_spec" in model_outputs:
-            tracks[0].obs_q_spec = model_outputs["obs_q_spec"][0][n_dets:]
+        if last_layer_output_q_spec is not None:
+            tracks[0].obs_q_spec = last_layer_output_q_spec[0][n_dets:]
         if self.decoder_spectral:
             tracks[0].pred_spectral_weights = model_outputs["pred_spectral_weights"][0][n_dets:]
             tracks[0].query_spectral_weights = model_outputs["pred_spectral_weights"][0][n_dets:]
@@ -77,10 +81,10 @@ class RuntimeTracker:
         new_tracks.ref_pts = last_layer_input_ref[0][:n_dets][new_tracks_idxes]
         new_tracks.scores = model_outputs["scores"][0][:n_dets][new_tracks_idxes]
         new_tracks.output_embed = last_layer_output_query[0][:n_dets][new_tracks_idxes]
-        if "obs_q_spec" in model_outputs:
-            new_tracks.obs_q_spec = model_outputs["obs_q_spec"][0][:n_dets][new_tracks_idxes]
-        if "init_q_spec" in model_outputs:
-            new_tracks.query_q_spec = model_outputs["init_q_spec"][0][:n_dets][new_tracks_idxes]
+        if last_layer_output_q_spec is not None:
+            new_tracks.obs_q_spec = last_layer_output_q_spec[0][:n_dets][new_tracks_idxes]
+        if last_layer_input_q_spec is not None:
+            new_tracks.query_q_spec = last_layer_input_q_spec[0][:n_dets][new_tracks_idxes]
         if self.use_dab:
             new_tracks.query_embed = last_layer_input_query[0][:n_dets][new_tracks_idxes]
         else:

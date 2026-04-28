@@ -27,6 +27,8 @@ from .model_output_accessors import (
     get_last_layer_input_query,
     get_last_layer_input_ref,
     get_last_layer_output_query,
+    get_last_layer_input_q_spec,
+    get_last_layer_output_q_spec,
 )
 from structures.track_instances import TrackInstances
 from utils.box_ops import generalized_box_iou, box_cxcywh_to_xyxy, box_iou_union
@@ -323,6 +325,8 @@ class ClipCriterion:
         last_layer_input_query = get_last_layer_input_query(model_outputs=model_outputs)
         last_layer_output_query = get_last_layer_output_query(model_outputs=model_outputs)
         last_layer_input_ref = get_last_layer_input_ref(model_outputs=model_outputs)
+        last_layer_input_q_spec = get_last_layer_input_q_spec(model_outputs=model_outputs)
+        last_layer_output_q_spec = get_last_layer_output_q_spec(model_outputs=model_outputs)
 
         # 1. Get the GTs in current t frame.
         gt_trackinstances = self.gt_trackinstances_list[frame_idx]
@@ -414,12 +418,12 @@ class ClipCriterion:
             trackinstances.output_embed = last_layer_output_query[b][output_idx]
             trackinstances.boxes = model_outputs["pred_bboxes"][b][output_idx]
             trackinstances.logits = model_outputs["pred_logits"][b][output_idx]
-            if "obs_q_spec" in model_outputs:
-                trackinstances.obs_q_spec = model_outputs["obs_q_spec"][b][output_idx]
+            if last_layer_output_q_spec is not None:
+                trackinstances.obs_q_spec = last_layer_output_q_spec[b][output_idx]
             # 新匹配到的目标，要第一次建立init_q_spec
             # TODO但是这里的init_q_spec应该非常不准确
-            if "init_q_spec" in model_outputs:
-                trackinstances.query_q_spec = model_outputs["init_q_spec"][b][output_idx]
+            if last_layer_input_q_spec is not None:
+                trackinstances.query_q_spec = last_layer_input_q_spec[b][output_idx]
             trackinstances.iou = torch.zeros((len(gt_idx),), dtype=torch.float)
             if self.decoder_spectral_mse:
                 trackinstances.pred_spectral_weights = model_outputs["pred_spectral_weights"][b][output_idx]
@@ -562,10 +566,10 @@ class ClipCriterion:
             detections.output_embed = last_layer_output_query[b][unmatched_indexes]
             detections.logits = model_outputs["pred_logits"][b][unmatched_indexes]
             detections.boxes = model_outputs["pred_bboxes"][b][unmatched_indexes]
-            if "obs_q_spec" in model_outputs:
-                detections.obs_q_spec = model_outputs["obs_q_spec"][b][unmatched_indexes]
-            if "init_q_spec" in model_outputs:
-                detections.query_q_spec = model_outputs["init_q_spec"][b][unmatched_indexes]
+            if last_layer_output_q_spec is not None:
+                detections.obs_q_spec = last_layer_output_q_spec[b][unmatched_indexes]
+            if last_layer_input_q_spec is not None:
+                detections.query_q_spec = last_layer_input_q_spec[b][unmatched_indexes]
             if self.decoder_spectral_mse:
                 detections.pred_spectral_weights = model_outputs["pred_spectral_weights"][b][unmatched_indexes]
                 detections.query_spectral_weights = model_outputs["init_query_spectral_weights"][b][unmatched_indexes]
@@ -663,6 +667,7 @@ class ClipCriterion:
         Update tracked instances.
         """
         last_layer_output_query = get_last_layer_output_query(model_outputs=model_outputs)
+        last_layer_output_q_spec = get_last_layer_output_q_spec(model_outputs=model_outputs)
         for b in range(len(tracked_instances)):
             if len(tracked_instances[b]) > 0:
                 track_mask = model_outputs["query_mask"][b][self.n_det_queries:]
@@ -671,8 +676,8 @@ class ClipCriterion:
                 # Query embed and ref_pts will be updated in the query_updater module.
                 tracked_instances[b].output_embed = last_layer_output_query[b][self.n_det_queries:][~track_mask]
                 # 设置所有track instnaces的obs_q_spec，这来自于decoder最后预测的ref_pts推理得到的
-                if "obs_q_spec" in model_outputs:
-                    tracked_instances[b].obs_q_spec = model_outputs["obs_q_spec"][b][self.n_det_queries:][~track_mask]
+                if last_layer_output_q_spec is not None:
+                    tracked_instances[b].obs_q_spec = last_layer_output_q_spec[b][self.n_det_queries:][~track_mask]
                 tracked_instances[b].matched_idx = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
                 tracked_instances[b].labels = torch.zeros((0, ), dtype=tracked_instances[b].matched_idx.dtype)
                 # query_spectral_weights update in query_updater

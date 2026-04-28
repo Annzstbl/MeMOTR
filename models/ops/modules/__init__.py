@@ -17,3 +17,4 @@ from .ms_deform_attn_20260317 import MSDeformAttn20260317
 from .ms_deform_attn_20260414 import MSDeformAttn20260414
 from .ms_deform_attn_20260416 import MSDeformAttnAddTokenSharedLogits as MSDeformAttn20260416
 from .ms_deform_attn_rotate_20260420 import MSDeformAttn_Rotate as MSDeformAttn_Rotate_20260420
+from .ms_deform_attn_rotate_20260427 import MSDeformAttn_Rotate as MSDeformAttn_Rotate_20260427

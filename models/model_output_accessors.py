@@ -44,3 +44,21 @@ def get_aux_layer_output_query(model_outputs: dict, layer_idx: int) -> torch.Ten
     if decoder_states is not None:
         return decoder_states["query_out"][layer_idx]
     return model_outputs["aux_outputs"][layer_idx]["queries"]
+
+
+def get_last_layer_input_q_spec(model_outputs: dict) -> torch.Tensor | None:
+    # Preferred name
+    q_spec = model_outputs.get("last_layer_input_q_spec")
+    if q_spec is not None:
+        return q_spec
+    # Backward compatibility
+    return model_outputs.get("init_q_spec")
+
+
+def get_last_layer_output_q_spec(model_outputs: dict) -> torch.Tensor | None:
+    # Preferred name
+    q_spec = model_outputs.get("last_layer_output_q_spec")
+    if q_spec is not None:
+        return q_spec
+    # Backward compatibility
+    return model_outputs.get("obs_q_spec")
