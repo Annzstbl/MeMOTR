@@ -149,14 +149,14 @@ class MeMOTR(nn.Module):
                 srcs.append(src)
                 masks.append(mask)
 
-        prior_map = self.get_prior_map(tracks=tracks, gmcs=gmc, frame=frame)
+        # prior_map = self.get_prior_map(tracks=tracks, gmcs=gmc, frame=frame)
         # spectral_weights 作为第 3 个位置参数传入 specs：forward_hook 的 input 不含 keyword，
         # 若写 specs=... 则 hook 里只有 (srcs, masks)，不会出现 scem_module.in.2.*。
         scem_out = self.scem_module(
             srcs,
             masks,
             spectral_weights,
-            prior_map=prior_map,
+            # prior_map=prior_map,
             return_debug=debug,
         )
         if len(scem_out) == 5:
@@ -423,8 +423,9 @@ class MeMOTR(nn.Module):
         return torch.cat((det_query_mask, track_query_mask.to(torch.bool)), dim=1).to(self.det_query_embed.device)
 
     def postprocess_single_frame(self, previous_tracks: List[TrackInstances], new_tracks: List[TrackInstances],
-                                 unmatched_dets: Optional[List[TrackInstances]], no_augment: bool = False) -> List[TrackInstances]:
-        return self.query_updater(previous_tracks, new_tracks, unmatched_dets, no_augment)
+                                 unmatched_dets: Optional[List[TrackInstances]], no_augment: bool = False,
+                                 img_metas=None) -> List[TrackInstances]:
+        return self.query_updater(previous_tracks, new_tracks, unmatched_dets, no_augment, img_metas=img_metas)
 
 
 def build(config: dict) -> MeMOTR:

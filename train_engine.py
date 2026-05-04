@@ -28,6 +28,16 @@ from utils.vis_val import visualize_validation_metrics
 from utils.vis_train_loss import visualize_train_loss
 
 
+def _sync_cuda_for_timing(device: torch.device, enabled: bool):
+    if enabled and torch.cuda.is_available() and torch.device(device).type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def _time_after_cuda_sync(device: torch.device, enabled: bool) -> float:
+    _sync_cuda_for_timing(device=device, enabled=enabled)
+    return time.perf_counter()
+
+
 def train(config: dict):
     train_logger = Logger(logdir=os.path.join(config["OUTPUTS_DIR"], "train"), only_main=True, use_buffered_write=True)
     train_logger.show(head="Configs:", log=config)
@@ -249,7 +259,9 @@ def train(config: dict):
             decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
             dynamic_use_checkpoint=dynamic_use_checkpoint and use_checkpoint,
             dynamic_checkpoint_level=dynamic_checkpoint_level,
-            only_train_detr=config["ONLY_TRAIN_DETR"]
+            only_train_detr=config["ONLY_TRAIN_DETR"],
+            timing_sync_cuda=config.get("TIMING_SYNC_CUDA", True),
+            timing_log_interval=config.get("TIMING_LOG_INTERVAL", 2),
         )
         scheduler.step()
         train_states["start_epoch"] += 1
@@ -351,7 +363,9 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     decoder_spectral_clusters: int=1,
                     dynamic_use_checkpoint: bool = False,
                     dynamic_checkpoint_level: int | None = None,
-                    only_train_detr: bool = False):
+                    only_train_detr: bool = False,
+                    timing_sync_cuda: bool = True,
+                    timing_log_interval: int = 2):
     """
     Args:
         model: Model.
@@ -374,6 +388,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     model.train()
     optimizer.zero_grad()
     device = next(get_model(model).parameters()).device
+    timing_log_interval = max(1, int(timing_log_interval))
 
     # set using checkpoint
     model_core = get_model(model)
@@ -393,9 +408,9 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
         logger.show(head=f"--Epoch={epoch} Settings: Disable using checkpoint")
     dataloader_len = len(dataloader)
     metric_log = MetricLog()
-    epoch_start_timestamp = time.time()
+    epoch_start_timestamp = time.perf_counter()
     
-    data_start_timestamp = time.time()
+    data_start_timestamp = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
 
     criterion.set_epoch(epoch)
     
@@ -409,7 +424,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
         for i, batch in enumerate(dataloader):
             img_metas = batch["img_metas"][0][0] #batch[keys][batches][sequentials] 
     
-            iter_start_timestamp = time.time()
+            iter_start_timestamp = time.perf_counter()
             tracks = TrackInstances.init_tracks(batch=batch,
                                                 hidden_dim=get_model(model).hidden_dim,
                                                 num_classes=get_model(model).num_classes,
@@ -438,7 +453,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     )
                     if frame_idx < len(batch["imgs"][0]) - 1:
                         tracks = get_model(model).postprocess_single_frame(
-                            previous_tracks, new_tracks, unmatched_dets)
+                            previous_tracks, new_tracks, unmatched_dets, img_metas=img_metas)
                 else:
                     raise NotImplementedError("No grad frames is not implemented yet. Function tensor_list_to_nested_tensor is wrong now!")
                     # with torch.no_grad():
@@ -484,7 +499,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             for log_k, (val, _) in log_dict.items():
                 if ("aux" not in log_k) and ("class" not in log_k):
                     metric_log.update(name=log_k, value=val)
-            iter_end_timestamp = time.time()
+            iter_end_timestamp = time.perf_counter()
             metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
             metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
             # Outputs logs - 减少同步频率以避免NCCL超时
@@ -519,7 +534,6 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 # logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
                             #  log=metric_log, filename="log.txt", mode="a")
                 logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
-            data_start_timestamp = time.time()
             if multi_checkpoint:
                 if i % 1 == 0 and is_main_process():
                     checkpoint_path = os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
@@ -530,11 +544,16 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     shutil.copy2(checkpoint_path, os.path.join(logger.logdir[:-5], "last.pth"))
 
             train_states["global_iters"] += 1
+            data_start_timestamp = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
     else:
         for i, batch in enumerate(dataloader):
+            # assert len(batch["imgs"]) == 1, "batch size must be 1"
+            # sequentials的每一个img_meta的transforms属性是一致的
             img_metas = batch["img_metas"][0][0] #batch[keys][batches][sequentials] 
     
-            iter_start_timestamp = time.time()
+            iter_start_timestamp = time.perf_counter()
+            data_time = iter_start_timestamp - data_start_timestamp
+            setup_start_timestamp = iter_start_timestamp
             tracks = TrackInstances.init_tracks(batch=batch,
                                                 hidden_dim=get_model(model).hidden_dim,
                                                 num_classes=get_model(model).num_classes,
@@ -544,20 +563,26 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                                 hidden_dim=get_model(model).hidden_dim,
                                 num_classes=get_model(model).num_classes,
                                 device=device, )
+            setup_time = time.perf_counter() - setup_start_timestamp
+            frame_prepare_time = 0.0
+            model_forward_time = 0.0
+            criterion_time = 0.0
+            postprocess_time = 0.0
 
-            # 计算光流 [B, frames, 2, 3]
-            from utils.GMC import compute_gmc_sequence
-            batch_size = len(batch["imgs"])
-            seq_length = len(batch["imgs"][0])
-            batch_gmcs = []#List(List(ndarray))
-            for bs_index in range(batch_size):
-                batch_gmcs.append(compute_gmc_sequence(batch["imgs"][bs_index], method="sparseOptFlow", downscale=1))
-            batch_gmcs = torch.tensor(batch_gmcs, dtype=torch.float32).to(device)
-            batch_gmcs.requires_grad_(False)
-            assert batch_gmcs.shape == (batch_size, seq_length, 2, 3)
+            # # 计算光流 [B, frames, 2, 3]
+            # from utils.GMC import compute_gmc_sequence
+            # batch_size = len(batch["imgs"])
+            # seq_length = len(batch["imgs"][0])
+            # batch_gmcs = []#List(List(ndarray))
+            # for bs_index in range(batch_size):
+            #     batch_gmcs.append(compute_gmc_sequence(batch["imgs"][bs_index], method="sparseOptFlow", downscale=1))
+            # batch_gmcs = torch.tensor(batch_gmcs, dtype=torch.float32).to(device)
+            # batch_gmcs.requires_grad_(False)
+            # assert batch_gmcs.shape == (batch_size, seq_length, 2, 3)
 
             for frame_idx in range(len(batch["imgs"][0])):
                 if no_grad_frames is None or frame_idx >= no_grad_frames:
+                    stage_start = time.perf_counter()
                     frame = [fs[frame_idx] for fs in batch["imgs"]]
                     padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
                     for f in frame:
@@ -572,72 +597,128 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     else:
                         heatmap = None
 
-                    gmc = batch_gmcs[:, frame_idx, :, :] # [B, 2, 3]
-                    res = model(frame=frame, tracks=tracks, heatmap=heatmap, gmc=gmc)
+                    # gmc = batch_gmcs[:, frame_idx, :, :] # [B, 2, 3]
+                    # res = model(frame=frame, tracks=tracks, heatmap=heatmap, gmc=gmc)
+                    stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                    frame_prepare_time += stage_end - stage_start
+
+                    stage_start = stage_end
+                    res = model(frame=frame, tracks=tracks, heatmap=heatmap)
+                    stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                    model_forward_time += stage_end - stage_start
+
+                    stage_start = stage_end
                     previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                         model_outputs=res,
                         tracked_instances=tracks,
                         frame_idx=frame_idx,
                         img_metas=img_metas
                     )
+                    stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                    criterion_time += stage_end - stage_start
+
                     if frame_idx < len(batch["imgs"][0]) - 1:
+                        stage_start = stage_end
                         tracks = get_model(model).postprocess_single_frame(
-                            previous_tracks, new_tracks, unmatched_dets)
+                            previous_tracks, new_tracks, unmatched_dets, img_metas=img_metas)
+                        stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                        postprocess_time += stage_end - stage_start
                 else:
                     with torch.no_grad():
+                        stage_start = time.perf_counter()
                         frame = [fs[frame_idx] for fs in batch["imgs"]]
                         padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
                         for f in frame:
                             f.requires_grad_(False)
                         frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
+                        stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                        frame_prepare_time += stage_end - stage_start
+
+                        stage_start = stage_end
                         res = model(frame=frame, tracks=tracks)
+                        stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                        model_forward_time += stage_end - stage_start
+
+                        stage_start = stage_end
                         previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
                             model_outputs=res,
                             tracked_instances=tracks,
                             frame_idx=frame_idx,
                             img_metas=img_metas
                         )
-                        if frame_idx < len(batch["imgs"][0]) - 1:
-                            tracks = get_model(model).postprocess_single_frame(
-                                previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1)
+                        stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                        criterion_time += stage_end - stage_start
 
+                        if frame_idx < len(batch["imgs"][0]) - 1:
+                            stage_start = stage_end
+                            tracks = get_model(model).postprocess_single_frame(
+                                previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1,
+                                img_metas=img_metas)
+                            stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                            postprocess_time += stage_end - stage_start
+
+            stage_start = time.perf_counter()
             loss_dict, log_dict = criterion.get_mean_by_n_gts()
             loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
+            stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+            loss_reduce_time = stage_end - stage_start
 
-            # Metrics log
-            metric_log.update(name="total_loss", value=loss.item())
+            backward_start = stage_end
             loss = loss / accumulation_steps
             loss.backward()
             efl_pos_neg = None
             if getattr(criterion, "label_loss_type", "") == "efl_loss_closure" and criterion.efl_loss is not None:
                 efl_pos_neg = criterion.efl_loss.finalize_backward()
+            backward_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+            backward_time = backward_end - backward_start
 
+            optimizer_time = 0.0
             if (i + 1) % accumulation_steps == 0:
+                optimizer_start = backward_end
                 if max_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
                 else:
                     pass
                 optimizer.step()
                 optimizer.zero_grad()
+                optimizer_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                optimizer_time = optimizer_end - optimizer_start
+
+            iter_end_timestamp = time.perf_counter()
+            active_time = iter_end_timestamp - iter_start_timestamp
+            iter_time = iter_end_timestamp - data_start_timestamp
 
             # For logging
+            metric_log.update(name="total_loss", value=loss.item() * accumulation_steps)
+            metric_log.update(name="time per iter", value=iter_time)
+            metric_log.update(name="time per data", value=data_time)
+            metric_log.update(name="time/setup", value=setup_time)
+            metric_log.update(name="time/frame_prepare", value=frame_prepare_time)
+            metric_log.update(name="time/forward", value=model_forward_time)
+            metric_log.update(name="time/criterion", value=criterion_time)
+            metric_log.update(name="time/postprocess", value=postprocess_time)
+            metric_log.update(name="time/loss_reduce", value=loss_reduce_time)
+            metric_log.update(name="time/backward", value=backward_time)
+            metric_log.update(name="time/optimizer", value=optimizer_time)
+            metric_log.update(name="time/active", value=active_time)
             # 主损失：所有不带 "aux" 和 "class" 的损失；写入 metric_log
             for log_k, (val, _) in log_dict.items():
                 if ("aux" not in log_k) and ("class" not in log_k):
                     metric_log.update(name=log_k, value=val)
-            iter_end_timestamp = time.time()
-            metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
-            metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
             # Outputs logs - 减少同步频率以避免NCCL超时
-            if i % 2 == 0:  # 改为每10个iteration同步一次，而不是每次
+            if i % timing_log_interval == 0:
                 metric_log.sync()
                 # 修复：只获取当前GPU的内存使用情况，避免跨进程访问
                 max_memory = torch.cuda.max_memory_allocated() // (1024**2)
                 second_per_iter = metric_log.metrics["time per iter"].avg
                 second_per_data = metric_log.metrics["time per data"].avg
+                second_per_forward = metric_log.metrics["time/forward"].avg
+                second_per_backward = metric_log.metrics["time/backward"].avg
                 logger.show(head=f"--[Epoch={epoch}, Iter={i}, "
                                 f"{second_per_iter:.2f}s/iter, "
                                 f"{second_per_data:.2f}s/data, "
+                                f"{second_per_forward:.2f}s/fwd, "
+                                f"{second_per_backward:.2f}s/bwd, "
                                 f"{i}/{dataloader_len} iters, "
                                 f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
                                 f"Max Memory={max_memory}MB]",
@@ -646,6 +727,8 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                 logger.write(head=f"--[Epoch={epoch}, Iter={i}, "
                                 f"{second_per_iter:.2f}s/iter, "
                                 f"{second_per_data:.2f}s/data, "
+                                f"{second_per_forward:.2f}s/fwd, "
+                                f"{second_per_backward:.2f}s/bwd, "
                                 f"{i}/{dataloader_len} iters, "
                                 f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
                                 f"Max Memory={max_memory}MB]",
@@ -662,8 +745,6 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                         pos_neg_str = ", ".join([f"{x:.4f}" for x in efl_pos_neg.detach().cpu().tolist()])
                         logger.show(head=f"efl_pos_neg: {pos_neg_str}")
                         logger.write(head="efl_pos_neg", log=pos_neg_str, filename="log.txt", mode="a")
-            data_start_timestamp = time.time()
-
             if multi_checkpoint:
                 if i % 1 == 0 and is_main_process():
                     checkpoint_path = os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
@@ -674,10 +755,11 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     shutil.copy2(checkpoint_path, os.path.join(logger.logdir[:-5], "last.pth"))
 
             train_states["global_iters"] += 1
+            data_start_timestamp = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
 
     # Epoch end
     metric_log.sync()
-    epoch_end_timestamp = time.time()
+    epoch_end_timestamp = time.perf_counter()
     epoch_minutes = int((epoch_end_timestamp - epoch_start_timestamp) // 60)
     logger.show(head=f"--[Epoch: {epoch}, Total Time: {epoch_minutes}min]",
                 log=metric_log)

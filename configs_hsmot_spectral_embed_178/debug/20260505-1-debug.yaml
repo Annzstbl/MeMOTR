@@ -1,18 +1,17 @@
 PROJECT: "20260505模型，自适应IoU阈值"
 
-AVAILABLE_GPUS: "4,5"
+AVAILABLE_GPUS: "1"
 
-PARENT_CONFIG: ./default.yaml
-OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260505-1-197
-SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260505-1-197
+PARENT_CONFIG: ../default.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260505-1-197
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260505-1-197
 
 
 #新增
-TRACK_IOU_THRESH: 0.3
+TRACK_IOU_THRESH: 0.2
 TRACK_IOU_THRESH_MAX: 0.5
 TRACK_IOU_AREA_MIN: 800.0
-TRACK_IOU_AREA_MAX: 4000.0
-TRACK_IOU_REF_AREA: 900.0 * 1200.0
+TRACK_IOU_AREA_MAX: 10000.0
 
 
 ##不变
@@ -58,6 +57,8 @@ STEM: conv3d_se_v4
 MEMOTR_VERSION: '20260505'
 USE_Q_SPEC: True
 Q_SPEC_LAMBDA: 0.1
+TIMING_SYNC_CUDA: True
+TIMING_LOG_INTERVAL: 2
 
 # -------------SCEM配置-------------
 SCEM:
