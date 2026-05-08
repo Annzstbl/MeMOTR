@@ -22,6 +22,7 @@ class QueryUpdater(nn.Module):
                  use_checkpoint: bool, use_dab: bool,
                  update_threshold: float, long_memory_lambda: float,
                  track_iou_threshold: float = 0.5,
+                 track_iou_adaptive: bool = True,
                  track_iou_threshold_max: float = 0.5,
                  track_iou_area_min: float = 800.0,
                  track_iou_area_max: float = 4000.0,
@@ -42,6 +43,7 @@ class QueryUpdater(nn.Module):
         self.update_threshold = update_threshold
         self.long_memory_lambda = long_memory_lambda
         self.track_iou_threshold = track_iou_threshold
+        self.track_iou_adaptive = track_iou_adaptive
         self.track_iou_threshold_max = track_iou_threshold_max
         self.track_iou_area_min = track_iou_area_min
         self.track_iou_area_max = track_iou_area_max
@@ -272,6 +274,16 @@ class QueryUpdater(nn.Module):
             self.track_iou_threshold_max - self.track_iou_threshold
         ) * scale_ratio
 
+    def _resolve_iou_threshold(
+            self,
+            track_instances: TrackInstances,
+            img_metas=None,
+            batch_idx: int = 0,
+    ) -> torch.Tensor | float:
+        if not self.track_iou_adaptive:
+            return self.track_iou_threshold
+        return self._get_scale_adaptive_iou_threshold(track_instances, img_metas=img_metas, batch_idx=batch_idx)
+
 
     def _select_active_tracks_no_aug(self, previous_tracks: TrackInstances,
                                      new_tracks: TrackInstances,
@@ -297,7 +309,7 @@ class QueryUpdater(nn.Module):
         scores = torch.max(logits_to_scores(logits=active_tracks.logits), dim=1).values
         keep_idxes = (scores > self.update_threshold) | (active_tracks.ids >= 0)
         active_tracks = active_tracks[keep_idxes]
-        iou_threshold = self._get_scale_adaptive_iou_threshold(active_tracks, img_metas=img_metas, batch_idx=batch_idx)
+        iou_threshold = self._resolve_iou_threshold(active_tracks, img_metas=img_metas, batch_idx=batch_idx)
         active_tracks.ids[active_tracks.iou < iou_threshold] = -1
         return active_tracks
 
@@ -308,7 +320,7 @@ class QueryUpdater(nn.Module):
                                        img_metas,
                                        batch_idx: int = 0) -> TrackInstances:
         active_tracks = TrackInstances.cat_tracked_instances(previous_tracks, new_tracks)
-        iou_threshold = self._get_scale_adaptive_iou_threshold(active_tracks, img_metas=img_metas, batch_idx=batch_idx)
+        iou_threshold = self._resolve_iou_threshold(active_tracks, img_metas=img_metas, batch_idx=batch_idx)
         active_tracks = active_tracks[(active_tracks.iou > iou_threshold) & (active_tracks.ids >= 0)]
 
         if self.tp_drop_ratio > 0.0 and not no_augment and len(active_tracks) > 0:
@@ -366,7 +378,7 @@ class QueryUpdater(nn.Module):
                              img_metas=None):
         tracks = []
         if self.training:
-            if img_metas is None:
+            if self.track_iou_adaptive and img_metas is None:
                 raise ValueError("img_metas is required for scale-adaptive IoU threshold during training.")
             for b in range(len(new_tracks)):
                 self._init_track_memory_fields(new_tracks[b])
@@ -417,6 +429,7 @@ def build(config: dict):
             update_threshold=config["UPDATE_THRESH"],
             long_memory_lambda=config["LONG_MEMORY_LAMBDA"],
             track_iou_threshold=config.get("TRACK_IOU_THRESH", 0.3),
+            track_iou_adaptive=config.get("TRACK_IOU_ADAPTIVE", True),
             track_iou_threshold_max=config.get("TRACK_IOU_THRESH_MAX", 0.5),
             track_iou_area_min=config.get("TRACK_IOU_AREA_MIN", 800.0),
             track_iou_area_max=config.get("TRACK_IOU_AREA_MAX", 4000.0),
