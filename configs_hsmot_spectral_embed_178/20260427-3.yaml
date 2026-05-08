@@ -7,7 +7,7 @@ OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260427-3-178
 SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260427-3-178
 
 # checkpoint
-USE_CHECKPOINT: True
+USE_CHECKPOINT: False
 DYNAMIC_USE_CHECKPOINT_THRESHOLD: 5
 CHECKPOINT_LEVEL: 1         # 1： encoder  2: encoder+decoder  3: encoder+decoder+backbone
 

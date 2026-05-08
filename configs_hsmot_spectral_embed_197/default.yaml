@@ -58,6 +58,10 @@ DATA_PATH:
 NUM_WORKERS: 2
 BATCH_SIZE: 1
 ACCUMULATION_STEPS: 1
+
+# Automatic Mixed Precision (training only; bf16 does not use GradScaler)
+USE_AMP: False
+AMP_DTYPE: bf16   # bf16 | fp16
 COCO_SIZE: False
 OVERFLOW_BBOX: False
 REVERSE_CLIP: 0.0

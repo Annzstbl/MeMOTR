@@ -13,7 +13,8 @@ from utils.utils import is_distributed, distributed_rank, is_main_process
 
 
 def save_checkpoint(model: nn.Module, path: str, states: dict = None,
-                    optimizer: optim = None, scheduler: optim.lr_scheduler = None):
+                    optimizer: optim = None, scheduler: optim.lr_scheduler = None,
+                    scaler=None):
     model = get_model(model)
     if is_main_process():
         save_state = {
@@ -22,6 +23,8 @@ def save_checkpoint(model: nn.Module, path: str, states: dict = None,
             "scheduler": None if scheduler is None else scheduler.state_dict(),
             'states': states
         }
+        if scaler is not None:
+            save_state["scaler"] = scaler.state_dict()
         torch.save(save_state, path)
     else:
         pass
@@ -29,7 +32,8 @@ def save_checkpoint(model: nn.Module, path: str, states: dict = None,
 
 
 def load_checkpoint(model: nn.Module, path: str, states: dict = None,
-                    optimizer: optim = None, scheduler: optim.lr_scheduler = None):
+                    optimizer: optim = None, scheduler: optim.lr_scheduler = None,
+                    scaler=None):
     load_state = torch.load(path, map_location="cpu")
 
     if is_main_process():
@@ -40,6 +44,8 @@ def load_checkpoint(model: nn.Module, path: str, states: dict = None,
         optimizer.load_state_dict(load_state["optimizer"])
     if scheduler is not None:
         scheduler.load_state_dict(load_state["scheduler"])
+    if scaler is not None and "scaler" in load_state:
+        scaler.load_state_dict(load_state["scaler"])
     if states is not None:
         states.update(load_state["states"])
     return

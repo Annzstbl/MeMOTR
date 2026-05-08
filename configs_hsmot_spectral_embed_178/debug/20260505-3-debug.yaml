@@ -1,24 +1,22 @@
-PROJECT: "20260505模型，自适应IoU阈值"
+PROJECT: "20260505模型，不自适应IoU阈值"
 
 AVAILABLE_GPUS: "0"
 
 PARENT_CONFIG: ../default.yaml
-OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260505-1-197
-SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug/20260505-1-197
+OUTPUTS_DIR: /data1/users/litianhao01/experiment/memotr/20260505-3-178
+SUBMIT_DIR: /data1/users/litianhao01/experiment/memotr/20260505-3-178
 
 
 #新增
+TRACK_IOU_ADAPTIVE: False
 TRACK_IOU_THRESH: 0.2
-TRACK_IOU_THRESH_MAX: 0.5
-TRACK_IOU_AREA_MIN: 800.0
-TRACK_IOU_AREA_MAX: 10000.0
 
 
 ##不变
 
 # checkpoint
-USE_CHECKPOINT: True
-DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
+USE_CHECKPOINT: False
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 6
 CHECKPOINT_LEVEL: 1         # 1： encoder  2: encoder+decoder  3: encoder+decoder+backbone
 
 # 最佳transform
@@ -41,10 +39,10 @@ TRANSFORMS_CONFIG:
 # LR_DROP_RATE: 0.1
 # LR_DROP_MILESTONES: [12, 24]
 # PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/14_train_half/checkpoint_19.pth
-SAMPLE_LENGTHS: [2,3,4,5]
+SAMPLE_LENGTHS: [5,3,4,5]
 
 # -------------训练配置-------------
-TRAIN_HALF: True
+TRAIN_HALF: False
 ONLY_TRAIN_DETR: False
 # DATASET_VERSION: OnePic
 NUM_WORKERS: 2
@@ -57,8 +55,12 @@ STEM: conv3d_se_v4
 MEMOTR_VERSION: '20260505'
 USE_Q_SPEC: True
 Q_SPEC_LAMBDA: 0.1
-TIMING_SYNC_CUDA: True
+TIMING_SYNC_CUDA: False
 TIMING_LOG_INTERVAL: 2
+
+# AMP: set USE_AMP True to enable (see PARENT_CONFIG default.yaml for AMP_DTYPE)
+USE_AMP: True
+AMP_DTYPE: bf16
 
 # -------------SCEM配置-------------
 SCEM:
@@ -106,6 +108,6 @@ EVALUATE_FORCE_EPOCHS: []
 
 
 
-# python main.py --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260505-1.yaml
+# python main.py --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_hsmot_spectral_embed_178/debug/20260505-3-debug.yaml
 # 多卡
-# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/litianhao/hsmot_code/MeMOTR/configs_hsmot_spectral_embed_197/20260505-1.yaml
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_hsmot_spectral_embed_178/debug/20260505-3-debug.yaml

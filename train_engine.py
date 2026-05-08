@@ -105,6 +105,25 @@ def train(config: dict):
     else:
         raise ValueError(f"Do not support lr scheduler '{config['LR_SCHEDULER']}'")
 
+    # AMP: bf16 uses autocast only; fp16 uses autocast + GradScaler
+    use_amp = bool(config.get("USE_AMP", False))
+    amp_dtype_str = str(config.get("AMP_DTYPE", "bf16")).lower()
+    if amp_dtype_str == "fp16":
+        amp_dtype = torch.float16
+    elif amp_dtype_str in ("bf16", "bfloat16"):
+        amp_dtype = torch.bfloat16
+    else:
+        raise ValueError(f"Unsupported AMP_DTYPE '{amp_dtype_str}', use 'bf16' or 'fp16'")
+    scaler = torch.amp.GradScaler(
+        "cuda", enabled=(use_amp and amp_dtype is torch.float16)
+    )
+    train_logger.show(head=f"USE_AMP={use_amp}, AMP_DTYPE={amp_dtype_str}, GradScaler enabled={scaler.is_enabled()}")
+    train_logger.write(
+        head=f"USE_AMP={use_amp}, AMP_DTYPE={amp_dtype_str}, GradScaler enabled={scaler.is_enabled()}",
+        filename="log.txt",
+        mode="a",
+    )
+
     # Training states
     train_states = {
         "start_epoch": 0,
@@ -114,10 +133,18 @@ def train(config: dict):
     # Resume
     if config["RESUME"] is not None:
         if config["RESUME_SCHEDULER"]:
-            load_checkpoint(model=model, path=config["RESUME"], states=train_states,
-                            optimizer=optimizer, scheduler=scheduler)
+            load_checkpoint(
+                model=model,
+                path=config["RESUME"],
+                states=train_states,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler,
+            )
         else:
-            load_checkpoint(model=model, path=config["RESUME"], states=train_states)
+            load_checkpoint(
+                model=model, path=config["RESUME"], states=train_states, scaler=scaler
+            )
             for _ in range(train_states["start_epoch"]):
                 scheduler.step()
 
@@ -262,13 +289,23 @@ def train(config: dict):
             only_train_detr=config["ONLY_TRAIN_DETR"],
             timing_sync_cuda=config.get("TIMING_SYNC_CUDA", True),
             timing_log_interval=config.get("TIMING_LOG_INTERVAL", 2),
+            use_amp=use_amp,
+            amp_dtype=amp_dtype,
+            scaler=scaler,
         )
         scheduler.step()
         train_states["start_epoch"] += 1
         current_epoch = epoch + 1
+        # 与下方 submit_during_train 触发条件保持一致：这些轮次会跑验证
+        in_evaluate_tail = evaluate_tail_epochs > 0 and current_epoch > (config["EPOCHS"] - evaluate_tail_epochs)
+        hit_evaluate_interval = evaluate_every_n_epochs > 0 and (current_epoch % evaluate_every_n_epochs == 0)
+        hit_evaluate_force = current_epoch in evaluate_force_epochs
+        will_evaluate = hit_evaluate_interval or in_evaluate_tail or hit_evaluate_force
+
         in_checkpoint_tail = checkpoint_tail_epochs > 0 and current_epoch > (config["EPOCHS"] - checkpoint_tail_epochs)
         hit_checkpoint_interval = checkpoint_every_n_epochs > 0 and (current_epoch % checkpoint_every_n_epochs == 0)
-        should_save_epoch_checkpoint = hit_checkpoint_interval or in_checkpoint_tail
+        # 在会执行验证的 epoch 一并保存 checkpoint，便于对齐评估权重（含 EVALUATE_FORCE_EPOCHS）
+        should_save_epoch_checkpoint = hit_checkpoint_interval or in_checkpoint_tail or will_evaluate
 
         if multi_checkpoint is True:
             pass
@@ -281,12 +318,13 @@ def train(config: dict):
                         path=checkpoint_path,
                         states=train_states,
                         optimizer=optimizer,
-                        scheduler=scheduler
+                        scheduler=scheduler,
+                        scaler=scaler,
                     )
                     shutil.copy2(checkpoint_path, os.path.join(config["OUTPUTS_DIR"], "last.pth"))
         else:
-            # 兼容原逻辑：关闭 SAVE_CHECKPOINT 时仍保留最后一个 epoch，并同步保存 last.pth
-            if epoch == config["EPOCHS"] - 1:
+            # 兼容原逻辑：关闭 SAVE_CHECKPOINT 时仍保留最后一个 epoch；另外在会验证的 epoch 也保存以对齐评测
+            if epoch == config["EPOCHS"] - 1 or will_evaluate:
                 checkpoint_path = os.path.join(config["OUTPUTS_DIR"], f"checkpoint_{epoch}.pth")
                 if is_main_process():
                     save_checkpoint(
@@ -294,15 +332,12 @@ def train(config: dict):
                         path=checkpoint_path,
                         states=train_states,
                         optimizer=optimizer,
-                        scheduler=scheduler
+                        scheduler=scheduler,
+                        scaler=scaler,
                     )
                     shutil.copy2(checkpoint_path, os.path.join(config["OUTPUTS_DIR"], "last.pth"))
-            train_logger.show(head="No periodic checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml")
-            train_logger.write(head="No periodic checkpoint will be saved. Please set SAVE_CHECKPOINT to True in config.yaml", filename="log.txt", mode="a")
-
-        in_evaluate_tail = evaluate_tail_epochs > 0 and current_epoch > (config["EPOCHS"] - evaluate_tail_epochs)
-        hit_evaluate_interval = evaluate_every_n_epochs > 0 and (current_epoch % evaluate_every_n_epochs == 0)
-        hit_evaluate_force = current_epoch in evaluate_force_epochs
+            train_logger.show(head="SAVE_CHECKPOINT=False：不按周期保存；仍会在末 epoch 与执行验证的 epoch（含 EVALUATE_FORCE_EPOCHS）保存 checkpoint")
+            train_logger.write(head="SAVE_CHECKPOINT=False：不按周期保存；仍会在末 epoch 与执行验证的 epoch（含 EVALUATE_FORCE_EPOCHS）保存 checkpoint", filename="log.txt", mode="a")
 
         # 评估触发规则：固定间隔 或 尾部全评估 或 强制指定轮次
         if hit_evaluate_interval or in_evaluate_tail or hit_evaluate_force:
@@ -365,7 +400,10 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     dynamic_checkpoint_level: int | None = None,
                     only_train_detr: bool = False,
                     timing_sync_cuda: bool = True,
-                    timing_log_interval: int = 2):
+                    timing_log_interval: int = 2,
+                    use_amp: bool = False,
+                    amp_dtype: torch.dtype = torch.bfloat16,
+                    scaler=None):
     """
     Args:
         model: Model.
@@ -435,49 +473,54 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                                 num_classes=get_model(model).num_classes,
                                 device=device, )
 
-            for frame_idx in range(len(batch["imgs"][0])):#所有batch的第frame_idx帧
-                if no_grad_frames is None or frame_idx >= no_grad_frames:
-                    frame = [fs[frame_idx] for fs in batch["imgs"]]
-                    padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
-                    for f in frame:
-                        f.requires_grad_(False)
-                    frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
-                    # frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device) #[B, C, H, W]
-                  
-                    res = model(frame=frame, tracks=tracks)
-                    previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
-                        model_outputs=res,
-                        tracked_instances=tracks,
-                        frame_idx=frame_idx,
-                        img_metas=img_metas
-                    )
-                    if frame_idx < len(batch["imgs"][0]) - 1:
-                        tracks = get_model(model).postprocess_single_frame(
-                            previous_tracks, new_tracks, unmatched_dets, img_metas=img_metas)
-                else:
-                    raise NotImplementedError("No grad frames is not implemented yet. Function tensor_list_to_nested_tensor is wrong now!")
-                    # with torch.no_grad():
-                    #     frame = [fs[frame_idx] for fs in batch["imgs"]]
-                    #     for f in frame:
-                    #         f.requires_grad_(False)
-                    #     frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
-                    #     res = model(frame=frame, tracks=tracks)
-                    #     previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
-                    #         model_outputs=res,
-                    #         tracked_instances=tracks,
-                    #         frame_idx=frame_idx
-                    #     )
-                    #     if frame_idx < len(batch["imgs"][0]) - 1:
-                    #         tracks = get_model(model).postprocess_single_frame(
-                    #             previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1)
+            amp_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp)
+            with amp_ctx:
+                for frame_idx in range(len(batch["imgs"][0])):#所有batch的第frame_idx帧
+                    if no_grad_frames is None or frame_idx >= no_grad_frames:
+                        frame = [fs[frame_idx] for fs in batch["imgs"]]
+                        padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
+                        for f in frame:
+                            f.requires_grad_(False)
+                        frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
+                        # frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device) #[B, C, H, W]
 
-            loss_dict, log_dict = criterion.get_mean_by_n_gts()
-            loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
+                        res = model(frame=frame, tracks=tracks)
+                        previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
+                            model_outputs=res,
+                            tracked_instances=tracks,
+                            frame_idx=frame_idx,
+                            img_metas=img_metas
+                        )
+                        if frame_idx < len(batch["imgs"][0]) - 1:
+                            tracks = get_model(model).postprocess_single_frame(
+                                previous_tracks, new_tracks, unmatched_dets, img_metas=img_metas)
+                    else:
+                        raise NotImplementedError("No grad frames is not implemented yet. Function tensor_list_to_nested_tensor is wrong now!")
+                        # with torch.no_grad():
+                        #     frame = [fs[frame_idx] for fs in batch["imgs"]]
+                        #     for f in frame:
+                        #         f.requires_grad_(False)
+                        #     frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
+                        #     res = model(frame=frame, tracks=tracks)
+                        #     previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
+                        #         model_outputs=res,
+                        #         tracked_instances=tracks,
+                        #         frame_idx=frame_idx
+                        #     )
+                        #     if frame_idx < len(batch["imgs"][0]) - 1:
+                        #         tracks = get_model(model).postprocess_single_frame(
+                        #             previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1)
+
+                loss_dict, log_dict = criterion.get_mean_by_n_gts()
+                loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
 
             # Metrics log
             metric_log.update(name="total_loss", value=loss.item())
             loss = loss / accumulation_steps
-            loss.backward()
+            if scaler is not None and scaler.is_enabled():
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
             efl_pos_neg = None
             if getattr(criterion, "label_loss_type", "") == "efl_loss_closure" and criterion.efl_loss is not None:
                 efl_pos_neg = criterion.efl_loss.finalize_backward()
@@ -485,13 +528,19 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             for name, p in get_model(model).named_parameters():
                 if p.requires_grad and p.grad is None:
                     print("NO GRAD:", name)
-        
+
             if (i + 1) % accumulation_steps == 0:
+                if scaler is not None and scaler.is_enabled():
+                    scaler.unscale_(optimizer)
                 if max_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
                 else:
                     pass
-                optimizer.step()
+                if scaler is not None and scaler.is_enabled():
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 optimizer.zero_grad()
 
             # For logging
@@ -568,6 +617,7 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             model_forward_time = 0.0
             criterion_time = 0.0
             postprocess_time = 0.0
+            amp_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp)
 
             # # 计算光流 [B, frames, 2, 3]
             # from utils.GMC import compute_gmc_sequence
@@ -580,62 +630,33 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             # batch_gmcs.requires_grad_(False)
             # assert batch_gmcs.shape == (batch_size, seq_length, 2, 3)
 
-            for frame_idx in range(len(batch["imgs"][0])):
-                if no_grad_frames is None or frame_idx >= no_grad_frames:
-                    stage_start = time.perf_counter()
-                    frame = [fs[frame_idx] for fs in batch["imgs"]]
-                    padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
-                    for f in frame:
-                        f.requires_grad_(False)
-                    frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
-
-                    if 'heatmap' in batch["infos"][0][0]:
-                        heatmap = [hs[frame_idx]['heatmap'] for hs in batch["infos"]]
-                        for h in heatmap:
-                            h.requires_grad_(False)
-                        heatmap = torch.stack(heatmap, dim=0).to(device)
-                    else:
-                        heatmap = None
-
-                    # gmc = batch_gmcs[:, frame_idx, :, :] # [B, 2, 3]
-                    # res = model(frame=frame, tracks=tracks, heatmap=heatmap, gmc=gmc)
-                    stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                    frame_prepare_time += stage_end - stage_start
-
-                    stage_start = stage_end
-                    res = model(frame=frame, tracks=tracks, heatmap=heatmap)
-                    stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                    model_forward_time += stage_end - stage_start
-
-                    stage_start = stage_end
-                    previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
-                        model_outputs=res,
-                        tracked_instances=tracks,
-                        frame_idx=frame_idx,
-                        img_metas=img_metas
-                    )
-                    stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                    criterion_time += stage_end - stage_start
-
-                    if frame_idx < len(batch["imgs"][0]) - 1:
-                        stage_start = stage_end
-                        tracks = get_model(model).postprocess_single_frame(
-                            previous_tracks, new_tracks, unmatched_dets, img_metas=img_metas)
-                        stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                        postprocess_time += stage_end - stage_start
-                else:
-                    with torch.no_grad():
+            with amp_ctx:
+                for frame_idx in range(len(batch["imgs"][0])):
+                    if no_grad_frames is None or frame_idx >= no_grad_frames:
                         stage_start = time.perf_counter()
                         frame = [fs[frame_idx] for fs in batch["imgs"]]
                         padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
                         for f in frame:
                             f.requires_grad_(False)
                         frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
+
+
+                        heatmap=None#没有使用
+                        # if 'heatmap' in batch["infos"][0][0]:
+                        #     heatmap = [hs[frame_idx]['heatmap'] for hs in batch["infos"]]
+                        #     for h in heatmap:
+                        #         h.requires_grad_(False)
+                        #     heatmap = torch.stack(heatmap, dim=0).to(device)
+                        # else:
+                        #     heatmap = None
+
+                        # gmc = batch_gmcs[:, frame_idx, :, :] # [B, 2, 3]
+                        # res = model(frame=frame, tracks=tracks, heatmap=heatmap, gmc=gmc)
                         stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
                         frame_prepare_time += stage_end - stage_start
 
                         stage_start = stage_end
-                        res = model(frame=frame, tracks=tracks)
+                        res = model(frame=frame, tracks=tracks, heatmap=heatmap)
                         stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
                         model_forward_time += stage_end - stage_start
 
@@ -652,20 +673,56 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                         if frame_idx < len(batch["imgs"][0]) - 1:
                             stage_start = stage_end
                             tracks = get_model(model).postprocess_single_frame(
-                                previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1,
-                                img_metas=img_metas)
+                                previous_tracks, new_tracks, unmatched_dets, img_metas=img_metas)
                             stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
                             postprocess_time += stage_end - stage_start
+                    else:
+                        with torch.no_grad():
+                            stage_start = time.perf_counter()
+                            frame = [fs[frame_idx] for fs in batch["imgs"]]
+                            padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
+                            for f in frame:
+                                f.requires_grad_(False)
+                            frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
+                            stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                            frame_prepare_time += stage_end - stage_start
+
+                            stage_start = stage_end
+                            res = model(frame=frame, tracks=tracks)
+                            stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                            model_forward_time += stage_end - stage_start
+
+                            stage_start = stage_end
+                            previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
+                                model_outputs=res,
+                                tracked_instances=tracks,
+                                frame_idx=frame_idx,
+                                img_metas=img_metas
+                            )
+                            stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                            criterion_time += stage_end - stage_start
+
+                            if frame_idx < len(batch["imgs"][0]) - 1:
+                                stage_start = stage_end
+                                tracks = get_model(model).postprocess_single_frame(
+                                    previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1,
+                                    img_metas=img_metas)
+                                stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                                postprocess_time += stage_end - stage_start
 
             stage_start = time.perf_counter()
-            loss_dict, log_dict = criterion.get_mean_by_n_gts()
-            loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
+            with amp_ctx:
+                loss_dict, log_dict = criterion.get_mean_by_n_gts()
+                loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
             stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
             loss_reduce_time = stage_end - stage_start
 
             backward_start = stage_end
             loss = loss / accumulation_steps
-            loss.backward()
+            if scaler is not None and scaler.is_enabled():
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
             efl_pos_neg = None
             if getattr(criterion, "label_loss_type", "") == "efl_loss_closure" and criterion.efl_loss is not None:
                 efl_pos_neg = criterion.efl_loss.finalize_backward()
@@ -675,11 +732,17 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             optimizer_time = 0.0
             if (i + 1) % accumulation_steps == 0:
                 optimizer_start = backward_end
+                if scaler is not None and scaler.is_enabled():
+                    scaler.unscale_(optimizer)
                 if max_norm > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
                 else:
                     pass
-                optimizer.step()
+                if scaler is not None and scaler.is_enabled():
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 optimizer.zero_grad()
                 optimizer_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
                 optimizer_time = optimizer_end - optimizer_start

@@ -20,42 +20,72 @@ from torch.autograd.function import once_differentiable
 
 import MultiScaleDeformableAttention as MSDA
 
+# Custom CUDA op only implements FP32; autocast may pass FP16/BF16 — cast for kernel, cast outputs/grads back.
+_FP16_BF16 = (torch.float16, torch.bfloat16)
+
 
 class MSDeformAttnFunction(Function):
     @staticmethod
     def forward(ctx, value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, im2col_step):
         ctx.im2col_step = im2col_step
+        ctx.orig_dtype = value.dtype
+        if value.dtype in _FP16_BF16:
+            value = value.float()
+            sampling_locations = sampling_locations.float()
+            attention_weights = attention_weights.float()
         output = MSDA.ms_deform_attn_forward(
             value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, ctx.im2col_step)
         ctx.save_for_backward(value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights)
+        if ctx.orig_dtype in _FP16_BF16:
+            output = output.to(ctx.orig_dtype)
         return output
 
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_output):
         value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights = ctx.saved_tensors
+        grad_output = grad_output.float()
         grad_value, grad_sampling_loc, grad_attn_weight = \
             MSDA.ms_deform_attn_backward(
                 value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, grad_output, ctx.im2col_step)
-
+        od = ctx.orig_dtype
+        if od in _FP16_BF16:
+            grad_value = grad_value.to(od)
+            grad_sampling_loc = grad_sampling_loc.to(od)
+            grad_attn_weight = grad_attn_weight.to(od)
         return grad_value, None, None, grad_sampling_loc, grad_attn_weight, None
 
 class MSDeformAttnSpectralFunction(Function):
     @staticmethod
     def forward(ctx, value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, spectral_attention_weights, im2col_step):
         ctx.im2col_step = im2col_step
+        ctx.orig_dtype = value.dtype
+        if value.dtype in _FP16_BF16:
+            value = value.float()
+            sampling_locations = sampling_locations.float()
+            attention_weights = attention_weights.float()
+            spectral_attention_weights = spectral_attention_weights.float()
         output = MSDA.ms_deform_attn_forward_spectral(
             value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, spectral_attention_weights, ctx.im2col_step)
         ctx.save_for_backward(value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, spectral_attention_weights)
+        if ctx.orig_dtype in _FP16_BF16:
+            output = output.to(ctx.orig_dtype)
         return output
     
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_output):
         value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, spectral_attention_weights = ctx.saved_tensors
+        grad_output = grad_output.float()
         grad_value, grad_sampling_loc, grad_attn_weight, grad_spectral_attn_weight = \
             MSDA.ms_deform_attn_backward_spectral(
                 value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, spectral_attention_weights, grad_output, ctx.im2col_step)
+        od = ctx.orig_dtype
+        if od in _FP16_BF16:
+            grad_value = grad_value.to(od)
+            grad_sampling_loc = grad_sampling_loc.to(od)
+            grad_attn_weight = grad_attn_weight.to(od)
+            grad_spectral_attn_weight = grad_spectral_attn_weight.to(od)
         return grad_value, None, None, grad_sampling_loc, grad_attn_weight, grad_spectral_attn_weight, None
 
 
