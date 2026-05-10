@@ -1,20 +1,15 @@
-PROJECT: "20260505模型，不自适应IoU阈值"
+PROJECT: "20260505模型，Iou阈值=0.3， fcal_loss_weight=5"
 
 AVAILABLE_GPUS: "0,1"
 
-PARENT_CONFIG: ./20260505-2.yaml
-OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260505-2-99
-SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260505-2-99
-
-#RESUME
-PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/20260505-2-99/last.pth
-RESUME: /data4/litianhao/hsmot/memotr/spectralemb/20260505-2-99/last.pth
-RESUME_SCHEDULER: True
+PARENT_CONFIG: ./default.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260505-5-99
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260505-5-99
 
 
 #新增
 TRACK_IOU_ADAPTIVE: False
-TRACK_IOU_THRESH: 0.2
+TRACK_IOU_THRESH: 0.3
 
 
 ##不变
@@ -60,8 +55,8 @@ STEM: conv3d_se_v4
 MEMOTR_VERSION: '20260505'
 USE_Q_SPEC: True
 Q_SPEC_LAMBDA: 0.1
-TIMING_SYNC_CUDA: False
-TIMING_LOG_INTERVAL: 5
+TIMING_SYNC_CUDA: True
+TIMING_LOG_INTERVAL: 1
 
 # -------------SCEM配置-------------
 SCEM:
@@ -85,9 +80,9 @@ LOSS_NLL_CONFIG:
 LOSS_SCEM_POOL_DIV: 1
 LOSS_SCEM_GAMMA_COVER: 1
 LOSS_LABEL_TYPE: sigmoid_focal_loss
-LOSS_WEIGHT_FOCAL: 10 
+LOSS_WEIGHT_FOCAL: 5
 LOSS_WEIGHT_GIOU: 2
-MATCH_COST_CLASS: 10
+MATCH_COST_CLASS: 5
 MATCH_COST_BBOX: 5
 MATCH_COST_GIOU: 2
 
@@ -109,6 +104,6 @@ EVALUATE_FORCE_EPOCHS: []
 
 
 
-# python main.py --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260505-2-resume.yaml
+# python main.py --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260505-5.yaml
 # 多卡
-# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260505-2-resume.yaml
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260505-5.yaml
