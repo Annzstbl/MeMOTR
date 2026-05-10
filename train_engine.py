@@ -38,6 +38,14 @@ def _time_after_cuda_sync(device: torch.device, enabled: bool) -> float:
     return time.perf_counter()
 
 
+def _amp_grad_scaler(enabled: bool):
+    """PyTorch 2.0+ 使用 torch.amp.GradScaler('cuda')；更早版本使用 torch.cuda.amp.GradScaler。"""
+    grad_scaler_cls = getattr(torch.amp, "GradScaler", None)
+    if grad_scaler_cls is not None:
+        return grad_scaler_cls("cuda", enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
 def train(config: dict):
     train_logger = Logger(logdir=os.path.join(config["OUTPUTS_DIR"], "train"), only_main=True, use_buffered_write=True)
     train_logger.show(head="Configs:", log=config)
@@ -114,9 +122,7 @@ def train(config: dict):
         amp_dtype = torch.bfloat16
     else:
         raise ValueError(f"Unsupported AMP_DTYPE '{amp_dtype_str}', use 'bf16' or 'fp16'")
-    scaler = torch.amp.GradScaler(
-        "cuda", enabled=(use_amp and amp_dtype is torch.float16)
-    )
+    scaler = _amp_grad_scaler(enabled=(use_amp and amp_dtype is torch.float16))
     train_logger.show(head=f"USE_AMP={use_amp}, AMP_DTYPE={amp_dtype_str}, GradScaler enabled={scaler.is_enabled()}")
     train_logger.write(
         head=f"USE_AMP={use_amp}, AMP_DTYPE={amp_dtype_str}, GradScaler enabled={scaler.is_enabled()}",
