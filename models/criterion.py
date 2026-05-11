@@ -38,6 +38,24 @@ from hsmot.loss.loss import l1_loss_rotate, loss_rotated_iou_norm_bboxes1
 from hsmot.util.dist import box_iou_rotated_norm_bboxes1
 from utils.edge_swap import EdgeSwap
 
+
+def _normalize_img_metas_list(img_metas, batch_size: int) -> list:
+    """把 img_metas 统一为 list[dict]。
+    - 传 dict 时，视为整 batch 共享一份（兼容旧调用）。
+    - 传 list/tuple 时，长度必须等于 batch_size。
+    背景：DETR 预训练阶段 bs>1 + multi-scale 时，batch 内各样本的 img_shape/pad_shape/version
+    可能不同，criterion/matcher 不能再用单 dict 表征整 batch，必须按样本取。
+    """
+    if isinstance(img_metas, dict):
+        return [img_metas] * batch_size
+    if isinstance(img_metas, (list, tuple)):
+        assert len(img_metas) == batch_size, (
+            f"len(img_metas)={len(img_metas)} != batch_size={batch_size}"
+        )
+        return list(img_metas)
+    raise TypeError(f"img_metas must be dict or list[dict], got {type(img_metas)}")
+
+
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
                  max_frame_length: int, n_aux: int, merge_det_track_layer: int = 0, aux_weights: List = None,
@@ -322,6 +340,8 @@ class ClipCriterion:
         """
 
         batch_size = len(tracked_instances)
+        # 规范化 img_metas：兼容旧的单 dict 调用，也支持 batch 内逐样本 dict。
+        img_metas_list = _normalize_img_metas_list(img_metas, batch_size)
         last_layer_input_query = get_last_layer_input_query(model_outputs=model_outputs)
         last_layer_output_query = get_last_layer_output_query(model_outputs=model_outputs)
         last_layer_input_ref = get_last_layer_input_ref(model_outputs=model_outputs)
@@ -589,18 +609,20 @@ class ClipCriterion:
             tracked_instances[b] = tracked_instances[b].to(self.device)
             new_trackinstances[b] = new_trackinstances[b].to(self.device)
 
-        # Compute IoU.
+        # Compute IoU.  按样本使用各自的 img_shape/version，避免 bs>1 + multi-scale 时尺寸错配。
         for b in range(batch_size):
-            new_trackinstances[b].iou[new_trackinstances[b].matched_idx >= 0] =  box_iou_rotated_norm_bboxes1(
+            img_shape_b = img_metas_list[b]['img_shape']
+            version_b = img_metas_list[b]['version']
+            new_trackinstances[b].iou[new_trackinstances[b].matched_idx >= 0] = box_iou_rotated_norm_bboxes1(
                 new_trackinstances[b][new_trackinstances[b].matched_idx >= 0].boxes,
                 gt_trackinstances[b][new_trackinstances[b][new_trackinstances[b].matched_idx >= 0].matched_idx].boxes,
-                img_shape=img_metas['img_shape'], version=img_metas['version'], aligned=True
+                img_shape=img_shape_b, version=version_b, aligned=True
             )
 
             tracked_instances[b].iou[tracked_instances[b].matched_idx >= 0] = box_iou_rotated_norm_bboxes1(
                 tracked_instances[b][tracked_instances[b].matched_idx >= 0].boxes,
                 gt_trackinstances[b][tracked_instances[b][tracked_instances[b].matched_idx >= 0].matched_idx].boxes,
-                img_shape=img_metas['img_shape'], version=img_metas['version'], aligned=True
+                img_shape=img_shape_b, version=version_b, aligned=True
             )
 
         # 12 calculate spectral kl loss
@@ -749,74 +771,89 @@ class ClipCriterion:
         """
         Computer the bounding box loss, l1 and giou.
         按类别统计损失。
+
+        img_metas 现支持单 dict（旧兼容）或 list[dict]（推荐）。当 batch 内不同样本的 img_shape/
+        version 不同（如 multi-scale 训练）时，必须传 list[dict]：edge_swap、l1_weight、
+        giou(IoU) 都依赖单样本的 img_shape，用错尺寸会引入静默 bug。
         """
-        matched_pred_boxes = [
-            boxes[outputs_idx[0][outputs_idx[1] >= 0]]
-            for boxes, outputs_idx in zip(outputs["pred_bboxes"], idx_to_gts_idx)
-        ]
-        gt_boxes = [
-            gt_trackinstances[b].boxes[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
-            for b in range(len(gt_trackinstances))
-        ]
-        norm_gt_boxes = [
-            gt_trackinstances[b].norm_boxes[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
-            for b in range(len(gt_trackinstances))
-        ]
-        # 获取对应的 gt_labels
-        gt_labels = [
-            gt_trackinstances[b].labels[idx_to_gts_idx[b][1][idx_to_gts_idx[b][1] >= 0]]
-            for b in range(len(gt_trackinstances))
-        ]
-        
-        matched_pred_boxes = torch.cat(matched_pred_boxes)
-        if edge_swap:
-            matched_pred_boxes = EdgeSwap.edge_swap(matched_pred_boxes, img_metas['version'], img_metas['img_shape'])
-        gt_boxes = torch.cat(gt_boxes).to(matched_pred_boxes.device)
-        norm_gt_boxes = torch.cat(norm_gt_boxes).to(matched_pred_boxes.device)
-        gt_labels = torch.cat(gt_labels).to(matched_pred_boxes.device)
+        batch_size = len(gt_trackinstances)
+        img_metas_list = _normalize_img_metas_list(img_metas, batch_size)
 
+        ref_pred = outputs["pred_bboxes"]
+        device = ref_pred.device
+        dtype = ref_pred.dtype
 
-        # 
-        h_img, w_img = img_metas['img_shape']
-        min_img_shape = min(h_img, w_img)
-        l1_weight = torch.as_tensor([w_img / min_img_shape, h_img / min_img_shape, w_img / min_img_shape, h_img / min_img_shape, 1.0], dtype=matched_pred_boxes.dtype, device=matched_pred_boxes.device)#[5,]
+        loss_l1_total: torch.Tensor | None = None
+        loss_giou_total: torch.Tensor | None = None
+        per_sample_l1: List[torch.Tensor] = []
+        per_sample_giou: List[torch.Tensor] = []
+        per_sample_labels: List[torch.Tensor] = []
 
-        loss_l1 = l1_loss_rotate(matched_pred_boxes, norm_gt_boxes, weight=l1_weight).sum()
-        if(matched_pred_boxes.size(0) == 0):
-            loss_giou = torch.zeros_like(loss_l1)
-            loss_by_class = {
-                'loss_l1_by_class': {},
-                'loss_giou_by_class': {}
-            }
-        else:
-            loss_giou = (1-loss_rotated_iou_norm_bboxes1(matched_pred_boxes,  gt_boxes, img_metas['img_shape'], img_metas['version'])).sum()
-            
-            # 按类别统计损失
-            loss_by_class = {
-                'loss_l1_by_class': {},
-                'loss_giou_by_class': {}
-            }
-            
-            # 计算每个样本的损失（不求和）
-            loss_l1_per_sample = l1_loss_rotate(matched_pred_boxes, norm_gt_boxes, weight=l1_weight)  # [N, 5] or [N]
-            if loss_l1_per_sample.dim() == 2:
-                loss_l1_per_sample = loss_l1_per_sample.sum(dim=1)  # [N]
-            
-            ious = loss_rotated_iou_norm_bboxes1(matched_pred_boxes, gt_boxes, img_metas['img_shape'], img_metas['version'])
-            loss_giou_per_sample = 1 - ious  # [N]
-            
-            # 获取所有类别
-            unique_labels = torch.unique(gt_labels)
-            
-            # 按类别统计
+        for b in range(batch_size):
+            pos = idx_to_gts_idx[b][1] >= 0
+            sel_out = idx_to_gts_idx[b][0][pos]
+            sel_gt = idx_to_gts_idx[b][1][pos]
+
+            pred_b = outputs["pred_bboxes"][b][sel_out]  # [N_b, 5]
+            gt_b = gt_trackinstances[b].boxes[sel_gt].to(pred_b.device)
+            norm_gt_b = gt_trackinstances[b].norm_boxes[sel_gt].to(pred_b.device)
+            lab_b = gt_trackinstances[b].labels[sel_gt].to(pred_b.device)
+
+            if edge_swap and pred_b.size(0) > 0:
+                pred_b = EdgeSwap.edge_swap(
+                    pred_b, img_metas_list[b]['version'], img_metas_list[b]['img_shape']
+                )
+
+            h_img, w_img = img_metas_list[b]['img_shape']
+            min_img_shape = min(h_img, w_img)
+            l1_weight = torch.as_tensor(
+                [w_img / min_img_shape, h_img / min_img_shape,
+                 w_img / min_img_shape, h_img / min_img_shape, 1.0],
+                dtype=pred_b.dtype, device=pred_b.device,
+            )  # [5]
+
+            if pred_b.size(0) == 0:
+                # 没有匹配样本：贡献 0，且不参与 by-class 统计
+                continue
+
+            loss_l1_b = l1_loss_rotate(pred_b, norm_gt_b, weight=l1_weight)  # [N_b, 5] 或 [N_b]
+            ious_b = loss_rotated_iou_norm_bboxes1(
+                pred_b, gt_b,
+                img_metas_list[b]['img_shape'], img_metas_list[b]['version'],
+            )  # [N_b]
+            loss_giou_b = 1 - ious_b  # [N_b]
+
+            l1_sum_b = loss_l1_b.sum()
+            giou_sum_b = loss_giou_b.sum()
+            loss_l1_total = l1_sum_b if loss_l1_total is None else loss_l1_total + l1_sum_b
+            loss_giou_total = giou_sum_b if loss_giou_total is None else loss_giou_total + giou_sum_b
+
+            # per-sample（按类统计用）
+            l1_per = loss_l1_b.sum(dim=1) if loss_l1_b.dim() == 2 else loss_l1_b
+            per_sample_l1.append(l1_per)
+            per_sample_giou.append(loss_giou_b)
+            per_sample_labels.append(lab_b)
+
+        # 所有 batch 都没有匹配：构造 0 标量并保持梯度链
+        if loss_l1_total is None:
+            zero = ref_pred.sum() * 0.0
+            loss_l1_total = zero
+            loss_giou_total = zero
+
+        # 按类别统计损失
+        loss_by_class = {'loss_l1_by_class': {}, 'loss_giou_by_class': {}}
+        if len(per_sample_l1) > 0:
+            all_l1 = torch.cat(per_sample_l1)
+            all_giou = torch.cat(per_sample_giou)
+            all_labels = torch.cat(per_sample_labels)
+            unique_labels = torch.unique(all_labels)
             for label in unique_labels:
-                label_mask = (gt_labels == label)
+                label_mask = (all_labels == label)
                 if label_mask.sum() > 0:
-                    # 计算每个类别内部的平均损失（per-class mean），而不是总和
-                    loss_by_class['loss_l1_by_class'][label.item()] = loss_l1_per_sample[label_mask].mean().item()
-                    loss_by_class['loss_giou_by_class'][label.item()] = loss_giou_per_sample[label_mask].mean().item()
+                    loss_by_class['loss_l1_by_class'][label.item()] = all_l1[label_mask].mean().item()
+                    loss_by_class['loss_giou_by_class'][label.item()] = all_giou[label_mask].mean().item()
 
-        return loss_l1, loss_giou, loss_by_class
+        return loss_l1_total, loss_giou_total, loss_by_class
 
 
     @staticmethod

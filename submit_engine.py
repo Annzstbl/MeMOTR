@@ -29,6 +29,53 @@ from utils.batch_vis_result import draw_rotated_bbox
 import cv2
 
 
+def resolve_two_stage_dir(base_dir: str, prefer: str = "stage2", logger: "Logger | None" = None) -> str:
+    """两阶段训练（DETR pretrain + MOT finetune）下，自动在 base_dir 之下定位实际的训练输出目录。
+
+    评测时 yaml/命令行通常只给出顶层 ``SUBMIT_DIR`` / ``EVAL_DIR``，而两阶段训练会把产物落到
+    ``<base>/stage1_detr/`` 与 ``<base>/stage2_mot/``。本函数按以下顺序选择实际可用的目录：
+
+      1. ``base_dir`` 本身存在 ``train/config.yaml`` → 视作单阶段训练目录，原样返回（兼容旧 yaml）。
+      2. 否则按 ``prefer`` 顺序检查 ``stage2_mot``、``stage1_detr``，返回第一个含 ``train/config.yaml`` 的子目录。
+      3. 都找不到 → 抛出 ``FileNotFoundError`` 并打印诊断信息。
+
+    参数:
+        base_dir: 顶层路径，对应 yaml/命令行的 ``SUBMIT_DIR`` / ``EVAL_DIR``。
+        prefer:   ``"stage2"`` 优先评 MOT（默认）；``"stage1"`` 优先评 DETR。
+        logger:   若提供，则用 logger 打印 fallback 信息；否则用 ``print``。
+    """
+    if base_dir is None:
+        raise ValueError("submit/eval dir must not be None.")
+
+    flag_rel = path.join("train", "config.yaml")
+
+    if path.exists(path.join(base_dir, flag_rel)):
+        return base_dir
+
+    order = ["stage2_mot", "stage1_detr"] if prefer == "stage2" else ["stage1_detr", "stage2_mot"]
+    for sub in order:
+        full = path.join(base_dir, sub)
+        if path.exists(path.join(full, flag_rel)):
+            msg = (
+                f"[two-stage] base_dir='{base_dir}' 无 train/config.yaml，"
+                f"自动 fallback 到 '{full}' (prefer={prefer})。"
+                " 如需评估另一个阶段，请显式 --submit-dir/--eval-dir 指向该子目录。"
+            )
+            if logger is not None:
+                logger.show(head=msg)
+            else:
+                print(msg)
+            return full
+
+    raise FileNotFoundError(
+        "Cannot resolve submit/eval dir for two-stage training. None of the following exists:\n"
+        f"  - {path.join(base_dir, flag_rel)}\n"
+        f"  - {path.join(base_dir, 'stage2_mot', flag_rel)}\n"
+        f"  - {path.join(base_dir, 'stage1_detr', flag_rel)}\n"
+        "请确认训练是否完成、目录是否正确，或手动 --submit-dir/--eval-dir 指到正确路径。"
+    )
+
+
 class Submitter:
     """Run MeMOTR inference on a single HSMOT sequence and dump tracking/detection results."""
     def __init__(self, dataset_name: str, split_dir: str, seq_name: str, outputs_dir: str, model: nn.Module,
@@ -454,13 +501,18 @@ class Submitter:
 
 
 def submit(config: dict):
+    assert config["SUBMIT_DIR"] is not None, f"'--submit-dir' must not be None for submit process."
+    assert config["SUBMIT_MODEL"] is not None, f"'--submit-model' must not be None for submit process."
+    assert config["SUBMIT_DATA_SPLIT"] is not None, f"'--submit-data-split' must not be None for submit process."
+    # 两阶段训练 fallback：若顶层 SUBMIT_DIR 无 train/config.yaml，则自动指向 stage2_mot/stage1_detr。
+    # 用 yaml 顶层可选字段 SUBMIT_STAGE_PREFER 控制（默认 "stage2"），命令行也可直接 --submit-dir 指明。
+    prefer_stage = str(config.get("SUBMIT_STAGE_PREFER", "stage2")).lower()
+    config["SUBMIT_DIR"] = resolve_two_stage_dir(config["SUBMIT_DIR"], prefer=prefer_stage)
+
     submit_logger = Logger(logdir=os.path.join(config["SUBMIT_DIR"], config["SUBMIT_DATA_SPLIT"]), only_main=True)
     submit_logger.show(head="Configs:", log=config)
     submit_logger.write(log=config, filename="config.yaml", mode="w")
 
-    assert config["SUBMIT_DIR"] is not None, f"'--submit-dir' must not be None for submit process."
-    assert config["SUBMIT_MODEL"] is not None, f"'--submit-model' must not be None for submit process."
-    assert config["SUBMIT_DATA_SPLIT"] is not None, f"'--submit-data-split' must not be None for submit process."
     train_config = yaml_to_dict(path=path.join(config["SUBMIT_DIR"], "train/config.yaml"))
 
     data_root = config["DATA_ROOT"]

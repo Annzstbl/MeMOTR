@@ -85,9 +85,22 @@ class HungarianMatcher(nn.Module):
                 len(index_i) = len(index_j) = min(num_queries, num_target_boxes)
         """
         with torch.no_grad():
-            
-                   
             bs, num_queries = outputs["pred_logits"].shape[:2]
+
+            # img_metas 规范化为 list[dict]：兼容传入单个 dict（旧调用）或 list[dict]（推荐）。
+            # 当 batch 内不同样本的 img_shape/version 可能不同（如 multi-scale 训练）时，
+            # 必须传 list[dict]，以便 cost_bbox/cost_giou/edge_swap 用各样本自己的尺寸。
+            if isinstance(img_metas, dict):
+                img_metas_list = [img_metas] * bs
+            elif isinstance(img_metas, (list, tuple)):
+                assert len(img_metas) == bs, (
+                    f"len(img_metas)={len(img_metas)} != bs={bs}"
+                )
+                img_metas_list = list(img_metas)
+            else:
+                raise TypeError(
+                    f"img_metas must be dict or list[dict], got {type(img_metas)}"
+                )
 
             if self.cost_spectral_decoder_mse != -1:
                 assert 'pred_spectral_weights' in outputs, "pred_spectral_weights is not in outputs"
@@ -97,28 +110,30 @@ class HungarianMatcher(nn.Module):
                 else:
                     tgt_spectral_weights = torch.cat([v["pred_spectral_weights"] for v in targets])
                 tgt_spectral_weights = tgt_spectral_weights.sigmoid()  # [M, C]
-                
-                # 计算每个预测与每个目标之间的MSE距离矩阵
-                # pred_spectral_weights: [N, C], tgt_spectral_weights: [M, C]
-                # 使用广播机制计算 (N, M, C) 的MSE，然后对C维度求平均得到 (N, M)
-                # cost_spectral_decoder_mse = ((pred_spectral_weights.unsqueeze(1) - tgt_spectral_weights.unsqueeze(0)) ** 2).mean(dim=2)
-                # cost_spectral_decoder_mse 现在是 (N, M) 的形状，与其他成本矩阵一致
                 cost_spectral_decoder_mse = pairwise_min_permuted_segment_error(pred_spectral_weights, tgt_spectral_weights, reduction='mse', aggregate='mean')
 
-            # We flatten to compute the cost matrices in a batch
+            # cost_class 与 img_shape 无关，仍用 flatten 形式整 batch 计算
             if use_focal:
                 out_prob = outputs["pred_logits"].flatten(0, 1).sigmoid()
             else:
-                out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [batch_size * num_queries, num_classes]
-            out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
+                out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)  # [bs*Q, num_classes]
 
-            if self.edge_swap:
-                out_bbox = EdgeSwap.edge_swap(out_bbox, img_metas['version'], img_metas['img_shape'])
+            # edge_swap 依赖各样本的 img_shape/version，必须按 b 处理
+            out_bbox_per_b = []
+            for b in range(bs):
+                pred_b = outputs["pred_boxes"][b]  # [Q, 5]
+                if self.edge_swap:
+                    pred_b = EdgeSwap.edge_swap(
+                        pred_b, img_metas_list[b]['version'], img_metas_list[b]['img_shape']
+                    )
+                out_bbox_per_b.append(pred_b)
+            out_bbox = torch.cat(out_bbox_per_b, dim=0)  # [bs*Q, 5]
 
             # Also concat the target labels and boxes
             if isinstance(targets[0], Instances):
                 tgt_ids = torch.cat([gt_per_img.labels for gt_per_img in targets])
                 tgt_bbox = torch.cat([gt_per_img.boxes for gt_per_img in targets])
+                norm_tgt_bbox = torch.cat([gt_per_img.norm_boxes for gt_per_img in targets])
             elif isinstance(targets[0], TrackInstances):
                 tgt_ids = torch.cat([gt_per_img.labels for gt_per_img in targets])
                 tgt_bbox = torch.cat([gt_per_img.boxes for gt_per_img in targets])
@@ -127,6 +142,14 @@ class HungarianMatcher(nn.Module):
                 tgt_ids = torch.cat([v["labels"] for v in targets])
                 tgt_bbox = torch.cat([v["boxes"] for v in targets])
                 norm_tgt_bbox = torch.cat([v["norm_boxes"] for v in targets])
+
+            # 提前计算 sizes（每个样本的 GT 数量）
+            if isinstance(targets[0], Instances):
+                sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
+            elif isinstance(targets[0], TrackInstances):
+                sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
+            else:
+                sizes = [len(v["boxes"]) for v in targets]
 
             # Compute the classification cost.
             if use_focal:
@@ -141,34 +164,50 @@ class HungarianMatcher(nn.Module):
                 # The 1 is a constant that doesn't change the matching, it can be ommitted.
                 cost_class = -out_prob[:, tgt_ids]
 
-            # Compute the L1 cost between boxes
-            cost_bbox = l1_dist_rotate(out_bbox, norm_tgt_bbox, aligned=False, cal_sum=False)
-            # 计算weight
-            h_img, w_img = img_metas['img_shape']
-            min_img_shape = min(h_img, w_img)
-            l1_weight = torch.as_tensor([w_img / min_img_shape, h_img / min_img_shape, w_img / min_img_shape, h_img / min_img_shape, 1.0], dtype=out_bbox.dtype, device=out_bbox.device)#[5,]
-            cost_bbox = cost_bbox * l1_weight
-            cost_bbox = cost_bbox.sum(dim=-1)
+            # cost_bbox / cost_giou 依赖各样本的 img_shape/version，按 b 计算并填入对角块；
+            # 跨 b 的块保持 0（后续 C.split + c[i] 只取对角块，跨 b 部分会被丢弃）。
+            total_M = tgt_bbox.size(0)
+            cost_bbox = out_bbox.new_zeros((bs * num_queries, total_M))
+            cost_giou = out_bbox.new_zeros((bs * num_queries, total_M))
+            tgt_start = 0
+            for b in range(bs):
+                mb = sizes[b]
+                tgt_end = tgt_start + mb
+                if mb == 0:
+                    tgt_start = tgt_end
+                    continue
+                pred_b = out_bbox_per_b[b]  # [Q, 5]
+                norm_tgt_b = norm_tgt_bbox[tgt_start:tgt_end]
+                tgt_b = tgt_bbox[tgt_start:tgt_end]
 
-            # 如果tgt_bbox是空
-            if tgt_bbox.size(0) == 0:
-                cost_giou = torch.zeros_like(cost_bbox)
-            else:
-                cost_giou = -box_iou_rotated_norm_bboxes1(out_bbox, tgt_bbox, img_shape=img_metas['img_shape'], version = img_metas['version'])
+                # L1 cost between boxes (按当前样本 img_shape 计算 l1_weight)
+                cost_bbox_b = l1_dist_rotate(pred_b, norm_tgt_b, aligned=False, cal_sum=False)  # [Q, Mb, 5]
+                h_img, w_img = img_metas_list[b]['img_shape']
+                min_img_shape = min(h_img, w_img)
+                l1_weight = torch.as_tensor(
+                    [w_img / min_img_shape, h_img / min_img_shape,
+                     w_img / min_img_shape, h_img / min_img_shape, 1.0],
+                    dtype=pred_b.dtype, device=pred_b.device,
+                )  # [5]
+                cost_bbox_b = (cost_bbox_b * l1_weight).sum(dim=-1)  # [Q, Mb]
+                cost_bbox[b * num_queries:(b + 1) * num_queries, tgt_start:tgt_end] = cost_bbox_b
+
+                # GIoU cost (按当前样本 img_shape/version)
+                cost_giou_b = -box_iou_rotated_norm_bboxes1(
+                    pred_b, tgt_b,
+                    img_shape=img_metas_list[b]['img_shape'],
+                    version=img_metas_list[b]['version'],
+                )  # [Q, Mb]
+                cost_giou[b * num_queries:(b + 1) * num_queries, tgt_start:tgt_end] = cost_giou_b
+
+                tgt_start = tgt_end
 
             # Final cost matrix
             C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
             if self.cost_spectral_decoder_mse != -1:
                 C = C + self.cost_spectral_decoder_mse * cost_spectral_decoder_mse
-            
-            C = C.view(bs, num_queries, -1).cpu()
 
-            if isinstance(targets[0], Instances):
-                sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
-            elif isinstance(targets[0], TrackInstances):
-                sizes = [len(gt_per_img.boxes) for gt_per_img in targets]
-            else:
-                sizes = [len(v["boxes"]) for v in targets]
+            C = C.view(bs, num_queries, -1).cpu()
 
             indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
             return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]

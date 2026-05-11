@@ -10,8 +10,12 @@ from utils.utils import yaml_to_dict
 
 
 def evaluate(config: dict):
+    # 两阶段训练 fallback：当顶层 EVAL_DIR 不含 train/config.yaml 时，
+    # 自动 fallback 到 stage2_mot / stage1_detr 子目录（默认优先 stage2_mot，可用 EVAL_STAGE_PREFER 覆盖）。
+    from submit_engine import resolve_two_stage_dir
     eval_split = config["EVAL_DATA_SPLIT"]
-    eval_dir = config["EVAL_DIR"]
+    prefer_stage = str(config.get("EVAL_STAGE_PREFER", "stage2")).lower()
+    eval_dir = resolve_two_stage_dir(config["EVAL_DIR"], prefer=prefer_stage)
     if config["EVAL_PORT"] is not None:
         port = config["EVAL_PORT"]
     else:

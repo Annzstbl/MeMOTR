@@ -1,6 +1,8 @@
 import os
 import shutil
 import time
+import copy
+
 import torch
 from torch._C import NoneType
 import torch.nn as nn
@@ -46,8 +48,117 @@ def _amp_grad_scaler(enabled: bool):
     return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
+def _to_plain(x):
+    """递归把 TrackedConfig / dict / list / tuple 转为普通 Python 容器，便于深拷贝。"""
+    if isinstance(x, dict):
+        return {k: _to_plain(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_to_plain(v) for v in x]
+    if isinstance(x, tuple):
+        return tuple(_to_plain(v) for v in x)
+    return x
+
+
+def _apply_overrides(base, overrides: dict):
+    """对 base 做深拷贝，再用 overrides 中的字段做浅覆盖；尽量保持 base 的类型（TrackedConfig 兼容）。
+
+    覆盖规则：
+    - 顶层 key 直接替换（包括嵌套 dict 整体替换）；这意味着如果 overrides 想改 ``SCEM.ENABLE``，
+      需要写完整的 ``SCEM: {...}`` 块。这样设计与 yaml 顶层一致，便于理解。
+    - ``ENABLE`` 控制字段不会被写入合并结果。
+    """
+    from utils.utils import TrackedConfig
+
+    base_plain = _to_plain(base)
+    overrides_plain = _to_plain(overrides) if overrides else {}
+    overrides_plain.pop("ENABLE", None)
+    merged = copy.deepcopy(base_plain)
+    for k, v in overrides_plain.items():
+        merged[k] = v
+    if isinstance(base, TrackedConfig):
+        return TrackedConfig(merged)
+    return merged
+
+
 def train(config: dict):
+    """训练入口：检测 ``STAGE1`` 块，按需先跑阶段 1（DETR pretrain），再跑阶段 2（MOT finetune）。
+
+    yaml 顶层字段被视为**阶段 2**配置（兼容旧 yaml；不设 STAGE1 时退化为单段训练）。
+    ``STAGE1`` 嵌套块描述对阶段 1 的覆盖项，例如：
+
+    .. code-block:: yaml
+
+        STAGE1:
+          ENABLE: True
+          EPOCHS: 20
+          ONLY_TRAIN_DETR: True
+          BATCH_SIZE: 2
+          SAMPLE_STEPS: []
+          SAMPLE_LENGTHS: [1]
+          SAMPLE_INTERVALS: [1]
+          LR_DROP_MILESTONES: [12]
+
+    两阶段衔接：
+    - 阶段 1 输出到 ``OUTPUTS_DIR/stage1_detr``。
+    - 阶段 2 自动 ``PRETRAINED_MODEL = stage1_detr/last.pth``、``RESUME = None``，
+      输出到 ``OUTPUTS_DIR/stage2_mot``；optimizer/scheduler 完全重建。
+    """
+    stage1 = config.get("STAGE1", None)
+    enable_two_stage = (
+        isinstance(stage1, dict)
+        and bool(stage1.get("ENABLE", False))
+        and int(stage1.get("EPOCHS", 0)) > 0
+    )
+
+    if not enable_two_stage:
+        _run_one_stage(config, stage_tag=None)
+        return
+
+    base_outputs_dir = config["OUTPUTS_DIR"]
+    base_submit_dir = config.get("SUBMIT_DIR", base_outputs_dir)
+
+    # 阶段 1：用 STAGE1 字段覆盖 yaml 顶层
+    stage1_overrides = {k: v for k, v in dict(stage1).items() if k != "ENABLE"}
+    stage1_config = _apply_overrides(config, stage1_overrides)
+    stage1_config["OUTPUTS_DIR"] = os.path.join(base_outputs_dir, "stage1_detr")
+    stage1_config["SUBMIT_DIR"] = os.path.join(base_submit_dir, "stage1_detr")
+    # 防止 _run_one_stage 内意外地再次进入两段分支
+    stage1_config["STAGE1"] = {"ENABLE": False}
+
+    stage1_ckpt = _run_one_stage(stage1_config, stage_tag="stage1_detr")
+
+    if is_distributed():
+        torch.distributed.barrier()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    if stage1_ckpt is None or not os.path.exists(stage1_ckpt):
+        raise FileNotFoundError(
+            f"Stage 1 last.pth not found at {stage1_ckpt}. Cannot proceed to stage 2."
+        )
+
+    # 阶段 2：保留 yaml 顶层字段，但用阶段 1 的权重作为 PRETRAINED_MODEL
+    stage2_config = _apply_overrides(config, {})
+    stage2_config["OUTPUTS_DIR"] = os.path.join(base_outputs_dir, "stage2_mot")
+    stage2_config["SUBMIT_DIR"] = os.path.join(base_submit_dir, "stage2_mot")
+    stage2_config["PRETRAINED_MODEL"] = stage1_ckpt
+    stage2_config["RESUME"] = None
+    stage2_config["STAGE1"] = {"ENABLE": False}
+
+    _run_one_stage(stage2_config, stage_tag="stage2_mot")
+    return
+
+
+def _run_one_stage(config: dict, stage_tag: str | None = None) -> str | None:
+    """跑完整的一段训练（原 ``train`` 函数主体）。
+
+    返回该阶段产出的 ``last.pth`` 路径（如果存在），便于两段衔接。
+    """
     train_logger = Logger(logdir=os.path.join(config["OUTPUTS_DIR"], "train"), only_main=True, use_buffered_write=True)
+    if stage_tag is not None:
+        banner = f"=========== Stage: {stage_tag} ==========="
+        train_logger.show(head=banner)
+        train_logger.write(head=banner, filename="log.txt", mode="a")
     train_logger.show(head="Configs:", log=config)
     train_logger.write(log=config, filename="config.yaml", mode="w")
     train_logger.tb_add_git_version(git_version=config["GIT_VERSION"])
@@ -261,12 +372,20 @@ def train(config: dict):
                 default_lr_idx = _
         train_logger.tb_add_scalar(tag="lr", scalar_value=lrs[default_lr_idx], global_step=epoch, mode="epochs")
 
+        # NO_GRAD_FRAMES 已被废弃：训练循环要求每一帧都计算梯度。
+        # 若 config 中残留该字段且实际解析出 > 0 的值，会在 train_one_epoch 入口被 ValueError 拦截。
         no_grad_frames = None
         if "NO_GRAD_FRAMES" in config:
-            for i in range(len(config["NO_GRAD_STEPS"])):
-                if epoch >= config["NO_GRAD_STEPS"][i]:
+            no_grad_steps = config.get("NO_GRAD_STEPS", []) or []
+            for i in range(len(no_grad_steps)):
+                if epoch >= no_grad_steps[i]:
                     no_grad_frames = config["NO_GRAD_FRAMES"][i]
                     break
+            if no_grad_frames is not None and int(no_grad_frames) > 0:
+                raise ValueError(
+                    f"NO_GRAD_FRAMES is no longer supported (got {no_grad_frames} at epoch {epoch}). "
+                    "Please remove NO_GRAD_FRAMES / NO_GRAD_STEPS from your config."
+                )
 
         sample_length = dataset_train.sample_length
         dynamic_use_checkpoint, dynamic_checkpoint_level = resolve_dynamic_checkpoint_policy(
@@ -289,7 +408,6 @@ def train(config: dict):
             use_dab=config["USE_DAB"],
             multi_checkpoint=multi_checkpoint,
             no_grad_frames=no_grad_frames,
-            decoder_spectral_clusters=config["DECODER_SPECTRAL_CLUSTERS"],
             dynamic_use_checkpoint=dynamic_use_checkpoint and use_checkpoint,
             dynamic_checkpoint_level=dynamic_checkpoint_level,
             only_train_detr=config["ONLY_TRAIN_DETR"],
@@ -391,8 +509,10 @@ def train(config: dict):
                 train_logger.show(head=f"验证指标可视化失败: {str(e)}")
         else:
             train_logger.show(head="ONLY_TRAIN_DETR=True，跳过 visualize_validation_metrics")
-    
-    return
+
+    # 返回该阶段产出的 last.pth 路径（若不存在则返回 None；上层据此判断阶段衔接是否可行）
+    last_ckpt_path = os.path.join(config["OUTPUTS_DIR"], "last.pth")
+    return last_ckpt_path if os.path.exists(last_ckpt_path) else None
 
 
 def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
@@ -401,7 +521,6 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     accumulation_steps: int = 1, use_dab: bool = False,
                     multi_checkpoint: bool = False,
                     no_grad_frames: int | None = None,
-                    decoder_spectral_clusters: int=1,
                     dynamic_use_checkpoint: bool = False,
                     dynamic_checkpoint_level: int | None = None,
                     only_train_detr: bool = False,
@@ -419,22 +538,31 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
         criterion: Loss function.
         optimizer: Training optimizer.
         epoch: Current epoch.
-        # metric_log: Metric Log.
         logger: unified logger.
         accumulation_steps:
         use_dab:
         multi_checkpoint:
-        no_grad_frames:
+        no_grad_frames: 已废弃，必须为 None 或 0；若传入 > 0 的值，会立即抛出 ValueError。
+            （目的：保证训练循环内每一帧都计算梯度。）
+        only_train_detr: 仅用于日志展示；不再用于训练循环分支。
+            （模型构建处通过 ``build_query_updater`` 决定是否构造 QueryUpdater；
+            提交/评测阶段在 submit_engine 中自行分支。）
 
     Returns:
-        Logs
+        None
     """
+    if no_grad_frames is not None and int(no_grad_frames) > 0:
+        raise ValueError(
+            f"`no_grad_frames` is no longer supported in train_one_epoch (got {no_grad_frames}). "
+            "Please remove NO_GRAD_FRAMES / NO_GRAD_STEPS from your config; "
+            "all frames must run with grad."
+        )
+
     model.train()
     optimizer.zero_grad()
     device = next(get_model(model).parameters()).device
     timing_log_interval = max(1, int(timing_log_interval))
 
-    # set using checkpoint
     model_core = get_model(model)
     if dynamic_use_checkpoint:
         if dynamic_checkpoint_level is not None and hasattr(model_core, "set_checkpoint_level"):
@@ -443,397 +571,202 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
         logger.write(
             head=f"--Epoch={epoch} Settings: Enable using checkpoint (level={dynamic_checkpoint_level})",
             filename="log.txt",
-            mode="a"
+            mode="a",
         )
         logger.show(head=f"--Epoch={epoch} Settings: Enable using checkpoint (level={dynamic_checkpoint_level})")
     else:
         model_core.enable_checkpoint(False)
         logger.write(head=f"--Epoch={epoch} Settings: Disable using checkpoint", filename="log.txt", mode="a")
         logger.show(head=f"--Epoch={epoch} Settings: Disable using checkpoint")
+
+    info_only_train_detr = (
+        f"--Epoch={epoch} Settings: only_train_detr={only_train_detr} "
+        f"(unified training loop; no_grad branch disabled)"
+    )
+    logger.show(head=info_only_train_detr)
+    logger.write(head=info_only_train_detr, filename="log.txt", mode="a")
+
     dataloader_len = len(dataloader)
     metric_log = MetricLog()
     epoch_start_timestamp = time.perf_counter()
-    
+
     data_start_timestamp = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
 
     criterion.set_epoch(epoch)
-    
+
     TrackInstances.set_static_properties(
         False,
         use_dab=use_dab,
         use_q_spec=bool(getattr(get_model(model), "use_q_spec", False)),
     )
 
-    if only_train_detr:
-        for i, batch in enumerate(dataloader):
-            img_metas = batch["img_metas"][0][0] #batch[keys][batches][sequentials] 
-    
-            iter_start_timestamp = time.perf_counter()
-            tracks = TrackInstances.init_tracks(batch=batch,
-                                                hidden_dim=get_model(model).hidden_dim,
-                                                num_classes=get_model(model).num_classes,
-                                                device=device,
-                                                )
-            criterion.init_a_clip(batch=batch,
-                                hidden_dim=get_model(model).hidden_dim,
-                                num_classes=get_model(model).num_classes,
-                                device=device, )
+    for i, batch in enumerate(dataloader):
+        # batch[keys][batches][sequentials]
+        # img_metas 现在按帧从 batch 内取出 list[dict]（见下方 padding_img_metas），
+        # 以便 criterion / matcher / postprocess 可以按 batch 内每个样本自己的 img_shape /
+        # version 计算 loss / IoU。bs>1 + multi-scale 训练时同一 batch 内各样本尺寸可能不同。
+        iter_start_timestamp = time.perf_counter()
+        data_time = iter_start_timestamp - data_start_timestamp
+        setup_start_timestamp = iter_start_timestamp
+        tracks = TrackInstances.init_tracks(
+            batch=batch,
+            hidden_dim=get_model(model).hidden_dim,
+            num_classes=get_model(model).num_classes,
+            device=device,
+        )
+        criterion.init_a_clip(
+            batch=batch,
+            hidden_dim=get_model(model).hidden_dim,
+            num_classes=get_model(model).num_classes,
+            device=device,
+        )
+        setup_time = time.perf_counter() - setup_start_timestamp
 
-            amp_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp)
-            with amp_ctx:
-                for frame_idx in range(len(batch["imgs"][0])):#所有batch的第frame_idx帧
-                    if no_grad_frames is None or frame_idx >= no_grad_frames:
-                        frame = [fs[frame_idx] for fs in batch["imgs"]]
-                        padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
-                        for f in frame:
-                            f.requires_grad_(False)
-                        frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
-                        # frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device) #[B, C, H, W]
+        frame_prepare_time = 0.0
+        model_forward_time = 0.0
+        criterion_time = 0.0
+        postprocess_time = 0.0
 
-                        res = model(frame=frame, tracks=tracks)
-                        previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
-                            model_outputs=res,
-                            tracked_instances=tracks,
-                            frame_idx=frame_idx,
-                            img_metas=img_metas
-                        )
-                        if frame_idx < len(batch["imgs"][0]) - 1:
-                            tracks = get_model(model).postprocess_single_frame(
-                                previous_tracks, new_tracks, unmatched_dets, img_metas=img_metas)
-                    else:
-                        raise NotImplementedError("No grad frames is not implemented yet. Function tensor_list_to_nested_tensor is wrong now!")
-                        # with torch.no_grad():
-                        #     frame = [fs[frame_idx] for fs in batch["imgs"]]
-                        #     for f in frame:
-                        #         f.requires_grad_(False)
-                        #     frame = tensor_list_to_nested_tensor(tensor_list=frame).to(device)
-                        #     res = model(frame=frame, tracks=tracks)
-                        #     previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
-                        #         model_outputs=res,
-                        #         tracked_instances=tracks,
-                        #         frame_idx=frame_idx
-                        #     )
-                        #     if frame_idx < len(batch["imgs"][0]) - 1:
-                        #         tracks = get_model(model).postprocess_single_frame(
-                        #             previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1)
+        amp_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp)
+        with amp_ctx:
+            num_frames = len(batch["imgs"][0])
+            for frame_idx in range(num_frames):
+                stage_start = time.perf_counter()
+                frame = [fs[frame_idx] for fs in batch["imgs"]]
+                padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
+                for f in frame:
+                    f.requires_grad_(False)
+                frame = tensor_list_to_nested_tensor_already_padded(
+                    tensor_list=frame, frame_metas=padding_img_metas
+                ).to(device)
+                stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                frame_prepare_time += stage_end - stage_start
 
-                loss_dict, log_dict = criterion.get_mean_by_n_gts()
-                loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
+                stage_start = stage_end
+                res = model(frame=frame, tracks=tracks, heatmap=None)
+                stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                model_forward_time += stage_end - stage_start
 
-            # Metrics log
-            metric_log.update(name="total_loss", value=loss.item())
-            loss = loss / accumulation_steps
-            if scaler is not None and scaler.is_enabled():
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
-            efl_pos_neg = None
-            if getattr(criterion, "label_loss_type", "") == "efl_loss_closure" and criterion.efl_loss is not None:
-                efl_pos_neg = criterion.efl_loss.finalize_backward()
+                stage_start = stage_end
+                previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
+                    model_outputs=res,
+                    tracked_instances=tracks,
+                    frame_idx=frame_idx,
+                    img_metas=padding_img_metas,
+                )
+                stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                criterion_time += stage_end - stage_start
 
-            for name, p in get_model(model).named_parameters():
-                if p.requires_grad and p.grad is None:
-                    print("NO GRAD:", name)
-
-            if (i + 1) % accumulation_steps == 0:
-                if scaler is not None and scaler.is_enabled():
-                    scaler.unscale_(optimizer)
-                if max_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
-                else:
-                    pass
-                if scaler is not None and scaler.is_enabled():
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
-                optimizer.zero_grad()
-
-            # For logging
-            # 主损失：所有不带 "aux" 和 "class" 的损失；写入 metric_log 以便统计 / TensorBoard
-            for log_k, (val, _) in log_dict.items():
-                if ("aux" not in log_k) and ("class" not in log_k):
-                    metric_log.update(name=log_k, value=val)
-            iter_end_timestamp = time.perf_counter()
-            metric_log.update(name="time per iter", value=iter_end_timestamp-data_start_timestamp)
-            metric_log.update(name="time per data", value=iter_start_timestamp-data_start_timestamp)
-            # Outputs logs - 减少同步频率以避免NCCL超时
-            if i % 2 == 0:  # 改为每10个iteration同步一次，而不是每次
-                metric_log.sync()
-                # 修复：只获取当前GPU的内存使用情况，避免跨进程访问
-                max_memory = torch.cuda.max_memory_allocated() // (1024**2)
-                second_per_iter = metric_log.metrics["time per iter"].avg
-                second_per_data = metric_log.metrics["time per data"].avg
-                logger.show(head=f"--[Epoch={epoch}, Iter={i}, "
-                                f"{second_per_iter:.2f}s/iter, "
-                                f"{second_per_data:.2f}s/data, "
-                                f"{i}/{dataloader_len} iters, "
-                                f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
-                                f"Max Memory={max_memory}MB]",
-                            log=metric_log)
-                logger.write(head=f"--[Epoch={epoch}, Iter={i}, "
-                                f"{second_per_iter:.2f}s/iter, "
-                                f"{second_per_data:.2f}s/data, "
-                                f"{i}/{dataloader_len} iters, "
-                                f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
-                                f"Max Memory={max_memory}MB]",
-                            log=metric_log, filename="log.txt", mode="a")
-                # 同步输出并记录所有损失（包括 aux 和 class）到日志文件
-                if is_main_process():
-                    detail_items = ", ".join([f"{k}:{v[0]:.4f}" for k, v in log_dict.items()])
-                    # logger.write(head="detail_loss", log=detail_items, filename="log.txt", mode="a")
-                    if efl_pos_neg is not None:
-                        pos_neg_str = ", ".join([f"{x:.4f}" for x in efl_pos_neg.detach().cpu().tolist()])
-                        logger.show(head=f"efl_pos_neg: {pos_neg_str}")
-                        logger.write(head="efl_pos_neg", log=pos_neg_str, filename="log.txt", mode="a")
-                # logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
-                            #  log=metric_log, filename="log.txt", mode="a")
-                logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
-            if multi_checkpoint:
-                if i % 1 == 0 and is_main_process():
-                    checkpoint_path = os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
-                    save_checkpoint(
-                        model=model,
-                        path=checkpoint_path
+                if frame_idx < num_frames - 1:
+                    stage_start = stage_end
+                    tracks = get_model(model).postprocess_single_frame(
+                        previous_tracks, new_tracks, unmatched_dets, img_metas=padding_img_metas,
                     )
-                    shutil.copy2(checkpoint_path, os.path.join(logger.logdir[:-5], "last.pth"))
+                    stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+                    postprocess_time += stage_end - stage_start
 
-            train_states["global_iters"] += 1
-            data_start_timestamp = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-    else:
-        for i, batch in enumerate(dataloader):
-            # assert len(batch["imgs"]) == 1, "batch size must be 1"
-            # sequentials的每一个img_meta的transforms属性是一致的
-            img_metas = batch["img_metas"][0][0] #batch[keys][batches][sequentials] 
-    
-            iter_start_timestamp = time.perf_counter()
-            data_time = iter_start_timestamp - data_start_timestamp
-            setup_start_timestamp = iter_start_timestamp
-            tracks = TrackInstances.init_tracks(batch=batch,
-                                                hidden_dim=get_model(model).hidden_dim,
-                                                num_classes=get_model(model).num_classes,
-                                                device=device,
-                                                )
-            criterion.init_a_clip(batch=batch,
-                                hidden_dim=get_model(model).hidden_dim,
-                                num_classes=get_model(model).num_classes,
-                                device=device, )
-            setup_time = time.perf_counter() - setup_start_timestamp
-            frame_prepare_time = 0.0
-            model_forward_time = 0.0
-            criterion_time = 0.0
-            postprocess_time = 0.0
-            amp_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=use_amp)
+        stage_start = time.perf_counter()
+        with amp_ctx:
+            loss_dict, log_dict = criterion.get_mean_by_n_gts()
+            loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
+        stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+        loss_reduce_time = stage_end - stage_start
 
-            # # 计算光流 [B, frames, 2, 3]
-            # from utils.GMC import compute_gmc_sequence
-            # batch_size = len(batch["imgs"])
-            # seq_length = len(batch["imgs"][0])
-            # batch_gmcs = []#List(List(ndarray))
-            # for bs_index in range(batch_size):
-            #     batch_gmcs.append(compute_gmc_sequence(batch["imgs"][bs_index], method="sparseOptFlow", downscale=1))
-            # batch_gmcs = torch.tensor(batch_gmcs, dtype=torch.float32).to(device)
-            # batch_gmcs.requires_grad_(False)
-            # assert batch_gmcs.shape == (batch_size, seq_length, 2, 3)
+        backward_start = stage_end
+        loss = loss / accumulation_steps
+        if scaler is not None and scaler.is_enabled():
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
+        efl_pos_neg = None
+        if getattr(criterion, "label_loss_type", "") == "efl_loss_closure" and criterion.efl_loss is not None:
+            efl_pos_neg = criterion.efl_loss.finalize_backward()
+        backward_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+        backward_time = backward_end - backward_start
 
-            with amp_ctx:
-                for frame_idx in range(len(batch["imgs"][0])):
-                    if no_grad_frames is None or frame_idx >= no_grad_frames:
-                        stage_start = time.perf_counter()
-                        frame = [fs[frame_idx] for fs in batch["imgs"]]
-                        padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
-                        for f in frame:
-                            f.requires_grad_(False)
-                        frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
-
-
-                        heatmap=None#没有使用
-                        # if 'heatmap' in batch["infos"][0][0]:
-                        #     heatmap = [hs[frame_idx]['heatmap'] for hs in batch["infos"]]
-                        #     for h in heatmap:
-                        #         h.requires_grad_(False)
-                        #     heatmap = torch.stack(heatmap, dim=0).to(device)
-                        # else:
-                        #     heatmap = None
-
-                        # gmc = batch_gmcs[:, frame_idx, :, :] # [B, 2, 3]
-                        # res = model(frame=frame, tracks=tracks, heatmap=heatmap, gmc=gmc)
-                        stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                        frame_prepare_time += stage_end - stage_start
-
-                        stage_start = stage_end
-                        res = model(frame=frame, tracks=tracks, heatmap=heatmap)
-                        stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                        model_forward_time += stage_end - stage_start
-
-                        stage_start = stage_end
-                        previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
-                            model_outputs=res,
-                            tracked_instances=tracks,
-                            frame_idx=frame_idx,
-                            img_metas=img_metas
-                        )
-                        stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                        criterion_time += stage_end - stage_start
-
-                        if frame_idx < len(batch["imgs"][0]) - 1:
-                            stage_start = stage_end
-                            tracks = get_model(model).postprocess_single_frame(
-                                previous_tracks, new_tracks, unmatched_dets, img_metas=img_metas)
-                            stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                            postprocess_time += stage_end - stage_start
-                    else:
-                        with torch.no_grad():
-                            stage_start = time.perf_counter()
-                            frame = [fs[frame_idx] for fs in batch["imgs"]]
-                            padding_img_metas = [fs[frame_idx] for fs in batch["img_metas"]]
-                            for f in frame:
-                                f.requires_grad_(False)
-                            frame = tensor_list_to_nested_tensor_already_padded(tensor_list=frame, frame_metas=padding_img_metas).to(device)
-                            stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                            frame_prepare_time += stage_end - stage_start
-
-                            stage_start = stage_end
-                            res = model(frame=frame, tracks=tracks)
-                            stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                            model_forward_time += stage_end - stage_start
-
-                            stage_start = stage_end
-                            previous_tracks, new_tracks, unmatched_dets = criterion.process_single_frame(
-                                model_outputs=res,
-                                tracked_instances=tracks,
-                                frame_idx=frame_idx,
-                                img_metas=img_metas
-                            )
-                            stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                            criterion_time += stage_end - stage_start
-
-                            if frame_idx < len(batch["imgs"][0]) - 1:
-                                stage_start = stage_end
-                                tracks = get_model(model).postprocess_single_frame(
-                                    previous_tracks, new_tracks, unmatched_dets, no_augment=frame_idx < no_grad_frames-1,
-                                    img_metas=img_metas)
-                                stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                                postprocess_time += stage_end - stage_start
-
-            stage_start = time.perf_counter()
-            with amp_ctx:
-                loss_dict, log_dict = criterion.get_mean_by_n_gts()
-                loss, log_dict = criterion.get_sum_loss_dict(loss_dict=loss_dict, log_dict=log_dict)
-            stage_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-            loss_reduce_time = stage_end - stage_start
-
-            backward_start = stage_end
-            loss = loss / accumulation_steps
+        optimizer_time = 0.0
+        if (i + 1) % accumulation_steps == 0:
+            optimizer_start = backward_end
             if scaler is not None and scaler.is_enabled():
-                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+            if max_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
+            if scaler is not None and scaler.is_enabled():
+                scaler.step(optimizer)
+                scaler.update()
             else:
-                loss.backward()
-            efl_pos_neg = None
-            if getattr(criterion, "label_loss_type", "") == "efl_loss_closure" and criterion.efl_loss is not None:
-                efl_pos_neg = criterion.efl_loss.finalize_backward()
-            backward_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-            backward_time = backward_end - backward_start
+                optimizer.step()
+            optimizer.zero_grad()
+            optimizer_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+            optimizer_time = optimizer_end - optimizer_start
 
-            optimizer_time = 0.0
-            if (i + 1) % accumulation_steps == 0:
-                optimizer_start = backward_end
-                if scaler is not None and scaler.is_enabled():
-                    scaler.unscale_(optimizer)
-                if max_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 0.1)
-                else:
-                    pass
-                if scaler is not None and scaler.is_enabled():
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
-                optimizer.zero_grad()
-                optimizer_end = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
-                optimizer_time = optimizer_end - optimizer_start
+        iter_end_timestamp = time.perf_counter()
+        active_time = iter_end_timestamp - iter_start_timestamp
+        iter_time = iter_end_timestamp - data_start_timestamp
 
-            iter_end_timestamp = time.perf_counter()
-            active_time = iter_end_timestamp - iter_start_timestamp
-            iter_time = iter_end_timestamp - data_start_timestamp
+        metric_log.update(name="total_loss", value=loss.item() * accumulation_steps)
+        metric_log.update(name="time per iter", value=iter_time)
+        metric_log.update(name="time per data", value=data_time)
+        metric_log.update(name="time/setup", value=setup_time)
+        metric_log.update(name="time/frame_prepare", value=frame_prepare_time)
+        metric_log.update(name="time/forward", value=model_forward_time)
+        metric_log.update(name="time/criterion", value=criterion_time)
+        metric_log.update(name="time/postprocess", value=postprocess_time)
+        metric_log.update(name="time/loss_reduce", value=loss_reduce_time)
+        metric_log.update(name="time/backward", value=backward_time)
+        metric_log.update(name="time/optimizer", value=optimizer_time)
+        metric_log.update(name="time/active", value=active_time)
+        # 主损失：所有不带 "aux" 和 "class" 的损失；写入 metric_log
+        for log_k, (val, _) in log_dict.items():
+            if ("aux" not in log_k) and ("class" not in log_k):
+                metric_log.update(name=log_k, value=val)
 
-            # For logging
-            metric_log.update(name="total_loss", value=loss.item() * accumulation_steps)
-            metric_log.update(name="time per iter", value=iter_time)
-            metric_log.update(name="time per data", value=data_time)
-            metric_log.update(name="time/setup", value=setup_time)
-            metric_log.update(name="time/frame_prepare", value=frame_prepare_time)
-            metric_log.update(name="time/forward", value=model_forward_time)
-            metric_log.update(name="time/criterion", value=criterion_time)
-            metric_log.update(name="time/postprocess", value=postprocess_time)
-            metric_log.update(name="time/loss_reduce", value=loss_reduce_time)
-            metric_log.update(name="time/backward", value=backward_time)
-            metric_log.update(name="time/optimizer", value=optimizer_time)
-            metric_log.update(name="time/active", value=active_time)
-            # 主损失：所有不带 "aux" 和 "class" 的损失；写入 metric_log
-            for log_k, (val, _) in log_dict.items():
-                if ("aux" not in log_k) and ("class" not in log_k):
-                    metric_log.update(name=log_k, value=val)
-            # Outputs logs - 减少同步频率以避免NCCL超时
-            if i % timing_log_interval == 0:
-                metric_log.sync()
-                # 修复：只获取当前GPU的内存使用情况，避免跨进程访问
-                max_memory = torch.cuda.max_memory_allocated() // (1024**2)
-                second_per_iter = metric_log.metrics["time per iter"].avg
-                second_per_data = metric_log.metrics["time per data"].avg
-                second_per_forward = metric_log.metrics["time/forward"].avg
-                second_per_backward = metric_log.metrics["time/backward"].avg
-                logger.show(head=f"--[Epoch={epoch}, Iter={i}, "
-                                f"{second_per_iter:.2f}s/iter, "
-                                f"{second_per_data:.2f}s/data, "
-                                f"{second_per_forward:.2f}s/fwd, "
-                                f"{second_per_backward:.2f}s/bwd, "
-                                f"{i}/{dataloader_len} iters, "
-                                f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
-                                f"Max Memory={max_memory}MB]",
-                            log=metric_log)
+        # 周期性日志（降低同步频率以避免 NCCL 超时）
+        if i % timing_log_interval == 0:
+            metric_log.sync()
+            max_memory = torch.cuda.max_memory_allocated() // (1024 ** 2)
+            second_per_iter = metric_log.metrics["time per iter"].avg
+            second_per_data = metric_log.metrics["time per data"].avg
+            second_per_forward = metric_log.metrics["time/forward"].avg
+            second_per_backward = metric_log.metrics["time/backward"].avg
+            header = (
+                f"--[Epoch={epoch}, Iter={i}, "
+                f"{second_per_iter:.2f}s/iter, "
+                f"{second_per_data:.2f}s/data, "
+                f"{second_per_forward:.2f}s/fwd, "
+                f"{second_per_backward:.2f}s/bwd, "
+                f"{i}/{dataloader_len} iters, "
+                f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
+                f"Max Memory={max_memory}MB]"
+            )
+            logger.show(head=header, log=metric_log)
+            logger.write(head=header, log=metric_log, filename="log.txt", mode="a")
+            logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
 
-                logger.write(head=f"--[Epoch={epoch}, Iter={i}, "
-                                f"{second_per_iter:.2f}s/iter, "
-                                f"{second_per_data:.2f}s/data, "
-                                f"{second_per_forward:.2f}s/fwd, "
-                                f"{second_per_backward:.2f}s/bwd, "
-                                f"{i}/{dataloader_len} iters, "
-                                f"rest time: {int(second_per_iter * (dataloader_len - i) // 60)} min, "
-                                f"Max Memory={max_memory}MB]",
-                            log=metric_log, filename="log.txt", mode="a")
-                # logger.write(head=f"[Epoch={epoch}, Iter={i}/{dataloader_len}]",
-                            #  log=metric_log, filename="log.txt", mode="a")
-                logger.tb_add_metric_log(log=metric_log, steps=train_states["global_iters"], mode="iters")
+            if is_main_process() and efl_pos_neg is not None:
+                pos_neg_str = ", ".join([f"{x:.4f}" for x in efl_pos_neg.detach().cpu().tolist()])
+                logger.show(head=f"efl_pos_neg: {pos_neg_str}")
+                logger.write(head="efl_pos_neg", log=pos_neg_str, filename="log.txt", mode="a")
 
-                # 同步输出并记录所有损失（包括 aux 和 class）到日志文件
-                if is_main_process():
-                    detail_items = ", ".join([f"{k}:{v[0]:.4f}" for k, v in log_dict.items()])
-                    # logger.write(head="detail_loss", log=detail_items, filename="log.txt", mode="a")
-                    if efl_pos_neg is not None:
-                        pos_neg_str = ", ".join([f"{x:.4f}" for x in efl_pos_neg.detach().cpu().tolist()])
-                        logger.show(head=f"efl_pos_neg: {pos_neg_str}")
-                        logger.write(head="efl_pos_neg", log=pos_neg_str, filename="log.txt", mode="a")
-            if multi_checkpoint:
-                if i % 1 == 0 and is_main_process():
-                    checkpoint_path = os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
-                    save_checkpoint(
-                        model=model,
-                        path=checkpoint_path
-                    )
-                    shutil.copy2(checkpoint_path, os.path.join(logger.logdir[:-5], "last.pth"))
+        if multi_checkpoint and is_main_process():
+            checkpoint_path = os.path.join(logger.logdir[:-5], f"checkpoint_{int(i // 100)}.pth")
+            save_checkpoint(model=model, path=checkpoint_path)
+            shutil.copy2(checkpoint_path, os.path.join(logger.logdir[:-5], "last.pth"))
 
-            train_states["global_iters"] += 1
-            data_start_timestamp = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
+        train_states["global_iters"] += 1
+        data_start_timestamp = _time_after_cuda_sync(device=device, enabled=timing_sync_cuda)
 
     # Epoch end
     metric_log.sync()
     epoch_end_timestamp = time.perf_counter()
     epoch_minutes = int((epoch_end_timestamp - epoch_start_timestamp) // 60)
-    logger.show(head=f"--[Epoch: {epoch}, Total Time: {epoch_minutes}min]",
-                log=metric_log)
-    logger.write(head=f"--[Epoch: {epoch}, Total Time: {epoch_minutes}min]",
-                 log=metric_log, filename="log.txt", mode="a")
+    logger.show(head=f"--[Epoch: {epoch}, Total Time: {epoch_minutes}min]", log=metric_log)
+    logger.write(
+        head=f"--[Epoch: {epoch}, Total Time: {epoch_minutes}min]",
+        log=metric_log,
+        filename="log.txt",
+        mode="a",
+    )
     logger.tb_add_metric_log(log=metric_log, steps=epoch, mode="epochs")
 
     return

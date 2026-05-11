@@ -57,31 +57,23 @@ def update_config(config: dict, option: argparse.Namespace) -> dict:
     return config
 
 
-def is_unique(config: dict, keys_set: set = None) -> [bool, set]:
+def is_unique(config: dict) -> tuple[bool, set]:
     """
-    Check whether the keys in config are unique.
+    Check whether keys are unique **within each mapping only**.
 
-    Args:
-        config: Config dict.
-        keys_set: Current keys set.
-
-    Returns:
-        [Whether the keys are unique, Current keys set]
+    Nested dicts may reuse the same key names as a parent (e.g. ``STAGE1.LR_DROP_RATE`` and
+    top-level ``LR_DROP_RATE``); the previous implementation used one global ``keys_set`` for
+    the whole tree and incorrectly rejected such configs.
     """
-    if keys_set is None:
-        keys_set = set()
-
-    for k in config.keys():
-        if k in keys_set:
-            return False, keys_set
-        else:
-            keys_set.add(k)
-        if isinstance(config[k], dict):
-            hit, keys_set = is_unique(config[k], keys_set=keys_set)
-            if hit is False:
-                return False, keys_set
-
-    return True, keys_set
+    level_keys = list(config.keys())
+    if len(level_keys) != len(set(level_keys)):
+        return False, set(level_keys)
+    for v in config.values():
+        if isinstance(v, dict):
+            ok, dup = is_unique(v)
+            if not ok:
+                return False, dup
+    return True, set()
 
 
 
