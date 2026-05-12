@@ -499,7 +499,8 @@ def _run_one_stage(config: dict, stage_tag: str | None = None) -> str | None:
                 train_logger.show(head="开始生成验证指标可视化...")
                 best_result = visualize_validation_metrics(
                     val_root_path=config["OUTPUTS_DIR"],
-                    fig_path=os.path.join(config["OUTPUTS_DIR"], 'fig')
+                    fig_path=os.path.join(config["OUTPUTS_DIR"], 'fig'),
+                    data_split=config["SUBMIT_DATA_SPLIT"],
                 )
                 if best_result:
                     train_logger.show(head=f"最佳组合分数: Epoch {best_result['epoch']}, "

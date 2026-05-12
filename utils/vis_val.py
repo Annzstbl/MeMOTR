@@ -7,13 +7,14 @@ from collections import defaultdict
 import numpy as np
 
 
-def visualize_validation_metrics(val_root_path, fig_path=None):
+def visualize_validation_metrics(val_root_path, fig_path=None, data_split: str = "test"):
     """
     可视化验证指标并找到最佳组合分数
     
     Args:
         val_root_path: 包含epoch文件夹的根路径
         fig_path: 保存图片的路径，如果为None则使用val_root_path/fig
+        data_split: 与 SUBMIT_DATA_SPLIT 一致，例如 test（默认），对应 epoch_*/<split>/eval/
     
     Returns:
         dict: 包含最佳epoch信息的字典，如果未找到则返回None
@@ -29,7 +30,7 @@ def visualize_validation_metrics(val_root_path, fig_path=None):
     val_matrix = []
     
     for val_path in val_folder_list:
-        val_file = os.path.join(val_path, 'test', 'eval', 'all_cls_summary.csv')
+        val_file = os.path.join(val_path, data_split, 'eval', 'all_cls_summary.csv')
         if os.path.exists(val_file):
             val_matrix.append(pd.read_csv(val_file))
         else:
@@ -136,10 +137,12 @@ def main():
                         help='Root path containing epoch folders with validation results')
     parser.add_argument('--fig_path', type=str, default=None,
                         help='Path to save figures (default: val_root_path/fig)')
+    parser.add_argument('--data-split', type=str, default='test',
+                        help='SUBMIT_DATA_SPLIT 名称，例如 test（对应 epoch_*/<split>/eval/）')
     
     args = parser.parse_args()
     
-    visualize_validation_metrics(args.val_root_path, args.fig_path)
+    visualize_validation_metrics(args.val_root_path, args.fig_path, data_split=args.data_split)
     print("Done!")
 
 

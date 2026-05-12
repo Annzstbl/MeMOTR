@@ -11,7 +11,7 @@ import numpy as np
 from copy import deepcopy
 from typing import Dict, Any, Set
 import inspect
-from collections import defaultdict
+from collections import defaultdict, deque
 
 
 def is_distributed():
@@ -129,13 +129,18 @@ class TrackedConfig(dict):
     一个带访问记录功能的配置类，兼容 dict 的所有用法。
     每次读取（__getitem__ / get）都会记录：
         - 该 key 被读取的次数
-        - 读取发生的文件路径和行号
+        - 读取发生的文件路径和行号（每条 key 仅保留最近若干条，避免训练长跑后写 config.yaml 体积失控）
     """
+
+    # 每个 key 在 _access_locations 中最多保留的访问位置条数；计数 _access_counts 不受限。
+    MAX_ACCESS_LOCATION_HISTORY = max(
+        1, int(os.environ.get("TRACKED_CONFIG_MAX_ACCESS_LOCATIONS", "32"))
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._access_counts = defaultdict(int)
-        self._access_locations = defaultdict(list)
+        self._access_locations: dict[Any, deque] = {}
         self._this_file = os.path.abspath(__file__)
         # 递归包装嵌套配置，保证子 dict 也可追踪访问
         for key, value in list(super().items()):
@@ -172,6 +177,8 @@ class TrackedConfig(dict):
         if filename is None or lineno is None:
             return
         self._access_counts[key] += 1
+        if key not in self._access_locations:
+            self._access_locations[key] = deque(maxlen=self.MAX_ACCESS_LOCATION_HISTORY)
         self._access_locations[key].append((filename, lineno))
 
     def __setitem__(self, key, value):
