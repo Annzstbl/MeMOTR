@@ -1,0 +1,125 @@
+PROJECT: "20260505模型，不自适应IoU阈值"
+
+AVAILABLE_GPUS: "0"
+
+PARENT_CONFIG: ./20260505-6.yaml
+
+#RESUME
+PRETRAINED_MODEL: /data1/users/litianhao01/experiment/memotr/20260505-6-178/last.pth
+RESUME: /data1/users/litianhao01/experiment/memotr/20260505-6-178/last.pth
+RESUME_SCHEDULER: True
+
+
+
+OUTPUTS_DIR: /data1/users/litianhao01/experiment/memotr/20260505-6-178
+SUBMIT_DIR: /data1/users/litianhao01/experiment/memotr/20260505-6-178
+
+
+#新增
+TRACK_IOU_ADAPTIVE: False
+TRACK_IOU_THRESH: 0.3
+
+
+##不变
+
+# checkpoint
+USE_CHECKPOINT: True
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
+CHECKPOINT_LEVEL: 1         # 1： encoder  2: encoder+decoder  3: encoder+decoder+backbone
+
+# 最佳transform
+TRANSFORMS_CONFIG:
+  CROP_SIZE:
+    - 800
+    - 1200
+  FLIP_RATIO: 0.5
+  RESIZE:
+    - 880
+    - 960
+    - 1040
+    - 1120
+    - 1200
+    - 1280
+
+# --训练detr时候设置的参数，在训练MOT的时候由default直接给出默认值--
+# BATCH_SIZE: 2
+# EPOCHS: 40
+# LR_DROP_RATE: 0.1
+# LR_DROP_MILESTONES: [12, 24]
+# PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/14_train_half/checkpoint_19.pth
+SAMPLE_STEPS: [6, 10, 14]
+SAMPLE_LENGTHS: [2,3,4,5]
+LR_SCHEDULER: MultiStep
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [12]
+
+# -------------训练配置-------------
+TRAIN_HALF: False
+ONLY_TRAIN_DETR: False
+# DATASET_VERSION: OnePic
+NUM_WORKERS: 2
+DATASET_TYPE: 3JPG # NPY
+
+# -------------模型配置-------------
+ENCODER_SPECTRAL: True
+EDGE_SWAP: True
+STEM: conv3d_se_v4
+MEMOTR_VERSION: '20260505'
+USE_Q_SPEC: True
+Q_SPEC_LAMBDA: 0.1
+TIMING_SYNC_CUDA: False
+TIMING_LOG_INTERVAL: 2
+
+# AMP: set USE_AMP True to enable (see PARENT_CONFIG default.yaml for AMP_DTYPE)
+USE_AMP: False
+AMP_DTYPE: bf16
+
+# -------------SCEM配置-------------
+SCEM:
+  ENABLE: True
+  USE_GT: False
+  PRIOR_MODE: gate
+  USE_SPECTRAL_PI: True
+  SPECTRAL_DATABASE_NUM: 32
+  SPECTRAL_TYPE: "pi"
+
+# -------------LOSS配置-------------
+LOSS_SCEM_NLL: 1
+LOSS_SCEM_BCE: 1
+LOSS_SCEM_DICE: 0
+LOSS_NLL_CONFIG:
+  TYPE: focal # focal or mean
+  ALPHA_POS: 1.0
+  ALPHA_NEG: 0.1
+  GAMMA_POS: 2.0
+  GAMMA_NEG: 0.0
+LOSS_SCEM_POOL_DIV: 1
+LOSS_SCEM_GAMMA_COVER: 1
+LOSS_LABEL_TYPE: sigmoid_focal_loss
+LOSS_WEIGHT_FOCAL: 10 
+LOSS_WEIGHT_GIOU: 2
+MATCH_COST_CLASS: 10
+MATCH_COST_BBOX: 5
+MATCH_COST_GIOU: 2
+
+# -------------CHECKPOINT配置-------------
+
+CHECKPOINT_EVERY_N_EPOCHS: 5
+CHECKPOINT_TAIL_EPOCHS: 3
+
+# EVALUATE
+# 每 N 个 epoch 评估一次；<=0 表示关闭间隔评估
+EVALUATE_EVERY_N_EPOCHS: 3
+# 最后多少个 epoch 每个都评估
+EVALUATE_TAIL_EPOCHS: 3
+# 指定必须评估的 epoch（1-based），例如 [1, 10, 20]
+EVALUATE_FORCE_EPOCHS: []
+
+
+
+
+
+
+# python main.py --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_hsmot_spectral_embed_178/20260505-6-resume.yaml
+# 多卡
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_hsmot_spectral_embed_178/20260505-6-resume.yaml
