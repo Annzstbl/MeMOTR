@@ -292,8 +292,9 @@ class ClipCriterion:
 
     def get_mean_by_n_gts(self) -> Tuple[Dict, Dict]:
         '''
-            把所有帧的损失加到一起，除以总的gt数，得到平均损失
-            scem损失不需要除以总的gt数
+            把所有帧的损失加到一起：
+            - MOT 等：除以 clip 内总 GT 数，得到 per-GT 平均损失
+            - SCEM：除以 clip 帧数，得到 per-frame 平均损失（不除 GT 数）
         '''
         total_n_gts = sum(self.n_gts)
         total_n_gts = torch.as_tensor(total_n_gts, dtype=torch.float, device=self.device)
@@ -303,13 +304,13 @@ class ClipCriterion:
             torch.distributed.all_reduce(n_gts)
         total_n_gts = torch.clamp(total_n_gts / distributed_world_size(), min=1).item()
         n_gts = torch.clamp(n_gts / distributed_world_size(), min=1).tolist()
+        num_frames = max(len(self.n_gts), 1)
         loss = {}
         for k in self.loss:
-            # scem损失不需要除以总的gt数
-            if "scem" not in k:
-                loss[k] = self.loss[k] / total_n_gts
+            if "scem" in k:
+                loss[k] = self.loss[k] / num_frames
             else:
-                loss[k] = self.loss[k]
+                loss[k] = self.loss[k] / total_n_gts
         log = {}
         for k in self.log:
             for i in range(len(n_gts)):
