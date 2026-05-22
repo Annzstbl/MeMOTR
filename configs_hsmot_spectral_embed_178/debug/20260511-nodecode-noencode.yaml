@@ -16,7 +16,7 @@ TRACK_IOU_THRESH: 0.2
 
 # checkpoint
 USE_CHECKPOINT: True
-DYNAMIC_USE_CHECKPOINT_THRESHOLD: 4
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 6
 CHECKPOINT_LEVEL: 1         # 1： encoder  2: encoder+decoder  3: encoder+decoder+backbone
 
 # 最佳transform
@@ -33,7 +33,7 @@ TRANSFORMS_CONFIG:
     - 1200
     - 1280
 
-SAMPLE_LENGTHS: [2, 3, 4, 5]
+SAMPLE_LENGTHS: [5, 3, 4, 5]
 
 # -------------训练配置-------------
 TRAIN_HALF: False

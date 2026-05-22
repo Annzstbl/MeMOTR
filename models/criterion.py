@@ -626,17 +626,17 @@ class ClipCriterion:
                 img_shape=img_shape_b, version=version_b, aligned=True
             )
 
-        # 12 calculate spectral kl loss
-        spectral_weights_list = model_outputs["spectral_weights"]
-        target_weights = spectral_weights_list[0]
-        kl_loss = torch.zeros(()).to(self.device)
-        for b in range(1, len(spectral_weights_list)):
-            source_weights = spectral_weights_list[b]
-            _target_weights = F.adaptive_avg_pool2d(target_weights, (source_weights.shape[2], source_weights.shape[3]))
-            kl_loss += F.kl_div(F.log_softmax(_target_weights, dim=1), F.softmax(source_weights, dim=1), reduction="batchmean")
+        # # 12 calculate spectral kl loss
+        # spectral_weights_list = model_outputs["spectral_weights"]
+        # target_weights = spectral_weights_list[0]
+        # kl_loss = torch.zeros(()).to(self.device)
+        # for b in range(1, len(spectral_weights_list)):
+        #     source_weights = spectral_weights_list[b]
+        #     _target_weights = F.adaptive_avg_pool2d(target_weights, (source_weights.shape[2], source_weights.shape[3]))
+        #     kl_loss += F.kl_div(F.log_softmax(_target_weights, dim=1), F.softmax(source_weights, dim=1), reduction="batchmean")
 
-        self.loss["spectral_kl_loss"] += kl_loss * self.frame_weights[frame_idx]
-        self.log[f"frame{frame_idx}_spectral_kl_loss"] = kl_loss.item()
+        # self.loss["spectral_kl_loss"] += kl_loss * self.frame_weights[frame_idx]
+        # self.log[f"frame{frame_idx}_spectral_kl_loss"] = kl_loss.item()
 
         # 13 calculate scem loss
         if self.scem:
