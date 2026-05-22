@@ -370,8 +370,24 @@ class Backbone_PE_SpectralWeights(BackboneWithPE):
 
         return features, pos_embeds, spectral_embeds
 
+    def forward_v5(self, ntensor: NestedTensor):
+        '''
+        Stem-only spectral fusion (ConvMSI_SE); no spectral state output or per-stage recursion.
+        Returns layer2->layer4 features and position embeddings only.
+        '''
+        backbone_outputs, _ = self.backbone(ntensor)
 
+        features: List[NestedTensor] = []
+        pos_embeds: List[torch.Tensor] = []
 
+        for _, output in sorted(backbone_outputs.items()):
+            features.append(output)
+
+        for feature in features[1:]:
+            pos_embeds.append(self.position_embedding(feature))
+
+        features = features[1:]
+        return features, pos_embeds, None
 
     def forward(self, ntensor: NestedTensor):
         if self.weights_version == "v1":
@@ -382,6 +398,8 @@ class Backbone_PE_SpectralWeights(BackboneWithPE):
             return self.forward_v2(ntensor)#复用
         elif self.weights_version == "v4":
             return self.forward_v4(ntensor)
+        elif self.weights_version == "v5":
+            return self.forward_v5(ntensor)
         else:
             raise ValueError(f"Unsupported weights_version: {self.weights_version}")
 
@@ -667,8 +685,17 @@ def build(config: dict) -> Union[BackboneWithPE, Backbone_PE_SpectralWeights]:
         spectral_embedding = SpectralEmbeddingV3(resnet_output_layer=resnet_output_layer)
         return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding, weights_version="v3")
     elif CONFIG_STEM=="conv3d_se_v4":
+        weights_version = config.get("SPECTRAL_WEIGHTS_VERSION", "v4")
+        if weights_version == "v5":
+            return Backbone_PE_SpectralWeights(
+                backbone=backbone, position_embedding=position_embedding,
+                spectral_embedding=None, weights_version="v5",
+            )
         spectral_embedding = SpectralEmbeddingV4(resnet_output_layer=recursion_resnet_output_layer)
-        return Backbone_PE_SpectralWeights(backbone=backbone, position_embedding=position_embedding, spectral_embedding=spectral_embedding, weights_version="v4")
+        return Backbone_PE_SpectralWeights(
+            backbone=backbone, position_embedding=position_embedding,
+            spectral_embedding=spectral_embedding, weights_version=weights_version,
+        )
     else:
         return BackboneWithPE(backbone=backbone, position_embedding=position_embedding)
 
