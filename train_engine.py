@@ -40,6 +40,15 @@ def _time_after_cuda_sync(device: torch.device, enabled: bool) -> float:
     return time.perf_counter()
 
 
+def _collect_trainable_params_without_grad(model: nn.Module) -> list[str]:
+    """Collect names of trainable parameters that have no gradient after backward."""
+    model_core = get_model(model)
+    return [
+        name for name, param in model_core.named_parameters()
+        if param.requires_grad and param.grad is None
+    ]
+
+
 def _amp_grad_scaler(enabled: bool):
     """PyTorch 2.0+ 使用 torch.amp.GradScaler('cuda')；更早版本使用 torch.cuda.amp.GradScaler。"""
     grad_scaler_cls = getattr(torch.amp, "GradScaler", None)
@@ -679,6 +688,23 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
             scaler.scale(loss).backward()
         else:
             loss.backward()
+
+        if i == 0 and is_main_process():
+            _sync_cuda_for_timing(device=device, enabled=timing_sync_cuda)
+            params_without_grad = _collect_trainable_params_without_grad(model)
+            if params_without_grad:
+                grad_check_msg = (
+                    f"--[Epoch={epoch}, Iter={i}] {len(params_without_grad)} trainable params "
+                    f"without gradient after backward:\n  "
+                    + "\n  ".join(params_without_grad)
+                )
+            else:
+                grad_check_msg = (
+                    f"--[Epoch={epoch}, Iter={i}] All trainable params received gradients after backward."
+                )
+            logger.show(head=grad_check_msg)
+            logger.write(head=grad_check_msg, filename="log.txt", mode="a")
+
         efl_pos_neg = None
         if getattr(criterion, "label_loss_type", "") == "efl_loss_closure" and criterion.efl_loss is not None:
             efl_pos_neg = criterion.efl_loss.finalize_backward()
