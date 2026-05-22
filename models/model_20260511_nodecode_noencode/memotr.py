@@ -108,7 +108,8 @@ class MeMOTR(nn.Module):
             feature_tuple = self.backbone(frame)
 
         pos = None
-        features, pos, _ = feature_tuple
+        spectral_weights = None
+        features, pos, spectral_weights = feature_tuple
 
         srcs, masks = [], []
         for layer, feat in enumerate(features):
@@ -127,6 +128,15 @@ class MeMOTR(nn.Module):
                 mask = F.interpolate(mask[None, ...].float(), size=src.shape[-2:])[0].to(torch.bool)
                 if pos is not None:
                     pos.append(self.backbone.position_embedding(NestedTensor(src, mask)).to(src.device))
+                if spectral_weights is not None:
+                    if self.backbone.weights_version == "v4":
+                        spectral_weights.append(
+                            self.backbone.spectral_embedding(spectral_weights[-1], NestedTensor(src, mask)).to(src.device)
+                        )
+                    else:
+                        spectral_weights.append(
+                            self.backbone.spectral_embedding(spectral_weights[0], NestedTensor(src, mask)).to(src.device)
+                        )
                 srcs.append(src)
                 masks.append(mask)
 
@@ -138,6 +148,7 @@ class MeMOTR(nn.Module):
             srcs=srcs,
             masks=masks,
             pos_embeds=pos,
+            spectral_weights=spectral_weights,
             query_embed=query_embed,
             ref_pts=reference_points,
             query_mask=query_mask,

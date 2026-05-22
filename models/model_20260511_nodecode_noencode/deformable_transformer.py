@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch.nn.init import normal_
 
+from ..mlp import MLP
 from ..ops.modules import MSDeformAttn, MSDeformAttn_Rotate, MSDeformAttnSpectral
 from .deformable_decoder import DeformableDecoder, DeformableDecoderLayer
 from .deformable_encoder import DeformableEncoder, DeformableEncoderLayer
@@ -42,6 +43,7 @@ class DeformableTransformer(nn.Module):
                                          use_dab=self.use_dab, visualize=self.visualize)
 
         self.level_embed = nn.Parameter(torch.Tensor(n_feature_levels, d_model))
+        self.spectral_embed = MLP(input_dim=8, hidden_dim=self.d_model, output_dim=self.d_model, num_layers=2)
         if two_stage:
             assert False, "two stage is not supported"
         else:
@@ -77,19 +79,21 @@ class DeformableTransformer(nn.Module):
         return torch.stack([valid_w.float() / w, valid_h.float() / h], -1)
 
     def forward(self, srcs: List[torch.Tensor], masks: List[torch.Tensor], pos_embeds: Optional[List[torch.Tensor]],
-                query_embed, ref_pts, query_mask):
-        src_flatten, mask_flatten, lvl_pos_embed_flatten, spatial_shapes = [], [], [], []
+                query_embed, ref_pts, query_mask, spectral_weights: List[torch.Tensor]):
+        src_flatten, mask_flatten, lvl_pos_embed_flatten, spatial_shapes, spectral_embeds_flatten = [], [], [], [], []
 
-        for lvl, (src, mask, pos_embed) in enumerate(zip(srcs, masks, pos_embeds)):
+        for lvl, (src, mask, pos_embed, spectral_weight) in enumerate(zip(srcs, masks, pos_embeds, spectral_weights)):
             bs, c, h, w = src.shape
             spatial_shapes.append((h, w))
             src_flatten.append(src.flatten(2).transpose(1, 2))
             mask_flatten.append(mask.flatten(1))
             pos_embed = pos_embed.flatten(2).transpose(1, 2)
+            spectral_embeds_flatten.append(self.spectral_embed(spectral_weight.flatten(2).transpose(1, 2)))
             lvl_pos_embed_flatten.append(pos_embed + self.level_embed[lvl].view(1, 1, -1))
 
         src_flatten = torch.cat(src_flatten, 1)
         mask_flatten = torch.cat(mask_flatten, 1)
+        spectral_embeds_flatten = torch.cat(spectral_embeds_flatten, 1)
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
@@ -97,7 +101,7 @@ class DeformableTransformer(nn.Module):
 
         memory = self.encoder(
             src=src_flatten, spatial_shapes=spatial_shapes, level_start_index=level_start_index, valid_ratios=valid_ratios,
-            pos=lvl_pos_embed_flatten, padding_mask=mask_flatten,
+            pos=lvl_pos_embed_flatten, padding_mask=mask_flatten, spectral=spectral_embeds_flatten,
         )
         bs, _, c = memory.shape
 

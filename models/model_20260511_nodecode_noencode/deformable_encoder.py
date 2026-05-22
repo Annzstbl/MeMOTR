@@ -28,7 +28,8 @@ class DeformableEncoder(nn.Module):
         reference_points = reference_points[:, :, None] * valid_ratios[:, None]
         return reference_points
 
-    def forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None):
+    def forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None,
+                spectral=None):
         output = src
         reference_points = self.get_reference_points(spatial_shapes, valid_ratios, device=src.device)
         for idx, layer in enumerate(self.layers):
@@ -36,15 +37,15 @@ class DeformableEncoder(nn.Module):
                 assert len(self.layers) % 3 == 0
 
                 def fn(x, idx=idx):
-                    x = self.layers[idx](x, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
-                    x = self.layers[idx + 1](x, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
-                    x = self.layers[idx + 2](x, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
+                    x = self.layers[idx](x, pos, spectral, reference_points, spatial_shapes, level_start_index, padding_mask)
+                    x = self.layers[idx + 1](x, pos, spectral, reference_points, spatial_shapes, level_start_index, padding_mask)
+                    x = self.layers[idx + 2](x, pos, spectral, reference_points, spatial_shapes, level_start_index, padding_mask)
                     return x
 
                 if idx % 3 == 0:
                     output = checkpoint(fn, output, use_reentrant=False)
             else:
-                output = layer(output, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
+                output = layer(output, pos, spectral, reference_points, spatial_shapes, level_start_index, padding_mask)
         return output
 
 
@@ -68,14 +69,18 @@ class DeformableEncoderLayer(nn.Module):
     def with_pos_embed(tensor, pos):
         return tensor if pos is None else tensor + pos
 
+    @staticmethod
+    def with_spectral_embed(tensor, spectral_embed):
+        return tensor if spectral_embed is None else tensor + spectral_embed
+
     def forward_ffn(self, src):
         src2 = self.linear2(self.dropout3(self.activation(self.linear1(src))))
         src = src + self.dropout4(src2)
         return self.norm2(src)
 
-    def forward(self, src, pos, reference_points, spatial_shapes, level_start_index, padding_mask=None):
+    def forward(self, src, pos, spectral, reference_points, spatial_shapes, level_start_index, padding_mask=None):
         tgt2 = self.self_attn(
-            self.with_pos_embed(src, pos),
+            self.with_spectral_embed(self.with_pos_embed(src, pos), spectral),
             reference_points, src, spatial_shapes, level_start_index, padding_mask,
         )
         src = self.norm1(src + self.dropout1(tgt2))
