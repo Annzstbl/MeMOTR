@@ -52,12 +52,10 @@ NUM_WORKERS: 8
 DATASET_TYPE: 3JPG # NPY
 
 # -------------模型配置-------------
-ENCODER_SPECTRAL: True
+ENCODER_SPECTRAL: False
 EDGE_SWAP: True
 STEM: conv3d_se_v4
-MEMOTR_VERSION: '20260511-nodecode-noencode'
-USE_Q_SPEC: True
-Q_SPEC_LAMBDA: 0.1
+MEMOTR_VERSION: '20260511_nodecode_noencode'
 TIMING_SYNC_CUDA: False
 TIMING_LOG_INTERVAL: 10
 
