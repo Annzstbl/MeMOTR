@@ -941,7 +941,7 @@ class SCEM(nn.Module):
             spectral_part = torch.einsum("btk,kc->btc", beta, spectral_dict_route)   # [B,T,8]
             if self.detach_spectral_token_output:
                 spectral_part = spectral_part.detach()
-
+ 
             evidence_tokens.append(tokens)
             evidence_tokens_spectral_part.append(spectral_part)
 
