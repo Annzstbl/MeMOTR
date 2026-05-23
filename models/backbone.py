@@ -544,15 +544,15 @@ class SpectralEmbeddingV4(nn.Module):
     Dual-state spectral signature update module.
 
     输入:
-        spectral_state: [B, 8, H_prev, W_prev]   上一阶段的光谱状态 S^{l-1}
+        spectral_state: [B, C_in, H_prev, W_prev]   上一阶段的光谱状态 S^{l-1}
         ntensor: NestedTensor，其中 ntensor.tensors = [B, C_l, H_l, W_l]
         layer: 当前 stage 名称，如 "layer1", "layer2", ...
 
     输出:
-        out_state: [B, 8, H_l, W_l]             当前阶段更新后的光谱状态 S^l
+        out_state: [B, C_in, H_l, W_l]             当前阶段更新后的光谱状态 S^l
     """
 
-    def __init__(self, resnet_output_layer: list[str]):
+    def __init__(self, resnet_output_layer: list[str], state_channels: int = 8):
         super().__init__()
         self.resnet_output_layer = resnet_output_layer
 
@@ -565,7 +565,7 @@ class SpectralEmbeddingV4(nn.Module):
             "layer_extra": 256,
         }
 
-        self.state_channels = 8
+        self.state_channels = state_channels
         hidden_dim = 64
 
         self.content_blocks = nn.ModuleDict()
@@ -691,7 +691,10 @@ def build(config: dict) -> Union[BackboneWithPE, Backbone_PE_SpectralWeights]:
                 backbone=backbone, position_embedding=position_embedding,
                 spectral_embedding=None, weights_version="v5",
             )
-        spectral_embedding = SpectralEmbeddingV4(resnet_output_layer=recursion_resnet_output_layer)
+        spectral_embedding = SpectralEmbeddingV4(
+            resnet_output_layer=recursion_resnet_output_layer,
+            state_channels=config["INPUT_CHANNELS"],
+        )
         return Backbone_PE_SpectralWeights(
             backbone=backbone, position_embedding=position_embedding,
             spectral_embedding=spectral_embedding, weights_version=weights_version,
@@ -720,7 +723,10 @@ def build_woPe(config: dict) -> Union[BackboneWoPe, BackboneWoPe_SpectralWeights
         spectral_embedding = SpectralEmbeddingV3(resnet_output_layer=resnet_output_layer)
         return BackboneWoPe_SpectralWeights(backbone=backbone, spectral_embedding=spectral_embedding, weights_version="v3")
     elif CONFIG_STEM=="conv3d_se_v4":
-        spectral_embedding = SpectralEmbeddingV4(resnet_output_layer=recursion_resnet_output_layer)
+        spectral_embedding = SpectralEmbeddingV4(
+            resnet_output_layer=recursion_resnet_output_layer,
+            state_channels=config["INPUT_CHANNELS"],
+        )
         return BackboneWoPe_SpectralWeights(backbone=backbone, spectral_embedding=spectral_embedding, weights_version="v4")
     else:
         return BackboneWoPe(backbone=backbone)

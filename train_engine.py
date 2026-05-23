@@ -28,6 +28,7 @@ from models.utils import load_pretrained_model
 from models.loss.efl_loss_help import SimpleGradientCollector
 from utils.vis_val import visualize_validation_metrics
 from utils.vis_train_loss import visualize_train_loss
+from utils.vis_train_debug import save_train_batch_debug
 
 
 def _sync_cuda_for_timing(device: torch.device, enabled: bool):
@@ -208,12 +209,17 @@ def _run_one_stage(config: dict, stage_tag: str | None = None) -> str | None:
     # Data process
     dataset_train = build_dataset(config=config, split="train", logger=train_logger)
     sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
-    dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
-                                        batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
 
     # Criterion
     criterion = build_criterion(config=config)
     criterion.set_device(torch.device("cuda", distributed_rank()))
+    bbox_dim = 4 if criterion.rect_bbox else 5
+    TrackInstances.set_static_properties(
+        use_spectral_decoder=config["DECODER_SPECTRAL"],
+        use_dab=config["USE_DAB"],
+        use_q_spec=bool(getattr(get_model(model), "use_q_spec", False)),
+        bbox_dim=bbox_dim,
+    )
 
     # Optimizer
     param_groups, lr_names = get_param_groups(config=config, model=model, logger=train_logger)
@@ -361,10 +367,11 @@ def _run_one_stage(config: dict, stage_tag: str | None = None) -> str | None:
         if is_distributed():
             sampler_train.set_epoch(epoch)
         dataset_train.set_epoch(epoch)
+        batch_size = resolve_batch_size(config, dataset_train.sample_stage)
 
         sampler_train = build_sampler(dataset=dataset_train, shuffle=True)
         dataloader_train = build_dataloader(dataset=dataset_train, sampler=sampler_train,
-                                            batch_size=config["BATCH_SIZE"], num_workers=config["NUM_WORKERS"])
+                                            batch_size=batch_size, num_workers=config["NUM_WORKERS"])
 
         if epoch >= config["ONLY_TRAIN_QUERY_UPDATER_AFTER"]:
             optimizer.param_groups[0]["lr"] = 0.0
@@ -397,6 +404,23 @@ def _run_one_stage(config: dict, stage_tag: str | None = None) -> str | None:
                 )
 
         sample_length = dataset_train.sample_length
+        clip_begin_stride = getattr(dataset_train, "clip_begin_stride", 1)
+        train_logger.show(
+            head=(
+                f"[Epoch {epoch}] sample_length={sample_length}, batch_size={batch_size}, "
+                f"clip_begin_stride={clip_begin_stride}, sample_stage={dataset_train.sample_stage}, "
+                f"dataset_len={len(dataset_train)}"
+            )
+        )
+        train_logger.write(
+            head=(
+                f"[Epoch {epoch}] sample_length={sample_length}, batch_size={batch_size}, "
+                f"clip_begin_stride={clip_begin_stride}, sample_stage={dataset_train.sample_stage}, "
+                f"dataset_len={len(dataset_train)}"
+            ),
+            filename="log.txt",
+            mode="a",
+        )
         dynamic_use_checkpoint, dynamic_checkpoint_level = resolve_dynamic_checkpoint_policy(
             config=config,
             sample_length=sample_length,
@@ -422,10 +446,14 @@ def _run_one_stage(config: dict, stage_tag: str | None = None) -> str | None:
             only_train_detr=config["ONLY_TRAIN_DETR"],
             timing_sync_cuda=config.get("TIMING_SYNC_CUDA", True),
             timing_log_interval=config.get("TIMING_LOG_INTERVAL", 2),
-            use_amp=use_amp,
-            amp_dtype=amp_dtype,
-            scaler=scaler,
-        )
+                    use_amp=use_amp,
+                    amp_dtype=amp_dtype,
+                    scaler=scaler,
+                    debug_save_transforms=bool(config.get("DEBUG_SAVE_TRANSFORMS", False)),
+                    debug_save_dir=os.path.join(config["OUTPUTS_DIR"], "debug"),
+                    debug_save_max_per_epoch=int(config.get("DEBUG_SAVE_TRANSFORMS_MAX", 4)),
+                    debug_config=config,
+                )
         scheduler.step()
         train_states["start_epoch"] += 1
         current_epoch = epoch + 1
@@ -538,7 +566,11 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
                     timing_log_interval: int = 2,
                     use_amp: bool = False,
                     amp_dtype: torch.dtype = torch.bfloat16,
-                    scaler=None):
+                    scaler=None,
+                    debug_save_transforms: bool = False,
+                    debug_save_dir: str | None = None,
+                    debug_save_max_per_epoch: int = 4,
+                    debug_config: dict | None = None):
     """
     Args:
         model: Model.
@@ -608,9 +640,30 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
         False,
         use_dab=use_dab,
         use_q_spec=bool(getattr(get_model(model), "use_q_spec", False)),
+        bbox_dim=4 if criterion.rect_bbox else 5,
     )
 
     for i, batch in enumerate(dataloader):
+        if (
+            debug_save_transforms
+            and debug_save_dir is not None
+            and debug_config is not None
+            and is_main_process()
+            and i < debug_save_max_per_epoch
+        ):
+            try:
+                save_train_batch_debug(
+                    batch=batch,
+                    save_dir=debug_save_dir,
+                    epoch=epoch,
+                    iter_idx=i,
+                    config=debug_config,
+                )
+                if i == 0:
+                    logger.show(head=f"DEBUG_SAVE_TRANSFORMS: saving to {debug_save_dir}/epoch_{epoch:03d}/")
+            except Exception as exc:
+                logger.show(head=f"DEBUG_SAVE_TRANSFORMS failed at epoch={epoch} iter={i}: {exc}")
+
         # batch[keys][batches][sequentials]
         # img_metas 现在按帧从 batch 内取出 list[dict]（见下方 padding_img_metas），
         # 以便 criterion / matcher / postprocess 可以按 batch 内每个样本自己的 img_shape /
@@ -797,6 +850,21 @@ def train_one_epoch(model: MeMOTR, train_states: dict, max_norm: float,
     logger.tb_add_metric_log(log=metric_log, steps=epoch, mode="epochs")
 
     return
+
+
+def resolve_batch_size(config: dict, sample_stage: int) -> int:
+    """Resolve per-GPU batch size for the current sample stage.
+
+    Supports a scalar (fixed BS) or a list aligned with ``SAMPLE_LENGTHS`` /
+    ``SAMPLE_STEPS`` stages (same ``sample_stage`` indexing as ``dataset.set_epoch``).
+    """
+    batch_size = config["BATCH_SIZE"]
+    if isinstance(batch_size, (list, tuple)):
+        if len(batch_size) == 0:
+            raise ValueError("BATCH_SIZE list must not be empty.")
+        idx = min(len(batch_size) - 1, sample_stage)
+        return int(batch_size[idx])
+    return int(batch_size)
 
 
 def resolve_dynamic_checkpoint_policy(config: dict, sample_length: int, use_checkpoint: bool) -> tuple[bool, int | None]:

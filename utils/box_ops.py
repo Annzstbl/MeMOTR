@@ -82,3 +82,27 @@ def generalized_box_iou(boxes1, boxes2):
     area = wh[:, :, 0] * wh[:, :, 1]
 
     return iou - (area - union) / area
+
+
+def normalized_wasserstein_distance_cxcywh(
+    boxes1: torch.Tensor,
+    boxes2: torch.Tensor,
+    eps: float = 1e-7,
+) -> torch.Tensor:
+    """
+    Normalized Wasserstein Distance (NWD) similarity for axis-aligned boxes.
+
+    Each box is modeled as a 2D Gaussian; see AI-TOD (Tiny Object Detection).
+    boxes1: [N, 4] cxcywh, boxes2: [M, 4] cxcywh (same pixel coordinate system).
+    Returns [N, M] similarity in (0, 1], higher is better.
+    """
+    center_distance = ((boxes1[:, None, :2] - boxes2[None, :, :2]) ** 2).sum(-1)
+    wh_distance = ((boxes1[:, None, 2:] - boxes2[None, :, 2:]) ** 2).sum(-1) / 4
+    wasserstein = center_distance + wh_distance
+    wh1 = boxes1[:, None, 2:]  # [N, 1, 2]
+    wh2 = boxes2[None, :, 2:]  # [1, M, 2]
+    constant = torch.max(
+        wh1.max(dim=-1).values,
+        wh2.max(dim=-1).values,
+    ).clamp(min=eps)
+    return torch.exp(-torch.sqrt(wasserstein + eps) / constant)

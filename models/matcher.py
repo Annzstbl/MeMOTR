@@ -13,7 +13,13 @@ import torch
 import torch.nn as nn
 from scipy.optimize import linear_sum_assignment
 
-from utils.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
+from utils.img_metas_utils import normalize_img_metas_list, get_img_shape, get_img_version
+from utils.box_ops import (
+    box_cxcywh_to_xyxy,
+    box_xyxy_to_cxcywh,
+    generalized_box_iou,
+    normalized_wasserstein_distance_cxcywh,
+)
 from structures.instances import Instances
 from structures.track_instances import TrackInstances
 from hsmot.util.dist import l1_dist_rotate, box_iou_rotated_norm_bboxes1
@@ -21,6 +27,22 @@ import torch.nn.functional as F
 import math
 import itertools
 from utils.edge_swap import EdgeSwap
+
+RECT_MEMOTR_VERSIONS = {"20260511_rect"}
+
+
+def is_rect_memotr_version(version: str) -> bool:
+    return version in RECT_MEMOTR_VERSIONS
+
+
+def get_rect_box_similarity(config: dict) -> str:
+    similarity = config.get("RECT_BOX_SIMILARITY", "giou").lower()
+    if similarity not in {"giou", "nwd"}:
+        raise ValueError(
+            f"Unsupported RECT_BOX_SIMILARITY '{similarity}', only 'giou' and 'nwd' are supported."
+        )
+    return similarity
+
 
 class HungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
@@ -47,7 +69,9 @@ class HungarianMatcher(nn.Module):
                  cost_bbox: float = 1,
                  cost_giou: float = 1,
                  cost_spectral_decoder_mse: float = 1,
-                 edge_swap: bool = False):
+                 edge_swap: bool = False,
+                 rect_mode: bool = False,
+                 rect_box_similarity: str = "giou"):
         """Creates the matcher
 
         Params:
@@ -61,6 +85,8 @@ class HungarianMatcher(nn.Module):
         self.cost_giou = cost_giou
         self.cost_spectral_decoder_mse = cost_spectral_decoder_mse
         self.edge_swap = edge_swap
+        self.rect_mode = rect_mode
+        self.rect_box_similarity = rect_box_similarity
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0 or cost_spectral_decoder_mse != 0, "all costs cant be 0"
 
     def forward(self, outputs, targets, use_focal=True, img_metas=None):
@@ -90,17 +116,7 @@ class HungarianMatcher(nn.Module):
             # img_metas 规范化为 list[dict]：兼容传入单个 dict（旧调用）或 list[dict]（推荐）。
             # 当 batch 内不同样本的 img_shape/version 可能不同（如 multi-scale 训练）时，
             # 必须传 list[dict]，以便 cost_bbox/cost_giou/edge_swap 用各样本自己的尺寸。
-            if isinstance(img_metas, dict):
-                img_metas_list = [img_metas] * bs
-            elif isinstance(img_metas, (list, tuple)):
-                assert len(img_metas) == bs, (
-                    f"len(img_metas)={len(img_metas)} != bs={bs}"
-                )
-                img_metas_list = list(img_metas)
-            else:
-                raise TypeError(
-                    f"img_metas must be dict or list[dict], got {type(img_metas)}"
-                )
+            img_metas_list = normalize_img_metas_list(img_metas, bs)
 
             if self.cost_spectral_decoder_mse != -1:
                 assert 'pred_spectral_weights' in outputs, "pred_spectral_weights is not in outputs"
@@ -121,13 +137,14 @@ class HungarianMatcher(nn.Module):
             # edge_swap 依赖各样本的 img_shape/version，必须按 b 处理
             out_bbox_per_b = []
             for b in range(bs):
-                pred_b = outputs["pred_boxes"][b]  # [Q, 5]
-                if self.edge_swap:
+                pred_b = outputs["pred_boxes"][b]
+                if (not self.rect_mode) and self.edge_swap:
+                    h_img, w_img = get_img_shape(img_metas_list, batch_idx=b)
                     pred_b = EdgeSwap.edge_swap(
-                        pred_b, img_metas_list[b]['version'], img_metas_list[b]['img_shape']
+                        pred_b, get_img_version(img_metas_list, batch_idx=b), (h_img, w_img)
                     )
                 out_bbox_per_b.append(pred_b)
-            out_bbox = torch.cat(out_bbox_per_b, dim=0)  # [bs*Q, 5]
+            out_bbox = torch.cat(out_bbox_per_b, dim=0)
 
             # Also concat the target labels and boxes
             if isinstance(targets[0], Instances):
@@ -176,28 +193,44 @@ class HungarianMatcher(nn.Module):
                 if mb == 0:
                     tgt_start = tgt_end
                     continue
-                pred_b = out_bbox_per_b[b]  # [Q, 5]
+                pred_b = out_bbox_per_b[b]
                 norm_tgt_b = norm_tgt_bbox[tgt_start:tgt_end]
                 tgt_b = tgt_bbox[tgt_start:tgt_end]
 
-                # L1 cost between boxes (按当前样本 img_shape 计算 l1_weight)
-                cost_bbox_b = l1_dist_rotate(pred_b, norm_tgt_b, aligned=False, cal_sum=False)  # [Q, Mb, 5]
-                h_img, w_img = img_metas_list[b]['img_shape']
+                h_img, w_img = get_img_shape(img_metas_list, batch_idx=b)
                 min_img_shape = min(h_img, w_img)
-                l1_weight = torch.as_tensor(
-                    [w_img / min_img_shape, h_img / min_img_shape,
-                     w_img / min_img_shape, h_img / min_img_shape, 1.0],
-                    dtype=pred_b.dtype, device=pred_b.device,
-                )  # [5]
-                cost_bbox_b = (cost_bbox_b * l1_weight).sum(dim=-1)  # [Q, Mb]
+                if self.rect_mode:
+                    l1_weight = torch.as_tensor(
+                        [w_img / min_img_shape, h_img / min_img_shape,
+                         w_img / min_img_shape, h_img / min_img_shape],
+                        dtype=pred_b.dtype, device=pred_b.device,
+                    )
+                    cost_bbox_b = torch.abs(
+                        pred_b[:, None, :] - norm_tgt_b[None, :, :]
+                    ) * l1_weight
+                    cost_bbox_b = cost_bbox_b.sum(dim=-1)
+                    scale = pred_b.new_tensor([w_img, h_img, w_img, h_img])
+                    pred_cxcywh = pred_b * scale
+                    if self.rect_box_similarity == "nwd":
+                        tgt_cxcywh = box_xyxy_to_cxcywh(tgt_b)
+                        cost_giou_b = -normalized_wasserstein_distance_cxcywh(pred_cxcywh, tgt_cxcywh)
+                    else:
+                        pred_xyxy = box_cxcywh_to_xyxy(pred_b) * scale
+                        cost_giou_b = -generalized_box_iou(pred_xyxy, tgt_b)
+                else:
+                    cost_bbox_b = l1_dist_rotate(pred_b, norm_tgt_b, aligned=False, cal_sum=False)
+                    l1_weight = torch.as_tensor(
+                        [w_img / min_img_shape, h_img / min_img_shape,
+                         w_img / min_img_shape, h_img / min_img_shape, 1.0],
+                        dtype=pred_b.dtype, device=pred_b.device,
+                    )
+                    cost_bbox_b = (cost_bbox_b * l1_weight).sum(dim=-1)
+                    cost_giou_b = -box_iou_rotated_norm_bboxes1(
+                        pred_b, tgt_b,
+                        img_shape=(h_img, w_img),
+                        version=get_img_version(img_metas_list, batch_idx=b),
+                    )
                 cost_bbox[b * num_queries:(b + 1) * num_queries, tgt_start:tgt_end] = cost_bbox_b
-
-                # GIoU cost (按当前样本 img_shape/version)
-                cost_giou_b = -box_iou_rotated_norm_bboxes1(
-                    pred_b, tgt_b,
-                    img_shape=img_metas_list[b]['img_shape'],
-                    version=img_metas_list[b]['version'],
-                )  # [Q, Mb]
                 cost_giou[b * num_queries:(b + 1) * num_queries, tgt_start:tgt_end] = cost_giou_b
 
                 tgt_start = tgt_end
@@ -330,10 +363,13 @@ def build(config: dict):
         cost_spectral_decoder_mse = config["MATCH_COST_SPECTRAL_MSE"]
     else:
         cost_spectral_decoder_mse = -1
+    rect_mode = is_rect_memotr_version(config.get("MEMOTR_VERSION", ""))
     return HungarianMatcher(
         cost_class=config["MATCH_COST_CLASS"],
         cost_bbox=config["MATCH_COST_BBOX"],
         cost_giou=config["MATCH_COST_GIOU"],
         cost_spectral_decoder_mse=cost_spectral_decoder_mse,
-        edge_swap=config["EDGE_SWAP"]
+        edge_swap=config.get("EDGE_SWAP", False),
+        rect_mode=rect_mode,
+        rect_box_similarity=get_rect_box_similarity(config),
     )

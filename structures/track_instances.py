@@ -13,14 +13,16 @@ class TrackInstances:
     decoder_spectral_weights_dim = 8
     use_dab = True
     use_q_spec = False
+    bbox_dim = 5
 
     @staticmethod
     def set_static_properties(use_spectral_decoder: bool = True, decoder_spectral_weights_dim: int = 8,
-                              use_dab: bool = True, use_q_spec: bool = False):
+                              use_dab: bool = True, use_q_spec: bool = False, bbox_dim: int = 5):
         TrackInstances.use_spectral_decoder = use_spectral_decoder
         TrackInstances.decoder_spectral_weights_dim = decoder_spectral_weights_dim
         TrackInstances.use_dab = use_dab
         TrackInstances.use_q_spec = use_q_spec
+        TrackInstances.bbox_dim = bbox_dim
 
 
     def __init__(self, frame_height: float = 1.0, frame_width: float = 1.0,
@@ -31,12 +33,12 @@ class TrackInstances:
         self.hidden_dim = hidden_dim
         self.num_classes = num_classes
         if self.use_dab:
-            self.ref_pts = torch.zeros((0, 5)) # 最后一层decoder layer的输入ref_pts
+            self.ref_pts = torch.zeros((0, TrackInstances.bbox_dim))
             self.query_embed = torch.zeros((0, hidden_dim)) # 最后一层decoder layer的输入query_embed, 之后由query_updater更新
         else:
             raise NotImplementedError("Not Support for no DAB.")
         self.ids = torch.zeros((0,), dtype=torch.long)
-        self.boxes = torch.zeros((0, 5))
+        self.boxes = torch.zeros((0, TrackInstances.bbox_dim))
         self.labels = torch.zeros((0,), dtype=torch.long)
         self.logits = torch.zeros((0, self.num_classes))
         self.matched_idx = torch.zeros((0, ), dtype=torch.long)

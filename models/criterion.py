@@ -19,7 +19,7 @@ import torch.distributed
 
 from typing import List, Tuple, Dict
 
-from .matcher import build as build_matcher, HungarianMatcher, pairwise_min_permuted_segment_loss
+from .matcher import build as build_matcher, HungarianMatcher, pairwise_min_permuted_segment_loss, is_rect_memotr_version, get_rect_box_similarity
 from .loss.eql_lossV2_nobg import EQLv2NoBg
 from .loss.efl_loss import EqualizedFocalLoss
 from .loss.efl_loss_closure import EqualizedFocalLoss as EqualizedFocalLossClosure
@@ -31,7 +31,13 @@ from .model_output_accessors import (
     get_last_layer_output_q_spec,
 )
 from structures.track_instances import TrackInstances
-from utils.box_ops import generalized_box_iou, box_cxcywh_to_xyxy, box_iou_union
+from utils.box_ops import (
+    generalized_box_iou,
+    box_cxcywh_to_xyxy,
+    box_xyxy_to_cxcywh,
+    box_iou_union,
+    normalized_wasserstein_distance_cxcywh,
+)
 from utils.utils import is_distributed, distributed_world_size
 
 from hsmot.loss.loss import l1_loss_rotate, loss_rotated_iou_norm_bboxes1
@@ -39,27 +45,13 @@ from hsmot.util.dist import box_iou_rotated_norm_bboxes1
 from utils.edge_swap import EdgeSwap
 
 
-def _normalize_img_metas_list(img_metas, batch_size: int) -> list:
-    """把 img_metas 统一为 list[dict]。
-    - 传 dict 时，视为整 batch 共享一份（兼容旧调用）。
-    - 传 list/tuple 时，长度必须等于 batch_size。
-    背景：DETR 预训练阶段 bs>1 + multi-scale 时，batch 内各样本的 img_shape/pad_shape/version
-    可能不同，criterion/matcher 不能再用单 dict 表征整 batch，必须按样本取。
-    """
-    if isinstance(img_metas, dict):
-        return [img_metas] * batch_size
-    if isinstance(img_metas, (list, tuple)):
-        assert len(img_metas) == batch_size, (
-            f"len(img_metas)={len(img_metas)} != batch_size={batch_size}"
-        )
-        return list(img_metas)
-    raise TypeError(f"img_metas must be dict or list[dict], got {type(img_metas)}")
+from utils.img_metas_utils import normalize_img_metas_list, get_img_shape, get_img_version
 
 
 class ClipCriterion:
     def __init__(self, num_classes, matcher: HungarianMatcher, n_det_queries, aux_loss: bool, weight: dict,
                  max_frame_length: int, n_aux: int, merge_det_track_layer: int = 0, aux_weights: List = None,
-                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = False, scem: bool = False, loss_nll_config:dict = None, edge_swap: bool = False, label_loss_type: str = "sigmoid_focal_loss", eql_loss_config: dict | None = None, efl_loss_config: dict | None = None, num_decoder_layers: int = 6):
+                 hidden_dim: int = 256, use_dab: bool = True, kl_cos_scheduler_epoch: int = 10, kl_weight_eta = 0, decoder_spectral :bool = False, scem: bool = False, loss_nll_config:dict = None, edge_swap: bool = False, rect_bbox: bool = False, rect_box_similarity: str = "giou", label_loss_type: str = "sigmoid_focal_loss", eql_loss_config: dict | None = None, efl_loss_config: dict | None = None, num_decoder_layers: int = 6):
         """
         Init a criterion function.
 
@@ -84,6 +76,8 @@ class ClipCriterion:
         self.hidden_dim = hidden_dim
         self.merge_det_track_layer = merge_det_track_layer
         self.edge_swap = edge_swap
+        self.rect_bbox = rect_bbox
+        self.rect_box_similarity = rect_box_similarity
         self.gt_trackinstances_list: None | List[List[TrackInstances]] = None     # (clip_size, B)
         self.target_list: None | List[List[Dict]] = None
         self.loss = {}
@@ -156,6 +150,34 @@ class ClipCriterion:
         if self.efl_loss is not None:
             self.efl_loss = self.efl_loss.to(self.device)
 
+    @staticmethod
+    def _prepare_scem_heatmap(heatmap: torch.Tensor) -> torch.Tensor:
+        if heatmap.dim() == 2:
+            return heatmap.unsqueeze(0).unsqueeze(0)
+        if heatmap.dim() == 3:
+            return heatmap.unsqueeze(0)
+        if heatmap.dim() == 4 and heatmap.size(1) == 1:
+            return heatmap
+        raise ValueError(f"Unexpected SCEM heatmap shape: {tuple(heatmap.shape)}")
+
+    def _build_scem_target_heatmap(
+        self,
+        frame_idx: int,
+        batch_size: int,
+        out_hw: tuple[int, int],
+    ) -> torch.Tensor:
+        frame_targets = self.target_list[frame_idx]
+        if len(frame_targets) != batch_size:
+            raise ValueError(
+                f"SCEM target_list length {len(frame_targets)} != batch_size {batch_size} "
+                f"at frame {frame_idx}."
+            )
+        heatmaps = []
+        for b in range(batch_size):
+            hm = self._prepare_scem_heatmap(frame_targets[b]["heatmap"].float())
+            heatmaps.append(F.adaptive_avg_pool2d(hm, out_hw))
+        return torch.cat(heatmaps, dim=0)
+
     def init_a_clip(self, batch: Dict, hidden_dim: int, num_classes: int, device: torch.device):
         """
         Init this function for a specific clip.
@@ -183,13 +205,21 @@ class ClipCriterion:
                 gt_trackinstances[b].pred_spectral_weights = batch["infos"][b][c]["spectral_weights"]
                 # gt_trackinstances[b].heatmap = batch["infos"][b][c]["heatmap"]
                 gt_trackinstances[b] = gt_trackinstances[b].to(self.device)
-                
-                if 'heatmap' in batch["infos"][b][c]:
-                    _target = {
-                        "heatmap" : batch["infos"][b][c]["heatmap"].to(self.device)
-                    }
-                    target_list.append(_target)
 
+                if "heatmap" in batch["infos"][b][c]:
+                    target_list.append({
+                        "heatmap": batch["infos"][b][c]["heatmap"].to(self.device),
+                    })
+                elif self.scem:
+                    raise RuntimeError(
+                        f"SCEM enabled but batch sample b={b}, frame c={c} has no heatmap."
+                    )
+
+            if self.scem and len(target_list) != batch_size:
+                raise RuntimeError(
+                    f"SCEM enabled but frame c={c} target_list length "
+                    f"{len(target_list)} != batch_size {batch_size}."
+                )
             self.target_list.append(target_list)
             self.gt_trackinstances_list.append(gt_trackinstances)
 
@@ -342,7 +372,7 @@ class ClipCriterion:
 
         batch_size = len(tracked_instances)
         # 规范化 img_metas：兼容旧的单 dict 调用，也支持 batch 内逐样本 dict。
-        img_metas_list = _normalize_img_metas_list(img_metas, batch_size)
+        img_metas_list = normalize_img_metas_list(img_metas, batch_size)
         last_layer_input_query = get_last_layer_input_query(model_outputs=model_outputs)
         last_layer_output_query = get_last_layer_output_query(model_outputs=model_outputs)
         last_layer_input_ref = get_last_layer_input_ref(model_outputs=model_outputs)
@@ -477,7 +507,9 @@ class ClipCriterion:
         # 9. Compute the bounding box loss.
         loss_l1, loss_giou, loss_by_class = self.get_loss_box(outputs=model_outputs,
                                                gt_trackinstances=gt_trackinstances,
-                                               idx_to_gts_idx=outputs_idx_to_gts_idx, img_metas=img_metas, edge_swap=self.edge_swap)
+                                               idx_to_gts_idx=outputs_idx_to_gts_idx, img_metas=img_metas,
+                                               edge_swap=self.edge_swap, rect_bbox=self.rect_bbox,
+                                               rect_box_similarity=self.rect_box_similarity)
 
         if self.decoder_spectral_mse:
             # compute spectral decoder mse loss
@@ -548,7 +580,9 @@ class ClipCriterion:
                                                      idx_to_gts_idx=aux_idx_to_gts_idx)
                 aux_loss_l1, aux_loss_giou, aux_loss_by_class = self.get_loss_box(outputs=model_outputs["aux_outputs"][i],
                                                                gt_trackinstances=gt_trackinstances,
-                                                               idx_to_gts_idx=aux_idx_to_gts_idx, img_metas=img_metas, edge_swap=self.edge_swap)
+                                                               idx_to_gts_idx=aux_idx_to_gts_idx, img_metas=img_metas,
+                                                               edge_swap=self.edge_swap, rect_bbox=self.rect_bbox,
+                                                               rect_box_similarity=self.rect_box_similarity)
 
                 if self.decoder_spectral_mse:
                     aux_loss_spectral_decoder_mse = self.get_loss_spectral_decoder_mse(outputs=model_outputs["aux_outputs"][i], gt_trackinstances=gt_trackinstances, idx_to_gts_idx=aux_idx_to_gts_idx)
@@ -612,19 +646,35 @@ class ClipCriterion:
 
         # Compute IoU.  按样本使用各自的 img_shape/version，避免 bs>1 + multi-scale 时尺寸错配。
         for b in range(batch_size):
-            img_shape_b = img_metas_list[b]['img_shape']
-            version_b = img_metas_list[b]['version']
-            new_trackinstances[b].iou[new_trackinstances[b].matched_idx >= 0] = box_iou_rotated_norm_bboxes1(
-                new_trackinstances[b][new_trackinstances[b].matched_idx >= 0].boxes,
-                gt_trackinstances[b][new_trackinstances[b][new_trackinstances[b].matched_idx >= 0].matched_idx].boxes,
-                img_shape=img_shape_b, version=version_b, aligned=True
-            )
+            img_shape_b = get_img_shape(img_metas_list, batch_idx=b)
+            if self.rect_bbox:
+                h_img, w_img = img_shape_b
+                scale = new_trackinstances[b].boxes.new_tensor([w_img, h_img, w_img, h_img])
 
-            tracked_instances[b].iou[tracked_instances[b].matched_idx >= 0] = box_iou_rotated_norm_bboxes1(
-                tracked_instances[b][tracked_instances[b].matched_idx >= 0].boxes,
-                gt_trackinstances[b][tracked_instances[b][tracked_instances[b].matched_idx >= 0].matched_idx].boxes,
-                img_shape=img_shape_b, version=version_b, aligned=True
-            )
+                def _aligned_rect_iou(track_inst, gt_inst):
+                    matched = track_inst.matched_idx >= 0
+                    if not matched.any():
+                        return
+                    pred_xyxy = box_cxcywh_to_xyxy(track_inst[matched].boxes) * scale
+                    gt_xyxy = gt_inst[track_inst[matched].matched_idx].boxes
+                    iou_mat, _ = box_iou_union(pred_xyxy, gt_xyxy)
+                    track_inst.iou[matched] = torch.diag(iou_mat)
+
+                _aligned_rect_iou(new_trackinstances[b], gt_trackinstances[b])
+                _aligned_rect_iou(tracked_instances[b], gt_trackinstances[b])
+            else:
+                version_b = get_img_version(img_metas_list, batch_idx=b)
+                new_trackinstances[b].iou[new_trackinstances[b].matched_idx >= 0] = box_iou_rotated_norm_bboxes1(
+                    new_trackinstances[b][new_trackinstances[b].matched_idx >= 0].boxes,
+                    gt_trackinstances[b][new_trackinstances[b][new_trackinstances[b].matched_idx >= 0].matched_idx].boxes,
+                    img_shape=img_shape_b, version=version_b, aligned=True
+                )
+
+                tracked_instances[b].iou[tracked_instances[b].matched_idx >= 0] = box_iou_rotated_norm_bboxes1(
+                    tracked_instances[b][tracked_instances[b].matched_idx >= 0].boxes,
+                    gt_trackinstances[b][tracked_instances[b][tracked_instances[b].matched_idx >= 0].matched_idx].boxes,
+                    img_shape=img_shape_b, version=version_b, aligned=True
+                )
 
         # # 12 calculate spectral kl loss
         # spectral_weights_list = model_outputs["spectral_weights"]
@@ -642,10 +692,11 @@ class ClipCriterion:
         if self.scem:
             gamma = model_outputs["scem_gamma"]
             log_mix = model_outputs["scem_log_mix"]
-
-            heatmap = self.target_list[frame_idx][0]['heatmap'].unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-            #降尺度
-            heatmap = F.adaptive_avg_pool2d(heatmap, (gamma.shape[2], gamma.shape[3]))
+            heatmap = self._build_scem_target_heatmap(
+                frame_idx=frame_idx,
+                batch_size=batch_size,
+                out_hw=(gamma.shape[2], gamma.shape[3]),
+            )
 
             scem_bce_loss = focal_bce_loss(gamma, heatmap)
             scem_dice_loss = dice_loss(gamma, heatmap)
@@ -768,7 +819,7 @@ class ClipCriterion:
         return loss
 
     @staticmethod
-    def get_loss_box(outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx, img_metas, edge_swap):
+    def get_loss_box(outputs, gt_trackinstances: List[TrackInstances], idx_to_gts_idx, img_metas, edge_swap, rect_bbox=False, rect_box_similarity="giou"):
         """
         Computer the bounding box loss, l1 and giou.
         按类别统计损失。
@@ -778,7 +829,7 @@ class ClipCriterion:
         giou(IoU) 都依赖单样本的 img_shape，用错尺寸会引入静默 bug。
         """
         batch_size = len(gt_trackinstances)
-        img_metas_list = _normalize_img_metas_list(img_metas, batch_size)
+        img_metas_list = normalize_img_metas_list(img_metas, batch_size)
 
         ref_pred = outputs["pred_bboxes"]
         device = ref_pred.device
@@ -795,34 +846,53 @@ class ClipCriterion:
             sel_out = idx_to_gts_idx[b][0][pos]
             sel_gt = idx_to_gts_idx[b][1][pos]
 
-            pred_b = outputs["pred_bboxes"][b][sel_out]  # [N_b, 5]
+            pred_b = outputs["pred_bboxes"][b][sel_out]
             gt_b = gt_trackinstances[b].boxes[sel_gt].to(pred_b.device)
             norm_gt_b = gt_trackinstances[b].norm_boxes[sel_gt].to(pred_b.device)
             lab_b = gt_trackinstances[b].labels[sel_gt].to(pred_b.device)
 
-            if edge_swap and pred_b.size(0) > 0:
+            if (not rect_bbox) and edge_swap and pred_b.size(0) > 0:
+                h_img, w_img = get_img_shape(img_metas_list, batch_idx=b)
                 pred_b = EdgeSwap.edge_swap(
-                    pred_b, img_metas_list[b]['version'], img_metas_list[b]['img_shape']
+                    pred_b, get_img_version(img_metas_list, batch_idx=b), (h_img, w_img)
                 )
 
-            h_img, w_img = img_metas_list[b]['img_shape']
+            h_img, w_img = get_img_shape(img_metas_list, batch_idx=b)
             min_img_shape = min(h_img, w_img)
-            l1_weight = torch.as_tensor(
-                [w_img / min_img_shape, h_img / min_img_shape,
-                 w_img / min_img_shape, h_img / min_img_shape, 1.0],
-                dtype=pred_b.dtype, device=pred_b.device,
-            )  # [5]
 
             if pred_b.size(0) == 0:
-                # 没有匹配样本：贡献 0，且不参与 by-class 统计
                 continue
 
-            loss_l1_b = l1_loss_rotate(pred_b, norm_gt_b, weight=l1_weight)  # [N_b, 5] 或 [N_b]
-            ious_b = loss_rotated_iou_norm_bboxes1(
-                pred_b, gt_b,
-                img_metas_list[b]['img_shape'], img_metas_list[b]['version'],
-            )  # [N_b]
-            loss_giou_b = 1 - ious_b  # [N_b]
+            if rect_bbox:
+                l1_weight = torch.as_tensor(
+                    [w_img / min_img_shape, h_img / min_img_shape,
+                     w_img / min_img_shape, h_img / min_img_shape],
+                    dtype=pred_b.dtype, device=pred_b.device,
+                )
+                loss_l1_b = torch.abs(pred_b - norm_gt_b) * l1_weight
+                loss_l1_b = loss_l1_b.sum(dim=-1)
+                scale = pred_b.new_tensor([w_img, h_img, w_img, h_img])
+                pred_cxcywh = pred_b * scale
+                if rect_box_similarity == "nwd":
+                    tgt_cxcywh = box_xyxy_to_cxcywh(gt_b)
+                    nwd = normalized_wasserstein_distance_cxcywh(pred_cxcywh, tgt_cxcywh)
+                    loss_giou_b = 1 - torch.diag(nwd)
+                else:
+                    pred_xyxy = box_cxcywh_to_xyxy(pred_b) * scale
+                    giou = generalized_box_iou(pred_xyxy, gt_b)
+                    loss_giou_b = 1 - torch.diag(giou)
+            else:
+                l1_weight = torch.as_tensor(
+                    [w_img / min_img_shape, h_img / min_img_shape,
+                     w_img / min_img_shape, h_img / min_img_shape, 1.0],
+                    dtype=pred_b.dtype, device=pred_b.device,
+                )
+                loss_l1_b = l1_loss_rotate(pred_b, norm_gt_b, weight=l1_weight)
+                ious_b = loss_rotated_iou_norm_bboxes1(
+                    pred_b, gt_b,
+                    (h_img, w_img), get_img_version(img_metas_list, batch_idx=b),
+                )
+                loss_giou_b = 1 - ious_b
 
             l1_sum_b = loss_l1_b.sum()
             giou_sum_b = loss_giou_b.sum()
@@ -964,7 +1034,10 @@ def build(config: dict):
         "MOT17_SPLIT": 1,
         "BDD100K": 8,
         "hsmot_8ch": 8,
+        "vt_tiny_mot": 7,
+        "VT-Tiny-MOT": 7,
     }
+    rect_bbox = is_rect_memotr_version(config.get("MEMOTR_VERSION", ""))
     return ClipCriterion(
         num_classes=dataset_num_classes[config["DATASET"]],
         matcher=build_matcher(config=config),
@@ -991,6 +1064,9 @@ def build(config: dict):
         decoder_spectral=config["DECODER_SPECTRAL"],
         scem = config["SCEM"]["ENABLE"],
         loss_nll_config=config["LOSS_NLL_CONFIG"],
+        edge_swap=config.get("EDGE_SWAP", False),
+        rect_bbox=rect_bbox,
+        rect_box_similarity=get_rect_box_similarity(config),
         label_loss_type=config.get("LOSS_LABEL_TYPE", "sigmoid_focal_loss"),
         eql_loss_config=config.get("LOSS_LABEL_EQLV2_NOBG", {}),
         efl_loss_config=config.get("LOSS_LABEL_EFL", {}),

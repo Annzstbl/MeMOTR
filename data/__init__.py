@@ -20,9 +20,10 @@ from .dancetrack import build as build_dancetrack
 from .mot17 import build as build_mot17
 from .bdd100k import build as build_bbd100k
 from .mot import MOTDataset
-from .utils import collate_fn
+from .utils import collate_fn, resolve_stage_scalar
 from utils.utils import is_distributed
 from .hsmot_8ch import build as build_hsmot_8ch
+from .vt_tiny_mot import build as build_vt_tiny_mot
 
 
 def build_dataset(config: dict, split: str, logger) -> MOTDataset:
@@ -38,6 +39,8 @@ def build_dataset(config: dict, split: str, logger) -> MOTDataset:
         return build_bbd100k(config=config, split=split)
     elif config["DATASET"] == "hsmot_8ch":
         return build_hsmot_8ch(config=config, split=split, logger=logger)
+    elif config["DATASET"] in ("vt_tiny_mot", "VT-Tiny-MOT"):
+        return build_vt_tiny_mot(config=config, split=split, logger=logger)
     else:
         raise ValueError(f"Dataset {config['DATASET']} is not supported!")
 

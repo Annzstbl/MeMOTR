@@ -1,0 +1,220 @@
+# @Author       : Ruopeng Gao
+# @Description  : Config for training DanceTrack.
+#                 We change some parameters compared with our paper, looking forward more stable training convergence.
+
+GIT_VERSION:
+
+PARENT_CONFIG: 
+
+MODE: train
+CONFIG_PATH:
+VISUALIZE: False
+AVAILABLE_GPUS: #if not set, will use all gpus
+DEVICE: cuda
+OUTPUTS_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/debug
+USE_DISTRIBUTED: False
+USE_CHECKPOINT: False
+# 当采样大于该阈值时，使用checkpoint
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 10
+# 1: layer内部 + backbone
+# 2: encoder + backbone
+# 3: encoder
+CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
+                                  # As the number increases (from 1 to 4), the memory cost increases.
+                                  # We have deleted many comments in this official code simplicity,
+                                  # if you have any questions, feel free to contact with the author.
+RESUME:
+RESUME_SCHEDULER: True
+MULTI_CHECKPOINT: False
+
+# About submit
+SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/debug
+SUBMIT_DATA_SPLIT: test
+DET_SCORE_THRESH: 0.5
+TRACK_SCORE_THRESH: 0.5
+RESULT_SCORE_THRESH: 0.5
+MISS_TOLERANCE: 30
+USE_MOTION: False
+MOTION_MIN_LENGTH: 3
+MOTION_MAX_LENGTH: 5
+MOTION_LAMBDA: 0.5
+
+# About Evaluation
+EVAL_DIR:
+EVAL_MODE: specific               # specific/continue
+EVAL_MODEL:
+EVAL_PORT:
+EVAL_THREADS: 1
+EVAL_DATA_SPLIT: val
+
+# About data processing
+DATASET: vt_tiny_mot
+DATASET_VERSION: # one_picture
+USE_MOTSYNTH:
+USE_CROWDHUMAN:
+MOTSYNTH_RATE:
+DATA_ROOT: /data1/users/litianhao01/hsmot/data
+DATA_PATH:
+NUM_WORKERS: 2
+BATCH_SIZE: 1
+# 也可设为列表，与 SAMPLE_LENGTHS 的 stage 一一对应，见 train_engine.resolve_batch_size
+ACCUMULATION_STEPS: 1
+
+# Automatic Mixed Precision (training only; bf16 does not use GradScaler)
+USE_AMP: False
+AMP_DTYPE: bf16   # bf16 | fp16
+COCO_SIZE: False
+OVERFLOW_BBOX: False
+REVERSE_CLIP: 0.0
+
+# About model
+BACKBONE: resnet50
+HIDDEN_DIM: 256
+FFN_DIM: 2048
+NUM_FEATURE_LEVELS: 4
+NUM_HEADS: 8
+NUM_ENC_POINTS: 4
+NUM_DEC_POINTS: 4
+NUM_ENC_LAYERS: 6
+NUM_DEC_LAYERS: 6
+MERGE_DET_TRACK_LAYER: 1
+ACTIVATION: ReLU
+RETURN_INTER_DEC: True
+EXTRA_TRACK_ATTN: False
+AUX_LOSS: True
+USE_DAB: True
+UPDATE_THRESH: 0.5
+LONG_MEMORY_LAMBDA: 0.01
+# Pretrain model 
+PRETRAINED_MODEL: /data3/litianhao/hsmot/memotr/dab_deformable_detr_convhsi.pth
+
+# Sampling setting
+SAMPLE_STEPS: [6, 10, 14]
+SAMPLE_LENGTHS: [2, 3, 4, 5]
+SAMPLE_MODES: [random_interval]
+SAMPLE_INTERVALS: [3]
+# 标量或列表（与 SAMPLE_LENGTHS stage 对齐）：clip 起点步长，越大样本越少
+CLIP_BEGIN_STRIDE: [1, 1, 1, 1]
+
+# Training setting
+SEED: 42
+EPOCHS: 20
+ONLY_TRAIN_QUERY_UPDATER_AFTER: 100 #不做考虑
+DROPOUT: 0.0
+NUM_DET_QUERIES: 300
+# training augmentation
+TP_DROP_RATE: 0.0
+FP_INSERT_RATE: 0.0
+LR: 2.0e-4
+LR_BACKBONE: 2.0e-5
+LR_POINTS: 1.0e-5
+WEIGHT_DECAY: 0.0005
+CLIP_MAX_NORM: 0.1
+LR_SCHEDULER: MultiStep
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [12]
+
+LR_DICTIONARY_NAMES: [stem_conv]
+LR_DICTIONARY_SCALE: 1
+
+# DETR matcher
+MATCH_COST_CLASS: 2
+MATCH_COST_BBOX: 5
+MATCH_COST_GIOU: 2
+MATCH_COST_SPECTRAL_MSE: -1
+
+# DETR loss
+LOSS_WEIGHT_FOCAL: 2
+LOSS_WEIGHT_L1: 5
+LOSS_WEIGHT_GIOU: 2
+# rect 正框模式下的 box 相似度：giou | nwd（仅 MEMOTR_VERSION=20260511_rect 生效）
+RECT_BOX_SIMILARITY: giou
+LOSS_SPECTRAL_KL: 0
+LOSS_SPECTRAL_DECODER_MSE: -1
+LOSS_SCEM_NLL: -1
+LOSS_SCEM_BCE: -1
+LOSS_SCEM_DICE: -1
+# SCEM 辅助：token 空间分布多样性、与 gamma 覆盖对齐（权重为 0 时不参与总损失）
+LOSS_SCEM_POOL_DIV: 0
+LOSS_SCEM_GAMMA_COVER: 0
+LOSS_NLL_CONFIG:
+  TYPE: mean # focal or mean
+
+# Aux Loss Weight
+AUX_LOSS_WEIGHT: [1.0, 1.0, 1.0, 1.0, 1.0]
+
+# EVALUATE
+# 每 N 个 epoch 评估一次；<=0 表示关闭间隔评估
+EVALUATE_EVERY_N_EPOCHS: 2
+# 最后多少个 epoch 每个都评估
+EVALUATE_TAIL_EPOCHS: 5
+# 指定必须评估的 epoch（1-based），例如 [1, 10, 20]
+EVALUATE_FORCE_EPOCHS: []
+
+# multispectral image
+INPUT_CHANNELS: 4
+ANN_MODE: plain
+NPY2RGB: False 
+
+# structure
+STEM: conv3d_se_v2
+
+# encoder
+ENCODER_SPECTRAL: False
+ENCODER_SPECTRAL_ATTENTION: False
+ENCODER_GLOBAL_TOKEN: False
+
+# decoder
+DECODER_SPECTRAL: False
+DECODER_SPECTRAL_REFINE: False
+
+DECODER_SPECTRAL_METHOD: none #mean kmeans
+DECODER_SPECTRAL_CLUSTERS: 0 # >1 just for kmean
+DECODER_SPECTRAL_USE_CACHE: False #kmeans
+
+
+# pos
+ROPE_POS: False
+ROPE_MIN_FREQ: 1
+ROPE_MAX_FREQ: 64
+ROPE_P_ZERO_FREQS: 0.0
+ROPE_DIMENSION: 3
+ROPE_WEIGHTS: [0.75, 1.0, 0.5]
+
+# train half
+TRAIN_HALF: False
+VID_WHITE_LIST: 
+
+SCEM:
+  ENABLE: False
+  USE_GT: False
+  PRIOR_MODE: 
+  USE_SPECTRAL_PI: False
+  SPECTRAL_DATABASE_NUM: 128
+  NORM: False
+
+  
+
+ONLY_TRAIN_DETR: False
+EDGE_SWAP: False
+
+# 训练 debug：将 transform 后的 batch 保存到 OUTPUTS_DIR/debug/
+DEBUG_SAVE_TRANSFORMS: False
+DEBUG_SAVE_TRANSFORMS_MAX: 4
+
+
+TRANSFORMS_CONFIG:
+  # 原图 512x640；CROP_SIZE / RESIZE 的 W、H 各自在 [min, max] 内独立随机，比例不固定
+  CROP_SIZE:
+    W: [416, 640]
+    H: [448, 512]
+  RESIZE:
+    W: [480, 640]
+    H: [384, 512]
+  FLIP_RATIO: 0.5
+
+SAVE_CHECKPOINT: True
+# 每 N 个 epoch 保存一次历史 checkpoint；<=0 表示关闭间隔保存
+CHECKPOINT_EVERY_N_EPOCHS: 1
+# 最后多少个 epoch 每个都保留 checkpoint
+CHECKPOINT_TAIL_EPOCHS: 5
