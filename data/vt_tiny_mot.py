@@ -378,6 +378,13 @@ def transforms_for_train(get_spectral_weights=False, transform_config=None):
     mean = [0.485 * 255, 0.456 * 255, 0.406 * 255, 127.5]
     std = [0.229 * 255, 0.224 * 255, 0.225 * 255, 127.5]
 
+    # 真实的mean/std
+    # mean = [0.3739, 0.3833, 0.3892, 0.3428]
+    # std = [0.2496, 0.2601, 0.2725, 0.2117]
+    # mean = [_*255 for _ in mean]
+    # std = [_*255 for _ in std]
+
+
     resize_mode, resize_cfg = parse_resize_config(
         transform_config["RESIZE"],
         transform_config.get("RESIZE_H"),

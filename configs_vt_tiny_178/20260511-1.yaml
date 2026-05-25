@@ -1,6 +1,6 @@
 PROJECT: "20260511-1，VT-Tiny-MOT 正框版，基于20260511_rect，IoU=0.2，两段2+18epoch"
 
-AVAILABLE_GPUS: "0,1"
+AVAILABLE_GPUS: "0"
 
 PARENT_CONFIG: ./default.yaml
 OUTPUTS_DIR: /data1/users/litianhao01/experiment/memotr/vt_tiny_20260511-1-178

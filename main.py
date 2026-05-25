@@ -28,6 +28,7 @@ def parse_option():
     parser.add_argument("--submit-dir", type=str)
     parser.add_argument("--submit-model", type=str)
     parser.add_argument("--submit-data-split", type=str)
+    parser.add_argument("--submit-threads", type=int)
 
     # Only For **Model Eval Process**:
     parser.add_argument("--eval-dir", type=str)

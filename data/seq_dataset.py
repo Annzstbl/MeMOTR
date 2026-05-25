@@ -122,6 +122,56 @@ class SeqDataset(Dataset):
         return len(self.image_paths)
 
 
+class VtTinySeqDataset(Dataset):
+    """VT-Tiny-MOT 推理序列：读取 scene/00 与 scene/01 JPG，拼接为 4 通道。"""
+
+    VT_TINY_MEAN = [0.485 * 255, 0.456 * 255, 0.406 * 255, 127.5]
+    VT_TINY_STD = [0.229 * 255, 0.224 * 255, 0.225 * 255, 127.5]
+
+    def __init__(self, seq_dir: str, stride: int = 64):
+        rgb_dir = os.path.join(seq_dir, "00")
+        if not os.path.isdir(rgb_dir):
+            raise FileNotFoundError(f"VT-Tiny RGB dir not found: {rgb_dir}")
+        self.image_paths = sorted(
+            os.path.join(rgb_dir, file_name)
+            for file_name in os.listdir(rgb_dir)
+            if file_name.endswith(".jpg")
+        )
+        if not self.image_paths:
+            raise FileNotFoundError(f"No RGB jpg found under {rgb_dir}")
+        self.mean = np.array(self.VT_TINY_MEAN, dtype=np.float32)
+        self.std = np.array(self.VT_TINY_STD, dtype=np.float32)
+        self.stride = stride
+
+    @staticmethod
+    def load_rgb_ir(rgb_path: str) -> np.ndarray:
+        ir_path = rgb_path.replace("/00/", "/01/")
+        if not os.path.exists(ir_path):
+            raise FileNotFoundError(f"IR image not found: {ir_path}")
+        rgb = mmcv.imread(rgb_path)
+        assert rgb is not None, f"Failed to load RGB image: {rgb_path}"
+        cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB, rgb)
+
+        ir = mmcv.imread(ir_path, flag="grayscale")
+        assert ir is not None, f"Failed to load IR image: {ir_path}"
+        if ir.ndim == 2:
+            ir = ir[..., np.newaxis]
+        return np.concatenate([rgb, ir], axis=2)
+
+    def process_image(self, image: np.ndarray):
+        ori_image = image.copy()
+        image = mmcv.imnormalize(image, self.mean, self.std, to_rgb=False)
+        image = mmcv.impad_to_multiple(image, self.stride, pad_val=0)
+        image = np.ascontiguousarray(image.transpose(2, 0, 1))
+        image = to_tensor(image)
+        return image, ori_image
+
+    def __getitem__(self, item):
+        image = self.load_rgb_ir(self.image_paths[item])
+        return self.process_image(image), self.image_paths[item]
+
+    def __len__(self):
+        return len(self.image_paths)
 
 
 class SeqDataset_HeatmapGT(Dataset):

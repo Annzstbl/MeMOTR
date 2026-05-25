@@ -53,43 +53,108 @@ def get_color_by_id(track_id):
     return COLOR_PALETTE[track_id % len(COLOR_PALETTE)]
 
 
+def _parse_rect_line(parts: list[str]):
+    """解析正框行，支持 tracking(10列) 与 detection(9列) 两种格式。"""
+    frame = int(float(parts[0]))
+    if len(parts) >= 10:
+        track_id = int(float(parts[1]))
+        x, y, w, h = map(float, parts[2:6])
+        score = float(parts[6])
+        cls = int(float(parts[7]))
+    else:
+        track_id = None
+        x, y, w, h = map(float, parts[1:5])
+        score = float(parts[5])
+        cls = int(float(parts[6]))
+    return frame, track_id, x, y, w, h, score, cls
+
+
+def _parse_rotated_line(parts: list[str]):
+    frame = int(float(parts[0]))
+    track_id = int(float(parts[1]))
+    x1, y1 = float(parts[2]), float(parts[3])
+    x2, y2 = float(parts[4]), float(parts[5])
+    x3, y3 = float(parts[6]), float(parts[7])
+    x4, y4 = float(parts[8]), float(parts[9])
+    score = float(parts[10])
+    cls = int(float(parts[11]))
+    return frame, track_id, x1, y1, x2, y2, x3, y3, x4, y4, score, cls
+
+
 def parse_txt_file(txt_path):
     """
-    解析跟踪结果txt文件
-    
-    格式: frame(from1), id(from0), xyxyxyxy, score, cls, -1
-    
+    解析跟踪结果txt文件，自动识别正框/旋转框格式。
+
+    正框 tracking: frame, id, x, y, w, h, score, cls, -1, -1
+    正框 detection: frame, x, y, w, h, score, cls, -1, -1
+    旋转框: frame, id, x1..y4, score, cls, -1
+
     Returns:
-        dict: {frame_id: [(id, x1, y1, x2, y2, x3, y3, x4, y4, score, cls), ...]}
+        dict: {frame_id: [track_record, ...]}
+        bbox_format: "rect" | "rotated"
     """
     track_dict = defaultdict(list)
-    
+    bbox_format = None
+
     with open(txt_path, 'r') as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            
+
             parts = line.split(',')
-            if len(parts) < 13:  # frame, id, x1, y1, x2, y2, x3, y3, x4, y4, score, cls, -1
+            if len(parts) < 9:
                 continue
-            
+
             try:
-                frame = int(float(parts[0]))  # frame从1开始
-                track_id = int(float(parts[1]))  # id从0开始
-                x1, y1 = float(parts[2]), float(parts[3])
-                x2, y2 = float(parts[4]), float(parts[5])
-                x3, y3 = float(parts[6]), float(parts[7])
-                x4, y4 = float(parts[8]), float(parts[9])
-                score = float(parts[10])
-                cls = int(float(parts[11]))
-                
-                track_dict[frame].append((track_id, x1, y1, x2, y2, x3, y3, x4, y4, score, cls))
+                if len(parts) >= 13:
+                    record = _parse_rotated_line(parts)[1:]
+                    frame = int(float(parts[0]))
+                    bbox_format = bbox_format or "rotated"
+                else:
+                    frame, track_id, x, y, w, h, score, cls = _parse_rect_line(parts)
+                    record = (track_id, x, y, w, h, score, cls)
+                    bbox_format = bbox_format or "rect"
+
+                track_dict[frame].append(record)
             except (ValueError, IndexError) as e:
                 print(f"Warning: 跳过无效行: {line}, 错误: {e}")
                 continue
-    
-    return track_dict
+
+    return track_dict, bbox_format or "rect"
+
+
+def draw_rect_bbox(img, track_id: int | None, x, y, w, h, score, cls=None, thickness=2, font_scale=0.6, color=None):
+    """在图像上绘制正框 (xywh)。"""
+    if color is None:
+        color = get_color_by_id(track_id)
+
+    x1, y1 = int(x), int(y)
+    x2, y2 = int(x + w), int(y + h)
+    cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness)
+
+    label_text = f"id={track_id} {score:.2f}" if track_id is not None else f"{score:.2f}"
+    if cls is not None:
+        label_text = f"{label_text} cls={cls}"
+    text_pos = (x1, y1 - 5)
+    if text_pos[1] < 0:
+        text_pos = (x1, y1 + 20)
+
+    if font_scale > 0:
+        (text_width, text_height), baseline = cv2.getTextSize(
+            label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1
+        )
+        cv2.rectangle(
+            img,
+            (text_pos[0], text_pos[1] - text_height - baseline),
+            (text_pos[0] + text_width, text_pos[1] + baseline),
+            (0, 0, 0),
+            -1,
+        )
+        cv2.putText(
+            img, label_text, text_pos,
+            cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 1, cv2.LINE_AA,
+        )
 
 
 def draw_rotated_bbox(img, track_id: int|None, x1, y1, x2, y2, x3, y3, x4, y4, score, thickness=2, font_scale=0.6, color=None):
@@ -163,46 +228,23 @@ def visualize_tracking_result(txt_path, img_dir, output_path, fps=20):
     print(f"输出视频: {output_path}")
     
     # 解析跟踪结果
-    track_dict = parse_txt_file(txt_path)
+    track_dict, bbox_format = parse_txt_file(txt_path)
     txt_frame_ids = sorted(track_dict.keys()) if track_dict else []
-    
+    print(f"检测框格式: {bbox_format}")
+
     # 获取图片目录中的所有图片文件，只从图像序列确定帧范围
     img_files = sorted(glob.glob(os.path.join(img_dir, "*")))
     img_files = [f for f in img_files if os.path.splitext(f)[1].lower() in ['.jpg', '.jpeg', '.png', '.bmp']]
-    
+
     if not img_files:
         print(f"错误: 图片目录中没有找到图片文件: {img_dir}")
         return False
-    
-    # 从图片文件名提取帧号，建立文件名到帧号的映射
-    img_file_to_frame = {}
-    frame_numbers = []
-    
-    for img_file in img_files:
-        basename = os.path.basename(img_file)
-        # 尝试提取文件名中的数字作为帧号
-        numbers = re.findall(r'\d+', basename)
-        if numbers:
-            try:
-                frame_num = int(numbers[0])
-                frame_numbers.append(frame_num)
-                img_file_to_frame[img_file] = frame_num
-            except:
-                pass
-    
-    if frame_numbers:
-        # 如果成功提取了帧号，使用提取的帧号
-        min_frame = min(frame_numbers)
-        max_frame = max(frame_numbers)
-        # 建立帧号到文件名的映射
-        frame_to_img_file = {v: k for k, v in img_file_to_frame.items()}
-        print(f"从图片文件名提取帧号，帧范围: {min_frame} - {max_frame}，共 {len(frame_numbers)} 帧")
-    else:
-        # 如果无法提取帧号，按顺序编号（从1开始）
-        min_frame = 1
-        max_frame = len(img_files)
-        frame_to_img_file = {i + 1: img_files[i] for i in range(len(img_files))}
-        print(f"无法从文件名提取帧号，按顺序编号: {min_frame} - {max_frame}，共 {len(img_files)} 帧")
+
+    # MOT txt 帧号从 1 开始，按排序后的图像列表建立 1-based 映射
+    min_frame = 1
+    max_frame = len(img_files)
+    frame_to_img_file = {i + 1: img_files[i] for i in range(len(img_files))}
+    print(f"图像序列帧范围: {min_frame} - {max_frame}，共 {len(img_files)} 帧")
     
     # 生成所有需要处理的帧ID列表（只从图像序列确定）
     all_frame_ids = list(range(min_frame, max_frame + 1))
@@ -274,8 +316,12 @@ def visualize_tracking_result(txt_path, img_dir, output_path, fps=20):
         # 绘制该帧的所有跟踪框（如果该帧有跟踪结果）
         if frame_id in track_dict:
             for track_data in track_dict[frame_id]:
-                track_id, x1, y1, x2, y2, x3, y3, x4, y4, score, cls = track_data
-                draw_rotated_bbox(img, track_id, x1, y1, x2, y2, x3, y3, x4, y4, score)
+                if bbox_format == "rect":
+                    track_id, x, y, w, h, score, cls = track_data
+                    draw_rect_bbox(img, track_id, x, y, w, h, score, cls)
+                else:
+                    track_id, x1, y1, x2, y2, x3, y3, x4, y4, score, cls = track_data
+                    draw_rotated_bbox(img, track_id, x1, y1, x2, y2, x3, y3, x4, y4, score)
         
         # 在左上角添加帧序号
         frame_text = f"Frame: {frame_id}"
@@ -319,6 +365,19 @@ def visualize_tracking_result(txt_path, img_dir, output_path, fps=20):
     return True
 
 
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp'}
+
+
+def has_image_files(dir_path):
+    """检查目录下是否包含图像文件"""
+    if not os.path.isdir(dir_path):
+        return False
+    for name in os.listdir(dir_path):
+        if os.path.splitext(name)[1].lower() in IMAGE_EXTENSIONS:
+            return True
+    return False
+
+
 def process_single_file(txt_path, img_root, output_dir):
     """
     处理单个txt文件
@@ -331,9 +390,13 @@ def process_single_file(txt_path, img_root, output_dir):
     # 从txt文件名获取序列名（假设文件名是 xxxx.txt）
     seq_name = os.path.splitext(os.path.basename(txt_path))[0]
     
-    # 构建图片目录路径
+    # 构建图片目录路径；当前目录无图像时，尝试 vt_tiny 的 00 子目录
     img_dir = os.path.join(img_root, seq_name)
-    
+    if not has_image_files(img_dir):
+        fallback_dir = os.path.join(img_dir, "00")
+        if has_image_files(fallback_dir):
+            img_dir = fallback_dir
+
     # 构建输出视频路径
     output_path = os.path.join(output_dir, f"{seq_name}.mp4")
     

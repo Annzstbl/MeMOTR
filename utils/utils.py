@@ -58,6 +58,38 @@ def yaml_to_dict(path: str):
         return yaml.load(f.read(), yaml.FullLoader)
 
 
+def plain_config_tree(value: Any) -> Any:
+    """将 TrackedConfig 等嵌套结构转为普通 Python 对象，便于 YAML 读写。"""
+    if isinstance(value, TrackedConfig):
+        return {k: plain_config_tree(v) for k, v in value.items()}
+    if isinstance(value, dict):
+        return {k: plain_config_tree(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [plain_config_tree(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(plain_config_tree(item) for item in value)
+    return value
+
+
+def load_train_config(path: str) -> dict:
+    """读取 train/config.yaml，兼容纯 YAML 与 TrackedConfig 序列化格式。"""
+    with open(path, encoding="utf-8") as f:
+        raw = f.read()
+
+    try:
+        data = yaml.load(raw, Loader=yaml.FullLoader)
+    except yaml.constructor.ConstructorError:
+        data = yaml.unsafe_load(raw)
+
+    if data is None:
+        raise ValueError(f"Empty or invalid YAML: {path}")
+
+    data = plain_config_tree(data)
+    if not isinstance(data, dict):
+        raise ValueError(f"Config at {path} must be a dict, got: {type(data)}")
+    return data
+
+
 def labels_to_one_hot(labels: np.ndarray, class_num: int):
     return np.eye(N=class_num)[labels]
 

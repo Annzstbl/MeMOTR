@@ -15,7 +15,7 @@ from typing import List, Any, Dict
 from torch.utils import tensorboard as tb
 
 from log.log import MetricLog
-from utils.utils import is_main_process
+from utils.utils import is_main_process, plain_config_tree
 
 
 class ProgressLogger:
@@ -192,7 +192,7 @@ class Logger:
             mode: Open with this mode.
         """
         with open(os.path.join(self.logdir, filename), mode=mode) as f:
-            yaml.dump(log, f, allow_unicode=True)
+            yaml.dump(plain_config_tree(log), f, allow_unicode=True)
         return
 
     def write_dict_to_json(self, log: dict, filename: str, mode: str = "w"):

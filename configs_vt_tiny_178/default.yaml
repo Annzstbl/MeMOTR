@@ -29,7 +29,10 @@ MULTI_CHECKPOINT: False
 
 # About submit
 SUBMIT_DIR: /data/users/litianhao/hsmot_code/workdir_2/memotr/debug
+SUBMIT_MODEL:
 SUBMIT_DATA_SPLIT: test
+SUBMIT_THREADS: 1          # 多进程 submit worker 数；例如 2 GPU + 4 进程 => 每卡 2 进程
+SUBMIT_DATALOADER_WORKERS: # 每个进程 DataLoader worker 数；留空则按 NUM_WORKERS // SUBMIT_THREADS 自动分配
 DET_SCORE_THRESH: 0.5
 TRACK_SCORE_THRESH: 0.5
 RESULT_SCORE_THRESH: 0.5
