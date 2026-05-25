@@ -65,7 +65,7 @@ def get_clones(module, n):
 
 
 def get_model(model):
-    return model if is_distributed() is False else model.module
+    return model.module if isinstance(model, DDP) else model
 
 
 # I think I do not use this function at all...
