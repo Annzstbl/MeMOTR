@@ -4,3 +4,5 @@ OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/debug178
 SUBMIT_DIR: /data4/litianhao/hsmot/memotr/debug178
 
 DATA_ROOT: /data1/users/litianhao01/hsmot/data
+
+PRETRAINED_MODEL: /data1/users/litianhao01/data/dab_deformable_detr_convhsi.pth

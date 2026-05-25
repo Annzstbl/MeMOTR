@@ -62,7 +62,7 @@ MeMOTR 阈值参数分阶段扫描 — 使用说明
 ------------
   {scan_root}/stage{N}/
   ├── manifest.json          # 全部实验记录
-  ├── summary.md             # 对比表格（含 HOTA）
+  ├── summary.md             # 对比表格（HOTA/MOTA/IDF1，来自 all_cls_summary.csv）
   ├── exp01_det0.30/
   │   ├── params.json
   │   ├── submit_config.yaml
@@ -78,7 +78,18 @@ MeMOTR 阈值参数分阶段扫描 — 使用说明
   --values 0.35 0.45     自定义当前阶段的扫描点（覆盖默认网格）
   --skip-submit          跳过 submit，仅重跑 TrackEval
   --skip-eval            仅 submit，不评测
+  --no-resume            关闭断点续传，全部重跑
+  --force                即使已有输出也强制重跑 submit/eval
   --num-experiments 5    自动网格点数（默认 5）
+
+断点续传（默认开启）
+--------------------
+  重新执行同一 stage 命令时，会自动：
+  - 跳过已有 tracker/{seq}.txt 的视频序列，仅推理未完成序列
+  - 跳过已有 all_cls_summary.csv 的 eval 配置（eval_00 / eval_01）
+  - 合并更新 stage{N}/manifest.json
+
+  中断后直接重跑原命令即可续传；若要全量重跑请加 --no-resume 或 --force。
 
 每阶段完成后查看 stage{N}/summary.md 与各实验 test/eval/，
 选定最优参数后再跑下一阶段。
@@ -108,7 +119,6 @@ from submit_engine import (  # noqa: E402
     _run_submit_pipeline,
     is_vt_tiny_dataset,
     list_submit_sequences,
-    resolve_submit_dataloader_workers,
     resolve_submit_split_dir,
     resolve_two_stage_dir,
 )
@@ -116,6 +126,8 @@ from utils.utils import load_train_config, load_yaml_with_inheritance  # noqa: E
 
 
 TRACKEVAL_SCRIPT = MEMOTR_ROOT.parent / "TrackEval" / "scripts" / "run_vt_tiny_mot.py"
+ALL_CLS_SUMMARY_ROW = "cls_comb_det_av"
+ALL_CLS_SUMMARY_METRICS = ("HOTA", "MOTA", "IDF1")
 
 
 def _default_eval_runs(data_root: str, dataset_dir: str, submit_data_split: str) -> list[dict[str, Any]]:
@@ -184,6 +196,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--num-experiments", type=int, default=5, help="Auto grid size when --values not set")
     p.add_argument("--skip-submit", action="store_true")
     p.add_argument("--skip-eval", action="store_true")
+    p.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Disable checkpoint resume; re-run all sequences and evals",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-run submit/eval even when outputs already exist",
+    )
     p.add_argument("--dry-run", action="store_true", help="Print planned experiments only")
     return p.parse_args()
 
@@ -309,6 +331,138 @@ def _save_yaml(path: Path, data: dict) -> None:
         yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
 
 
+def _load_manifest(stage_dir: Path) -> dict[str, Any] | None:
+    manifest_path = stage_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        with manifest_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _tracker_txt_path(tracker_dir: Path, seq_name: str) -> Path:
+    return tracker_dir / f"{seq_name}.txt"
+
+
+def _is_seq_submit_complete(tracker_dir: Path, seq_name: str) -> bool:
+    txt_path = _tracker_txt_path(tracker_dir, seq_name)
+    return txt_path.is_file() and txt_path.stat().st_size > 0
+
+
+def _pending_submit_sequences(all_seq_names: list[str], tracker_dir: Path) -> tuple[list[str], list[str]]:
+    done = [seq_name for seq_name in all_seq_names if _is_seq_submit_complete(tracker_dir, seq_name)]
+    pending = [seq_name for seq_name in all_seq_names if seq_name not in done]
+    return pending, done
+
+
+def _is_eval_complete(eval_dir: Path) -> bool:
+    return _read_all_cls_metrics(eval_dir) is not None
+
+
+def _read_all_cls_metrics(eval_dir: Path) -> dict[str, Any] | None:
+    """Read HOTA/MOTA/IDF1 from all_cls_summary.csv (row cls_comb_det_av)."""
+    csv_path = eval_dir / "all_cls_summary.csv"
+    if not csv_path.is_file() or csv_path.stat().st_size == 0:
+        return None
+    try:
+        with csv_path.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("cls") != ALL_CLS_SUMMARY_ROW:
+                    continue
+                metrics: dict[str, Any] = {
+                    "file": str(csv_path),
+                    "row": ALL_CLS_SUMMARY_ROW,
+                }
+                found = False
+                for key in ALL_CLS_SUMMARY_METRICS:
+                    raw = row.get(key)
+                    if raw not in (None, ""):
+                        metrics[key] = float(raw)
+                        found = True
+                return metrics if found else None
+    except (OSError, ValueError, TypeError):
+        return None
+    return None
+
+
+def _build_eval_record(eval_dir: Path, run: dict[str, Any]) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "dir": str(eval_dir),
+        "gt_coco_ann": str(run["gt_coco_ann"]),
+        "output_sub_folder": run["output_sub_folder"],
+    }
+    metrics = _read_all_cls_metrics(eval_dir)
+    if metrics is not None:
+        record["metrics"] = metrics
+    return record
+
+
+def _collect_evals_from_disk(
+    outputs_dir: Path,
+    eval_runs: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    results: dict[str, dict[str, Any]] = {}
+    for run in eval_runs:
+        eval_dir = outputs_dir / run["output_sub_folder"]
+        if not eval_dir.is_dir():
+            continue
+        record = _build_eval_record(eval_dir, run)
+        if record.get("metrics") is not None:
+            results[run["name"]] = record
+    return results
+
+
+def _attach_evals_to_record(
+    exp_record: dict[str, Any],
+    outputs_dir: Path,
+    eval_runs: list[dict[str, Any]],
+) -> None:
+    """Merge eval metrics from disk into manifest record (refresh if eval already exists)."""
+    evals_on_disk = _collect_evals_from_disk(outputs_dir, eval_runs)
+    if not evals_on_disk:
+        return
+    merged = dict(exp_record.get("evals") or {})
+    merged.update(evals_on_disk)
+    exp_record["evals"] = merged
+    exp_record["eval_dir"] = merged.get("eval_00", {}).get("dir")
+    if merged.get("eval_00", {}).get("metrics") is not None:
+        exp_record["metrics"] = merged["eval_00"]["metrics"]
+
+
+def _format_metric_value(metrics: dict[str, Any] | None, key: str) -> str:
+    if not metrics or key not in metrics:
+        return "-"
+    value = metrics[key]
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    return str(value)
+
+
+def _is_submit_complete(tracker_dir: Path, all_seq_names: list[str]) -> bool:
+    if not all_seq_names:
+        return True
+    return all(_is_seq_submit_complete(tracker_dir, seq_name) for seq_name in all_seq_names)
+
+
+def _is_experiment_complete(
+    *,
+    outputs_dir: Path,
+    all_seq_names: list[str],
+    eval_runs: list[dict[str, Any]] | None,
+    skip_submit: bool,
+    skip_eval: bool,
+) -> bool:
+    if not skip_submit and not _is_submit_complete(outputs_dir / "tracker", all_seq_names):
+        return False
+    if skip_eval or not eval_runs:
+        return True
+    return all(_is_eval_complete(outputs_dir / run["output_sub_folder"]) for run in eval_runs)
+
+
 def _run_submit_for_experiment(
     *,
     base_config: dict,
@@ -318,7 +472,10 @@ def _run_submit_for_experiment(
     params: ThresholdParams,
     exp_dir: Path,
     submit_threads: int,
-) -> Path:
+    all_seq_names: list[str],
+    resume: bool = True,
+    force: bool = False,
+) -> tuple[Path, dict[str, Any]]:
     config = copy.deepcopy(base_config)
     config["MODE"] = "submit"
     config["SUBMIT_DIR"] = resolved_submit_dir
@@ -354,30 +511,48 @@ def _run_submit_for_experiment(
         dataset_type=dataset_type,
         dataset_dir=dataset_dir,
     )
-    seq_names = list_submit_sequences(data_split_dir, dataset_name)
-    submit_workers = int(config.get("SUBMIT_THREADS", 1))
-    dataloader_num_workers = resolve_submit_dataloader_workers(config, submit_workers)
+    seq_names = list(all_seq_names)
+    tracker_dir = Path(outputs_dir) / "tracker"
+    pending_seq_names = seq_names
+    done_seq_names: list[str] = []
+    if resume and not force:
+        pending_seq_names, done_seq_names = _pending_submit_sequences(seq_names, tracker_dir)
 
     _save_yaml(exp_dir / "submit_config.yaml", config)
     _save_yaml(exp_dir / "train_config_override.yaml", {"UPDATE_THRESH": params.update_thresh})
 
-    _run_submit_pipeline(
-        config=config,
-        train_config=train_config,
-        outputs_dir=outputs_dir,
-        data_split_dir=data_split_dir,
-        dataset_name=dataset_name,
-        seq_names=seq_names,
-        logger=None,
-        use_scem_gt=use_scem_gt,
-        dataset_type=dataset_type,
-        checkpoint_path=checkpoint_path,
-        source_model=None,
-        only_train_detr=train_config.get("ONLY_TRAIN_DETR", False),
-        epoch=None,
-        draw_pic_dir=None,
-    )
-    return Path(outputs_dir)
+    submit_info: dict[str, Any] = {
+        "total_sequences": len(seq_names),
+        "done_sequences": done_seq_names,
+        "pending_sequences": pending_seq_names,
+    }
+
+    if pending_seq_names:
+        if done_seq_names:
+            print(
+                f"[submit] resume: {len(done_seq_names)}/{len(seq_names)} sequences done, "
+                f"running {len(pending_seq_names)} pending"
+            )
+        _run_submit_pipeline(
+            config=config,
+            train_config=train_config,
+            outputs_dir=outputs_dir,
+            data_split_dir=data_split_dir,
+            dataset_name=dataset_name,
+            seq_names=pending_seq_names,
+            logger=None,
+            use_scem_gt=use_scem_gt,
+            dataset_type=dataset_type,
+            checkpoint_path=checkpoint_path,
+            source_model=None,
+            only_train_detr=train_config.get("ONLY_TRAIN_DETR", False),
+            epoch=None,
+            draw_pic_dir=None,
+        )
+    elif seq_names:
+        print(f"[submit] all {len(seq_names)} sequences already complete, skip")
+
+    return Path(outputs_dir), submit_info
 
 
 def _run_trackeval(
@@ -421,11 +596,20 @@ def _run_all_trackevals(
     eval_runs: list[dict[str, Any]],
     img_folder: Path,
     iou_threshold: float,
+    resume: bool = True,
+    force: bool = False,
+    existing_evals: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Run multiple TrackEval configs; return {eval_name: {dir, metrics?}}."""
-    results: dict[str, dict[str, Any]] = {}
+    results: dict[str, dict[str, Any]] = dict(existing_evals or {})
     trackers_to_eval = outputs_dir.name
     for run in eval_runs:
+        eval_dir = outputs_dir / run["output_sub_folder"]
+        if resume and not force and _is_eval_complete(eval_dir):
+            print(f"[eval] skip complete {run['name']} -> {eval_dir}")
+            results[run["name"]] = _build_eval_record(eval_dir, run)
+            continue
+
         eval_dir = _run_trackeval(
             trackers_folder=outputs_dir,
             trackers_to_eval=trackers_to_eval,
@@ -435,43 +619,8 @@ def _run_all_trackevals(
             eval_output_subfolder=run["output_sub_folder"],
             eval_class_agnostic=run.get("eval_class_agnostic"),
         )
-        record: dict[str, Any] = {
-            "dir": str(eval_dir),
-            "gt_coco_ann": str(run["gt_coco_ann"]),
-            "output_sub_folder": run["output_sub_folder"],
-        }
-        hota = _try_read_hota_summary(eval_dir)
-        if hota is not None:
-            record["metrics"] = hota
-        results[run["name"]] = record
+        results[run["name"]] = _build_eval_record(eval_dir, run)
     return results
-
-
-def _try_read_hota_summary(eval_dir: Path) -> dict[str, Any] | None:
-    """Best-effort parse combined HOTA from TrackEval summary csv."""
-    if not eval_dir.is_dir():
-        return None
-    candidates = sorted(eval_dir.rglob("*HOTA*.csv"))
-    if not candidates:
-        candidates = sorted(eval_dir.rglob("*.csv"))
-    for csv_path in candidates:
-        try:
-            with csv_path.open("r", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                rows = list(reader)
-            if len(rows) < 2:
-                continue
-            header = rows[0]
-            values = rows[1]
-            summary = dict(zip(header, values))
-            if "HOTA" in summary:
-                return {"file": str(csv_path), "HOTA": float(summary["HOTA"])}
-            for key in ("HOTA(0)", "HOTA___HOTA"):
-                if key in summary:
-                    return {"file": str(csv_path), "HOTA": float(summary[key])}
-        except (OSError, ValueError, IndexError):
-            continue
-    return None
 
 
 def _write_stage_summary(stage_dir: Path, stage: int, manifest: dict[str, Any]) -> Path:
@@ -481,25 +630,33 @@ def _write_stage_summary(stage_dir: Path, stage: int, manifest: dict[str, Any]) 
         f"# Stage {stage} Threshold Scan Summary",
         "",
         f"- Created: {manifest.get('created_at', '')}",
+        f"- Updated: {manifest.get('updated_at', '')}",
         f"- Config: `{manifest.get('config_path', '')}`",
         f"- Checkpoint: `{manifest.get('submit_model', '')}`",
+        f"- Metrics row: `{ALL_CLS_SUMMARY_ROW}` from `all_cls_summary.csv`",
         "",
-        "| Exp | DET | TRACK | RESULT | UPDATE | HOTA_00 | HOTA_01 | Status |",
-        "|-----|-----|-------|--------|--------|---------|---------|--------|",
+        "| Exp | DET | TRACK | RESULT | UPDATE "
+        "| HOTA_00 | MOTA_00 | IDF1_00 | HOTA_01 | MOTA_01 | IDF1_01 | Status |",
+        "|-----|-----|-------|--------|--------"
+        "|---------|---------|---------|---------|---------|---------|--------|",
     ]
     for exp in manifest.get("experiments", []):
         p = exp.get("params", {})
         evals = exp.get("evals", {})
-        hota_00 = evals.get("eval_00", {}).get("metrics", {}).get("HOTA", "-")
-        hota_01 = evals.get("eval_01", {}).get("metrics", {}).get("HOTA", "-")
+        metrics_00 = evals.get("eval_00", {}).get("metrics")
+        metrics_01 = evals.get("eval_01", {}).get("metrics")
         lines.append(
             f"| {exp.get('name', '-')} "
             f"| {p.get('det', '-')} "
             f"| {p.get('track', '-')} "
             f"| {p.get('result', '-')} "
             f"| {p.get('update_thresh', '-')} "
-            f"| {hota_00} "
-            f"| {hota_01} "
+            f"| {_format_metric_value(metrics_00, 'HOTA')} "
+            f"| {_format_metric_value(metrics_00, 'MOTA')} "
+            f"| {_format_metric_value(metrics_00, 'IDF1')} "
+            f"| {_format_metric_value(metrics_01, 'HOTA')} "
+            f"| {_format_metric_value(metrics_01, 'MOTA')} "
+            f"| {_format_metric_value(metrics_01, 'IDF1')} "
             f"| {exp.get('status', '-')} |"
         )
     lines.extend([
@@ -527,6 +684,7 @@ def _validate_checkpoint(resolved_submit_dir: str, submit_model: str) -> None:
 
 def main() -> None:
     args = _parse_args()
+    resume = not args.no_resume
     base_config = _load_base_config(args.config_path)
     if args.available_gpus is not None:
         base_config["AVAILABLE_GPUS"] = args.available_gpus
@@ -550,20 +708,53 @@ def main() -> None:
     stage_dir = Path(args.scan_root) / f"stage{args.stage}"
     stage_dir.mkdir(parents=True, exist_ok=True)
 
+    existing_manifest = _load_manifest(stage_dir) if resume else None
+    existing_by_name = {
+        exp["name"]: exp
+        for exp in (existing_manifest or {}).get("experiments", [])
+        if isinstance(exp, dict) and exp.get("name")
+    }
+
+    train_config = load_train_config(os.path.join(resolved_submit_dir, "train/config.yaml"))
+    dataset_name = train_config["DATASET"]
+    if not args.dry_run and not args.skip_eval and not is_vt_tiny_dataset(dataset_name):
+        raise RuntimeError(f"Only vt_tiny_mot supported, got {dataset_name}")
+
+    dataset_dir = train_config.get("DATASET_DIR", "VT-Tiny-MOT")
+    dataset_version = base_config.get("DATASET_VERSION", train_config.get("DATASET_VERSION"))
+    dataset_type = base_config.get("DATASET_TYPE", train_config.get("DATASET_TYPE", None))
+    data_split_dir = resolve_submit_split_dir(
+        data_root=base_config["DATA_ROOT"],
+        dataset_name=dataset_name,
+        dataset_split=args.submit_data_split,
+        dataset_version=dataset_version,
+        dataset_type=dataset_type,
+        dataset_dir=dataset_dir,
+    )
+    all_seq_names = list_submit_sequences(data_split_dir, dataset_name)
+    eval_runs = _default_eval_runs(base_config["DATA_ROOT"], dataset_dir, args.submit_data_split)
+    iou = args.iou_threshold
+    if iou is None:
+        iou = float(base_config.get("EVAL_IOU_THRESHOLD", base_config.get("TRACK_IOU_THRESH", 0.3)))
+
     manifest: dict[str, Any] = {
         "stage": args.stage,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": (existing_manifest or {}).get("created_at") or datetime.now().isoformat(timespec="seconds"),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
         "config_path": args.config_path,
         "submit_dir": args.submit_dir,
         "resolved_submit_dir": resolved_submit_dir,
         "submit_model": args.submit_model,
+        "resume": resume,
         "experiments": [],
     }
 
-    print(f"Stage {args.stage}: {len(experiments)} experiment(s)")
+    resume_hint = "on" if resume else "off"
+    print(f"Stage {args.stage}: {len(experiments)} experiment(s), resume={resume_hint}")
     for i, params in enumerate(experiments, start=1):
         exp_name = _experiment_name(args.stage, params, i)
         exp_dir = stage_dir / exp_name
+        outputs_dir = exp_dir / args.submit_data_split
         print(f"  [{i}/{len(experiments)}] {exp_name}  params={params}")
 
         if args.dry_run:
@@ -572,19 +763,50 @@ def main() -> None:
             )
             continue
 
+        existing_record = existing_by_name.get(exp_name)
+        if (
+            resume
+            and not args.force
+            and _is_experiment_complete(
+                outputs_dir=outputs_dir,
+                all_seq_names=all_seq_names,
+                eval_runs=eval_runs,
+                skip_submit=args.skip_submit,
+                skip_eval=args.skip_eval,
+            )
+        ):
+            print("    already complete, skip")
+            if existing_record is not None:
+                exp_record = copy.deepcopy(existing_record)
+            else:
+                exp_record = {
+                    "name": exp_name,
+                    "dir": str(exp_dir),
+                    "params": asdict(params),
+                    "tracker_dir": str(outputs_dir / "tracker"),
+                    "status": "ok",
+                }
+            if not args.skip_eval:
+                _attach_evals_to_record(exp_record, outputs_dir, eval_runs)
+            manifest["experiments"].append(exp_record)
+            continue
+
         exp_dir.mkdir(parents=True, exist_ok=True)
         with (exp_dir / "params.json").open("w", encoding="utf-8") as f:
             json.dump(asdict(params), f, indent=2)
 
-        exp_record: dict[str, Any] = {
+        exp_record: dict[str, Any] = copy.deepcopy(existing_record) if existing_record is not None else {
             "name": exp_name,
             "dir": str(exp_dir),
             "params": asdict(params),
         }
+        exp_record["name"] = exp_name
+        exp_record["dir"] = str(exp_dir)
+        exp_record["params"] = asdict(params)
 
         try:
             if not args.skip_submit:
-                outputs_dir = _run_submit_for_experiment(
+                outputs_dir, submit_info = _run_submit_for_experiment(
                     base_config=base_config,
                     resolved_submit_dir=resolved_submit_dir,
                     submit_model=args.submit_model,
@@ -592,41 +814,25 @@ def main() -> None:
                     params=params,
                     exp_dir=exp_dir,
                     submit_threads=args.submit_threads,
+                    all_seq_names=all_seq_names,
+                    resume=resume,
+                    force=args.force,
                 )
+                exp_record["submit"] = submit_info
             else:
                 outputs_dir = exp_dir / args.submit_data_split
 
             exp_record["tracker_dir"] = str(outputs_dir / "tracker")
 
             if not args.skip_eval:
-                train_config = load_train_config(os.path.join(resolved_submit_dir, "train/config.yaml"))
-                dataset_name = train_config["DATASET"]
-                if not is_vt_tiny_dataset(dataset_name):
-                    raise RuntimeError(f"Only vt_tiny_mot supported, got {dataset_name}")
-
-                dataset_dir = train_config.get("DATASET_DIR", "VT-Tiny-MOT")
-                dataset_version = base_config.get("DATASET_VERSION", train_config.get("DATASET_VERSION"))
-                dataset_type = base_config.get("DATASET_TYPE", train_config.get("DATASET_TYPE", None))
-                data_split_dir = resolve_submit_split_dir(
-                    data_root=base_config["DATA_ROOT"],
-                    dataset_name=dataset_name,
-                    dataset_split=args.submit_data_split,
-                    dataset_version=dataset_version,
-                    dataset_type=dataset_type,
-                    dataset_dir=dataset_dir,
-                )
-                iou = args.iou_threshold
-                if iou is None:
-                    iou = float(base_config.get("EVAL_IOU_THRESHOLD", base_config.get("TRACK_IOU_THRESH", 0.3)))
-
-                eval_runs = _default_eval_runs(
-                    base_config["DATA_ROOT"], dataset_dir, args.submit_data_split
-                )
                 eval_results = _run_all_trackevals(
                     outputs_dir=Path(outputs_dir),
                     eval_runs=eval_runs,
                     img_folder=Path(data_split_dir),
                     iou_threshold=iou,
+                    resume=resume,
+                    force=args.force,
+                    existing_evals=exp_record.get("evals"),
                 )
                 exp_record["evals"] = eval_results
                 # backward-compatible single eval_dir (eval_00)
@@ -635,6 +841,7 @@ def main() -> None:
                     exp_record["metrics"] = eval_results["eval_00"]["metrics"]
 
             exp_record["status"] = "ok"
+            exp_record.pop("error", None)
         except Exception as exc:
             exp_record["status"] = "failed"
             exp_record["error"] = repr(exc)
