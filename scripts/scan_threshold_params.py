@@ -229,7 +229,7 @@ def _linspace_values(low: float, high: float, n: int) -> list[float]:
 
 
 def _default_det_grid(n: int) -> list[float]:
-    return _linspace_values(0.2, 0.8, n)
+    return _linspace_values(0.6, 0.9, n)
 
 
 def _default_track_grid(det: float, n: int) -> list[float]:
@@ -263,8 +263,8 @@ def build_stage_experiments(
     default_update: float,
 ) -> list[ThresholdParams]:
     base_det = det if det is not None else 0.5
-    base_track = track if track is not None else base_det
-    base_result = result if result is not None else base_track
+    base_track = track if track is not None else 0.5
+    base_result = result if result is not None else 0.5
     base_update = update_thresh if update_thresh is not None else default_update
 
     if stage == 1:
@@ -272,7 +272,7 @@ def build_stage_experiments(
             raise ValueError("Stage 1 should not set --det/--track/--result (only scans DET).")
         grid = values if values is not None else _default_det_grid(num_experiments)
         return [
-            ThresholdParams(det=v, track=v, result=v, update_thresh=base_update)
+            ThresholdParams(det=v, track=base_track, result=base_result, update_thresh=base_update)
             for v in grid
         ]
 

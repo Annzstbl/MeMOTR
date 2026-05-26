@@ -232,9 +232,11 @@ def visualize_tracking_result(txt_path, img_dir, output_path, fps=20):
     txt_frame_ids = sorted(track_dict.keys()) if track_dict else []
     print(f"检测框格式: {bbox_format}")
 
+    img_format = detect_img_format(img_dir)
+    print(f"图像格式: {img_format}")
+
     # 获取图片目录中的所有图片文件，只从图像序列确定帧范围
-    img_files = sorted(glob.glob(os.path.join(img_dir, "*")))
-    img_files = [f for f in img_files if os.path.splitext(f)[1].lower() in ['.jpg', '.jpeg', '.png', '.bmp']]
+    img_files = collect_image_files(img_dir, img_format)
 
     if not img_files:
         print(f"错误: 图片目录中没有找到图片文件: {img_dir}")
@@ -258,7 +260,11 @@ def visualize_tracking_result(txt_path, img_dir, output_path, fps=20):
         # 如果映射中没有，使用第一张图片文件
         first_img_path = img_files[0]
     
-    first_img = cv2.imread(first_img_path)
+    try:
+        first_img = load_image(first_img_path, img_format)
+    except ValueError as e:
+        print(f"错误: {e}")
+        return False
     if first_img is None:
         print(f"错误: 无法读取图片: {first_img_path}")
         return False
@@ -288,11 +294,16 @@ def visualize_tracking_result(txt_path, img_dir, output_path, fps=20):
             img_path = frame_to_img_file[frame_id]
         else:
             # 如果不在映射中，尝试按帧号查找（标准命名格式）
-            for ext in ['.jpg', '.png', '.jpeg', '.JPG', '.PNG', '.bmp', '.BMP']:
-                candidate = os.path.join(img_dir, f"{frame_id:06d}{ext}")
+            if img_format == "npy2jpg":
+                candidate = os.path.join(img_dir, f"{frame_id:06d}_p1.jpg")
                 if os.path.exists(candidate):
                     img_path = candidate
-                    break
+            else:
+                for ext in ['.jpg', '.png', '.jpeg', '.JPG', '.PNG', '.bmp', '.BMP']:
+                    candidate = os.path.join(img_dir, f"{frame_id:06d}{ext}")
+                    if os.path.exists(candidate):
+                        img_path = candidate
+                        break
         
         if img_path is None:
             # 如果还是找不到，尝试按索引读取（作为后备方案）
@@ -304,7 +315,11 @@ def visualize_tracking_result(txt_path, img_dir, output_path, fps=20):
                 continue
         
         # 读取图片
-        img = cv2.imread(img_path)
+        try:
+            img = load_image(img_path, img_format)
+        except ValueError as e:
+            print(f"警告: {e}，跳过")
+            continue
         if img is None:
             print(f"警告: 无法读取图片: {img_path}，跳过")
             continue
@@ -366,6 +381,18 @@ def visualize_tracking_result(txt_path, img_dir, output_path, fps=20):
 
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp'}
+NPY2JPG_RGB_CHANNELS = [4, 2, 1]
+
+
+def detect_img_format(img_dir):
+    """检测图像目录格式: rgb 或 npy2jpg(3JPG)。"""
+    if not os.path.isdir(img_dir):
+        return "rgb"
+    for name in os.listdir(img_dir):
+        stem, ext = os.path.splitext(name)
+        if ext.lower() in ('.jpg', '.jpeg') and stem.endswith('_p1'):
+            return "npy2jpg"
+    return "rgb"
 
 
 def has_image_files(dir_path):
@@ -373,9 +400,59 @@ def has_image_files(dir_path):
     if not os.path.isdir(dir_path):
         return False
     for name in os.listdir(dir_path):
-        if os.path.splitext(name)[1].lower() in IMAGE_EXTENSIONS:
+        stem, ext = os.path.splitext(name)
+        if ext.lower() in ('.jpg', '.jpeg') and stem.endswith('_p1'):
+            return True
+        if ext.lower() in IMAGE_EXTENSIONS:
             return True
     return False
+
+
+def collect_image_files(img_dir, img_format=None):
+    """收集序列中的帧图像路径。npy2jpg 以 *_p1.jpg 作为帧索引。"""
+    img_format = img_format or detect_img_format(img_dir)
+    if img_format == "npy2jpg":
+        img_files = []
+        for name in sorted(os.listdir(img_dir)):
+            stem, ext = os.path.splitext(name)
+            if ext.lower() in ('.jpg', '.jpeg') and stem.endswith('_p1'):
+                img_files.append(os.path.join(img_dir, name))
+        return img_files
+
+    img_files = sorted(glob.glob(os.path.join(img_dir, "*")))
+    return [f for f in img_files if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS]
+
+
+def load_npy2jpg_image(p1_path):
+    """加载 npy2jpg 一帧图像，拼接 3 张 jpg 后取 421 通道用于可视化。"""
+    stem, ext = os.path.splitext(p1_path)
+    base_stem = stem.rsplit('_', 1)[0]
+    img_dir = os.path.dirname(p1_path)
+    part_paths = [
+        os.path.join(img_dir, f'{base_stem}_p{i}{ext}')
+        for i in (1, 2, 3)
+    ]
+    part_images = []
+    for part_path in part_paths:
+        image = cv2.imread(part_path)
+        if image is None:
+            raise ValueError(f"无法读取图片: {part_path}")
+        cv2.cvtColor(image, cv2.COLOR_BGR2RGB, image)
+        part_images.append(image)
+
+    multichannel = np.concatenate(
+        [part_images[0], part_images[1], part_images[2][:, :, :2]],
+        axis=2,
+    )
+    return multichannel[:, :, NPY2JPG_RGB_CHANNELS]
+
+
+def load_image(img_path, img_format=None):
+    """读取单帧图像，自动识别 rgb / npy2jpg 格式。"""
+    img_format = img_format or detect_img_format(os.path.dirname(img_path))
+    if img_format == "npy2jpg":
+        return load_npy2jpg_image(img_path)
+    return cv2.imread(img_path)
 
 
 def process_single_file(txt_path, img_root, output_dir):

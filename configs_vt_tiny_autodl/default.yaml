@@ -1,0 +1,8 @@
+PARENT_CONFIG: ../configs_vt_tiny_178/default.yaml
+
+OUTPUTS_DIR: /root/autodl-fs/workdir/debug
+SUBMIT_DIR: /root/autodl-fs/workdir/debug
+
+DATA_ROOT: /root/hsmot/data
+
+PRETRAINED_MODEL: /root/autodl-fs/dab_deformable_detr_convhsi.pth
