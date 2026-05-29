@@ -29,17 +29,34 @@ TRANSFORMS_CONFIG:
     W: [480, 736]
     H: [384, 576]
 
+
+# STAGE1:
+#   ENABLE: True
+#   EPOCHS: 2
+#   ONLY_TRAIN_DETR: True
+#   BATCH_SIZE: 12
+#   SAMPLE_STEPS: []
+#   SAMPLE_LENGTHS: [1]
+#   SAMPLE_INTERVALS: [1]
+#   LR_DROP_MILESTONES: [16]
+#   LR_DROP_RATE: 0.1
+#   # 阶段 1 仅 2 epoch：每轮评估 + 末 2 epoch 全评估
+#   EVALUATE_EVERY_N_EPOCHS: 1
+#   EVALUATE_TAIL_EPOCHS: 3
+#   CHECKPOINT_EVERY_N_EPOCHS: 1
+#   CHECKPOINT_TAIL_EPOCHS: 3
+
 # === Stage 2 (MOT finetune) === 直接复用以下 yaml 顶层字段
 EPOCHS: 18
-SAMPLE_STEPS: [4, 8, 12]
-SAMPLE_LENGTHS: [5, 3, 4, 5]
+SAMPLE_STEPS: [1, 2, 3]
+SAMPLE_LENGTHS: [2, 3, 4, 5]
 SAMPLE_MODES: [random_interval]
 SAMPLE_INTERVALS: [3]
 # 与 SAMPLE_LENGTHS 对齐：T 越长可加大 stride 减冗余/加速
 CLIP_BEGIN_STRIDE: [2, 2, 2, 3]
 # 标量=固定 BS；列表=与 SAMPLE_LENGTHS 各 stage 对齐（epoch 达到 SAMPLE_STEPS 后切换）
 # 例：clip 变长时减小 BS 以控制显存 —— T=[2,3,4,5] 对应 BS=[3,3,2,2]
-BATCH_SIZE: [2, 4, 4, 4]
+BATCH_SIZE: [6, 4, 3, 2]
 
 LR_SCHEDULER: MultiStep
 LR_DROP_RATE: 0.1
@@ -48,7 +65,7 @@ LR_DROP_MILESTONES: [16]
 # -------------训练配置-------------
 TRAIN_HALF: False
 ONLY_TRAIN_DETR: False
-# DATASET_VERSION: OneSeq_DJI_0022_1
+DATASET_VERSION: OneSeq_DJI_0022_1
 NUM_WORKERS: 8
 INPUT_CHANNELS: 4
 ANN_MODE: plain
@@ -110,7 +127,7 @@ CHECKPOINT_TAIL_EPOCHS: 3
 
 # EVALUATE（Stage 2）
 # 每 3 个 epoch 评估一次；<=0 表示关闭间隔评估
-EVALUATE_EVERY_N_EPOCHS: 4
+EVALUATE_EVERY_N_EPOCHS: 1
 # 最后 3 个 epoch 每个都评估（16–18）
 EVALUATE_TAIL_EPOCHS: 3
 EVALUATE_FORCE_EPOCHS: []

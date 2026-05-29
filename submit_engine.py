@@ -21,6 +21,7 @@ from typing import List
 from data.seq_dataset import SeqDataset, SeqDataset_HeatmapGT, VtTinySeqDataset
 from hsmot.datasets.pipelines.channel import rotate_norm_boxes_to_boxes
 from hsmot.eval.validator import val_folder
+from hsmot.eval.vt_tiny_coco import list_vt_tiny_channel_eval_runs, val_vt_tiny_coco_det
 from hsmot.mmlab.hs_mmrotate import obb2poly
 from hsmot.mmlab.hs_rectmot import denormalize_cxcywh
 from log.logger import Logger
@@ -1141,6 +1142,166 @@ def build_seq_dataset(
     return SeqDataset(seq_dir=seq_dir, npy2rgb=npy2rgb, dataset_type=dataset_type)
 
 
+def _trackeval_script_path(script_name: str) -> str:
+    current_file_dir = os.path.dirname(os.path.abspath(__file__))
+    return path.join(current_file_dir, "..", "TrackEval", "scripts", script_name)
+
+
+def _run_vt_tiny_trackeval(
+    *,
+    config: dict,
+    dataset_root: str,
+    dataset_split: str,
+    data_split_dir: str,
+    tracker_dir: str,
+    trackers_name: str,
+    trackers_subfolder: str,
+    submit_logger: Logger | None = None,
+) -> None:
+    """VT-Tiny MOT 评测：00 / 01 各跑一次，结果分别写入 eval_00 / eval_01。"""
+    iou_thresh = config.get("EVAL_IOU_THRESHOLD", config.get("TRACK_IOU_THRESH", 0.5))
+    script = _trackeval_script_path("run_vt_tiny_mot.py")
+    eval_runs = list_vt_tiny_channel_eval_runs(
+        dataset_root=dataset_root,
+        dataset_split=dataset_split,
+        mot_stage=True,
+    )
+    for run in eval_runs:
+        ch = run["channel"]
+        gt_coco_ann = run["gt_coco_ann"]
+        output_sub = run["output_sub_folder"]
+        cmd = (
+            f"{sys.executable} {script} "
+            f"--USE_PARALLEL False "
+            f"--METRICS HOTA CLEAR Identity "
+            f"--GT_COCO_ANN {gt_coco_ann} "
+            f"--IMG_FOLDER {data_split_dir} "
+            f"--TRACKERS_FOLDER {tracker_dir} "
+            f"--TRACKERS_TO_EVAL {trackers_name} "
+            f"--TRACKER_SUB_FOLDER {trackers_subfolder} "
+            f"--IOU_THRESHOLD {iou_thresh} "
+            f"--OUTPUT_SUB_FOLDER {output_sub} "
+        )
+        head = f"VT-Tiny MOT TrackEval ({ch} -> {output_sub})"
+        if submit_logger is not None:
+            submit_logger.show(head=head, log=cmd)
+        os_flag = os.system(cmd)
+        assert os_flag == 0, f"TrackEval for VT-Tiny channel {ch} failed to run."
+
+
+def _run_hsmot_trackeval(
+    *,
+    dataset_root: str,
+    dataset_split: str,
+    dataset_type: str | None,
+    tracker_dir: str,
+    trackers_name: str,
+    trackers_subfolder: str,
+) -> None:
+    gt_dir = path.join(dataset_root, dataset_split, "mot")
+    if str(dataset_type).upper() == "3JPG":
+        img_dir = path.join(dataset_root, dataset_split, "npy2jpg")
+    else:
+        img_dir = path.join(dataset_root, dataset_split, "npy")
+    script = _trackeval_script_path("run_hsmot_8ch.py")
+    cmd = (
+        f"{sys.executable} {script} "
+        f"--USE_PARALLEL False "
+        f"--METRICS HOTA CLEAR Identity "
+        f"--GT_FOLDER {gt_dir} "
+        f"--TRACKERS_FOLDER {tracker_dir} "
+        f"--TRACKERS_TO_EVAL {trackers_name} "
+        f"--TRACKER_SUB_FOLDER {trackers_subfolder} "
+        f"--IMG_FOLDER {img_dir} "
+    )
+    os_flag = os.system(cmd)
+    assert os_flag == 0, "TrackEval failed to run."
+
+
+def _run_post_submit_eval(
+    *,
+    config: dict,
+    dataset_name: str,
+    dataset_split: str,
+    dataset_type: str | None,
+    dataset_root: str,
+    data_split_dir: str,
+    tracker_dir: str,
+    trackers_name: str,
+    trackers_subfolder: str,
+    only_train_detr: bool,
+    submit_logger: Logger,
+    train_logger: Logger | None = None,
+) -> None:
+    """训练时 submit 后的评测：先按阶段（DETR / MOT），再按数据集分流。"""
+    if only_train_detr:
+        # 阶段 1（STAGE1 / ONLY_TRAIN_DETR）：检测预训练验证
+        if is_vt_tiny_dataset(dataset_name):
+            pred_det_folder = path.join(tracker_dir, trackers_name, "det")
+            eval_runs = list_vt_tiny_channel_eval_runs(
+                dataset_root=dataset_root,
+                dataset_split=dataset_split,
+                mot_stage=False,
+            )
+            for run in eval_runs:
+                ch = run["channel"]
+                val_lines = val_vt_tiny_coco_det(
+                    gt_coco_ann=run["gt_coco_ann"],
+                    pred_det_folder=pred_det_folder,
+                    data_split_dir=data_split_dir,
+                    ann_mode=run["ann_mode"],
+                    ir_ann_path=None,
+                )
+                head = f"Stage1 DETR Validation Results (VT-Tiny {ch}):"
+                log_text = "\n".join(val_lines)
+                submit_logger.show(head=head, log=log_text)
+                submit_logger.write(head=head, log=log_text, filename="log.txt", mode="a")
+                if train_logger is not None:
+                    train_logger.write(head=head, log=log_text, filename="log.txt", mode="a")
+        else:
+            gt_dir = path.join(dataset_root, dataset_split, "mot")
+            val_lines = val_folder(
+                gt_folder=gt_dir,
+                pred_folder=path.join(tracker_dir, trackers_name, trackers_subfolder),
+            )
+            submit_logger.show(head="Stage1 DETR Validation Results:", log="\n".join(val_lines))
+            submit_logger.write(
+                head="Stage1 DETR Validation Results:",
+                log="\n".join(val_lines),
+                filename="log.txt",
+                mode="a",
+            )
+            if train_logger is not None:
+                train_logger.write(
+                    head="Stage1 DETR Validation Results:",
+                    log="\n".join(val_lines),
+                    filename="log.txt",
+                    mode="a",
+                )
+    else:
+        # 阶段 2（MOT finetune）：完整跟踪评测
+        if is_vt_tiny_dataset(dataset_name):
+            _run_vt_tiny_trackeval(
+                config=config,
+                dataset_root=dataset_root,
+                dataset_split=dataset_split,
+                data_split_dir=data_split_dir,
+                tracker_dir=tracker_dir,
+                trackers_name=trackers_name,
+                trackers_subfolder=trackers_subfolder,
+                submit_logger=submit_logger,
+            )
+        else:
+            _run_hsmot_trackeval(
+                dataset_root=dataset_root,
+                dataset_split=dataset_split,
+                dataset_type=dataset_type,
+                tracker_dir=tracker_dir,
+                trackers_name=trackers_name,
+                trackers_subfolder=trackers_subfolder,
+            )
+
+
 def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_detr: bool = False, train_logger: Logger = None):
 
     model.eval()
@@ -1202,53 +1363,20 @@ def submit_during_train(config: dict, epoch: int, model: nn.Module, only_train_d
         torch.distributed.barrier()
 
     if distributed_rank() == 0:
-        tracker_dir = submit_dir_epoch
-        trackers_name = outputs_dir.split('/')[-1]
-        trackers_subfolder = 'tracker'
-        current_file_dir = os.path.dirname(os.path.abspath(__file__))
-
-        if is_vt_tiny_dataset(dataset_name):
-            gt_coco_ann = path.join(dataset_root, "annotations", f"instances_{dataset_split}2017.json")
-            iou_thresh = config.get("EVAL_IOU_THRESHOLD", config.get("TRACK_IOU_THRESH", 0.5))
-            os_flag = os.system(
-                f"{sys.executable} {current_file_dir}/../TrackEval/scripts/run_vt_tiny_mot.py "
-                f"--USE_PARALLEL False "
-                f"--METRICS HOTA CLEAR Identity "
-                f"--GT_COCO_ANN {gt_coco_ann} "
-                f"--IMG_FOLDER {data_split_dir} "
-                f"--TRACKERS_FOLDER {tracker_dir} "
-                f"--TRACKERS_TO_EVAL {trackers_name} "
-                f"--TRACKER_SUB_FOLDER {trackers_subfolder} "
-                f"--IOU_THRESHOLD {iou_thresh} "
-            )
-            assert os_flag == 0, "TrackEval for VT-Tiny failed to run."
-        elif only_train_detr:
-            gt_dir = os.path.join(dataset_root, dataset_split, 'mot')
-            val_lines = val_folder(
-                gt_folder=gt_dir,
-                pred_folder=os.path.join(tracker_dir, trackers_name, trackers_subfolder),
-            )
-            submit_logger.show(head="Validation Results:", log='\n'.join(val_lines))
-            submit_logger.write(head="Validation Results:", log='\n'.join(val_lines), filename="log.txt", mode="a")
-            if train_logger is not None:
-                train_logger.write(head="Validation Results:", log='\n'.join(val_lines), filename="log.txt", mode="a")
-        else:
-            gt_dir = os.path.join(dataset_root, dataset_split, 'mot')
-            if str(dataset_type).upper() == "3JPG":
-                img_dir = os.path.join(dataset_root, dataset_split, 'npy2jpg')
-            else:
-                img_dir = os.path.join(dataset_root, dataset_split, 'npy')
-            os_flag = os.system(
-                f"{sys.executable} {current_file_dir}/../TrackEval/scripts/run_hsmot_8ch.py "
-                f"--USE_PARALLEL False "
-                f"--METRICS HOTA CLEAR Identity "
-                f"--GT_FOLDER {gt_dir} "
-                f"--TRACKERS_FOLDER {tracker_dir} "
-                f"--TRACKERS_TO_EVAL {trackers_name} "
-                f"--TRACKER_SUB_FOLDER {trackers_subfolder} "
-                f"--IMG_FOLDER {img_dir} "
-            )
-            assert os_flag == 0, "TrackEval failed to run."
+        _run_post_submit_eval(
+            config=config,
+            dataset_name=dataset_name,
+            dataset_split=dataset_split,
+            dataset_type=dataset_type,
+            dataset_root=dataset_root,
+            data_split_dir=data_split_dir,
+            tracker_dir=submit_dir_epoch,
+            trackers_name=outputs_dir.split("/")[-1],
+            trackers_subfolder="tracker",
+            only_train_detr=only_train_detr,
+            submit_logger=submit_logger,
+            train_logger=train_logger,
+        )
 
     if is_distributed():
         torch.distributed.barrier()

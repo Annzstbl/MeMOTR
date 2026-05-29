@@ -2,6 +2,12 @@ PROJECT: "20260511-2，VT-Tiny-MOT 正框版，基于20260511_rect，IoU=0.1，�
 
 AVAILABLE_GPUS: "0"
 
+
+#RESUME
+RESUME: /data1/users/litianhao01/experiment/memotr/vt_tiny_20260511-2-178/stage2_mot/last.pth
+PRETRAINED_MODEL: /data1/users/litianhao01/experiment/memotr/vt_tiny_20260511-2-178/stage2_mot/last.pth
+RESUME_SCHEDULER: True
+
 PARENT_CONFIG: ./default.yaml
 OUTPUTS_DIR: /data1/users/litianhao01/experiment/memotr/vt_tiny_20260511-2-178
 SUBMIT_DIR: /data1/users/litianhao01/experiment/memotr/vt_tiny_20260511-2-178
@@ -34,22 +40,22 @@ TRANSFORMS_CONFIG:
 #  - 阶段 1 用此块字段覆盖 yaml 顶层，输出到 OUTPUTS_DIR/stage1_detr/
 #  - 阶段 2 用 yaml 顶层字段，自动 PRETRAINED_MODEL=阶段1/last.pth, RESUME=null
 #    输出到 OUTPUTS_DIR/stage2_mot/
-STAGE1:
-  ENABLE: True
-  EPOCHS: 20
-  ONLY_TRAIN_DETR: True
-  BATCH_SIZE: 12
-  SAMPLE_STEPS: []
-  SAMPLE_LENGTHS: [1]
-  SAMPLE_INTERVALS: [1]
-  LR_DROP_MILESTONES: [16]
-  LR_DROP_RATE: 0.1
-  # 阶段 1 仅 2 epoch：每轮评估 + 末 2 epoch 全评估
-  EVALUATE_EVERY_N_EPOCHS: 5
-  EVALUATE_TAIL_EPOCHS: 3
-  CHECKPOINT_EVERY_N_EPOCHS: 5
-  CHECKPOINT_TAIL_EPOCHS: 3
-  CLIP_BEGIN_STRIDE: [2]
+# STAGE1:
+#   ENABLE: True
+#   EPOCHS: 20
+#   ONLY_TRAIN_DETR: True
+#   BATCH_SIZE: 12
+#   SAMPLE_STEPS: []
+#   SAMPLE_LENGTHS: [1]
+#   SAMPLE_INTERVALS: [1]
+#   LR_DROP_MILESTONES: [16]
+#   LR_DROP_RATE: 0.1
+#   # 阶段 1 仅 2 epoch：每轮评估 + 末 2 epoch 全评估
+#   EVALUATE_EVERY_N_EPOCHS: 5
+#   EVALUATE_TAIL_EPOCHS: 3
+#   CHECKPOINT_EVERY_N_EPOCHS: 5
+#   CHECKPOINT_TAIL_EPOCHS: 3
+#   CLIP_BEGIN_STRIDE: [2]
 
 # === Stage 2 (MOT finetune) === 直接复用以下 yaml 顶层字段
 EPOCHS: 18
@@ -61,7 +67,7 @@ SAMPLE_INTERVALS: [3]
 CLIP_BEGIN_STRIDE: [2, 2, 2, 3]
 # 标量=固定 BS；列表=与 SAMPLE_LENGTHS 各 stage 对齐（epoch 达到 SAMPLE_STEPS 后切换）
 # 例：clip 变长时减小 BS 以控制显存 —— T=[2,3,4,5] 对应 BS=[3,3,2,2]
-BATCH_SIZE: [6, 3, 4, 2]
+BATCH_SIZE: [6, 4, 3, 2]
 
 LR_SCHEDULER: MultiStep
 LR_DROP_RATE: 0.1
@@ -140,6 +146,6 @@ EVALUATE_FORCE_EPOCHS: []
 
 
 
-# python main.py --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_vt_tiny_178/20260511-2.yaml
+# python main.py --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_vt_tiny_178/20260511-2-resume.yaml
 # 多卡
-# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_vt_tiny_178/20260511-2.yaml
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_vt_tiny_178/20260511-2-resume.yaml

@@ -37,12 +37,20 @@ python debug/20260526/test.py \
   --seq data39-3 \
   --end-frames 55
 
-CUDA_VISIBLE_DEVICES=0 \
+CUDA_VISIBLE_DEVICES=1 \
 python debug/20260526/test.py \
   --train-config /data1/users/litianhao01/hsmot/MeMOTR/debug/20260526/20260511-2.yaml \
   --checkpoint last.pth \
   --seq data39-3,data28-5,data37-2,data30-3,data47-3,data31-1,data48-1,data33-1,data36-13,data37-1 \
   --end-frames 55,15,90,10,15,58,15,140,10,155 \
+  --save-last-n-frames 20
+
+  CUDA_VISIBLE_DEVICES=1 \
+python debug/20260526/test.py \
+  --train-config /data1/users/litianhao01/hsmot/MeMOTR/debug/20260526/20260511-2.yaml \
+  --checkpoint last.pth \
+  --seq data30-4\
+  --end-frames 5 \
   --save-last-n-frames 20
 
 
@@ -448,18 +456,23 @@ def _upscale_gray(gray: np.ndarray, max_side: int) -> np.ndarray:
     return cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
 
-def _save_grayscale_jpg(
-    arr2d: np.ndarray,
-    path: str,
-    skip_existing: bool,
-    pad_mask: Optional[np.ndarray] = None,
-    vis_max_size: int = 1200,
-) -> bool:
-    """保存无 colorbar 的 JPG 灰度图；padding/mask 区域置 0，并按 vis_max_size 放大。"""
-    jpg_path = os.path.splitext(path)[0] + ".jpg"
-    if _skip_image_write(jpg_path, skip_existing):
-        return False
+def _upscale_color(color: np.ndarray, max_side: int) -> np.ndarray:
+    if max_side <= 0:
+        return color
+    h, w = color.shape[:2]
+    if max(h, w) >= max_side:
+        return color
+    scale = max_side / float(max(h, w))
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    return cv2.resize(color, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
+
+def _normalize_map_to_gray(
+    arr2d: np.ndarray,
+    pad_mask: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """归一化到 uint8 灰度，并返回 valid mask（True=有效区域）。"""
     arr = np.asarray(arr2d, dtype=np.float32)
     valid = np.ones(arr.shape, dtype=bool)
     if pad_mask is not None:
@@ -474,7 +487,22 @@ def _save_grayscale_jpg(
         if vmax > vmin:
             norm = np.clip((arr - vmin) / (vmax - vmin), 0.0, 1.0)
             gray[valid] = (norm[valid] * 255.0).astype(np.uint8)
+    return gray, valid
 
+
+def _save_grayscale_jpg(
+    arr2d: np.ndarray,
+    path: str,
+    skip_existing: bool,
+    pad_mask: Optional[np.ndarray] = None,
+    vis_max_size: int = 1200,
+) -> bool:
+    """保存无 colorbar 的 JPG 灰度图；padding/mask 区域置 0，并按 vis_max_size 放大。"""
+    jpg_path = os.path.splitext(path)[0] + ".jpg"
+    if _skip_image_write(jpg_path, skip_existing):
+        return False
+
+    gray, _valid = _normalize_map_to_gray(arr2d, pad_mask)
     gray = _upscale_gray(gray, vis_max_size)
 
     os.makedirs(os.path.dirname(jpg_path) or ".", exist_ok=True)
@@ -482,15 +510,40 @@ def _save_grayscale_jpg(
     return True
 
 
+def _save_colormap_jpg(
+    arr2d: np.ndarray,
+    path: str,
+    skip_existing: bool,
+    pad_mask: Optional[np.ndarray] = None,
+    vis_max_size: int = 1200,
+    cmap: int = cv2.COLORMAP_JET,
+) -> bool:
+    """保存 jet 伪彩色 JPG（无 colorbar，仅内容）；padding/mask 区域置黑。"""
+    jpg_path = os.path.splitext(path)[0] + "_color.jpg"
+    if _skip_image_write(jpg_path, skip_existing):
+        return False
+
+    gray, valid = _normalize_map_to_gray(arr2d, pad_mask)
+    color = cv2.applyColorMap(gray, cmap)
+    color[~valid] = 0
+    color = _upscale_color(color, vis_max_size)
+
+    os.makedirs(os.path.dirname(jpg_path) or ".", exist_ok=True)
+    cv2.imwrite(jpg_path, color)
+    return True
+
+
 def _save_map_jpg(arr2d: np.ndarray, path: str, ctx: SaveContext, src_lvl: int) -> bool:
     pad_mask = _level_pad_mask(ctx, src_lvl, arr2d.shape)
-    return _save_grayscale_jpg(
-        arr2d,
-        path,
-        ctx["skip_existing"],
-        pad_mask=pad_mask,
-        vis_max_size=int(ctx.get("vis_max_size", 1200)),
+    skip_existing = ctx["skip_existing"]
+    vis_max_size = int(ctx.get("vis_max_size", 1200))
+    saved_gray = _save_grayscale_jpg(
+        arr2d, path, skip_existing, pad_mask=pad_mask, vis_max_size=vis_max_size
     )
+    saved_color = _save_colormap_jpg(
+        arr2d, path, skip_existing, pad_mask=pad_mask, vis_max_size=vis_max_size
+    )
+    return saved_gray or saved_color
 
 
 def save_pool_weights_maps(token_debug: Dict[str, Any], ctx: SaveContext) -> None:

@@ -30,11 +30,19 @@ def visualize_validation_metrics(val_root_path, fig_path=None, data_split: str =
     val_matrix = []
     
     for val_path in val_folder_list:
-        val_file = os.path.join(val_path, data_split, 'eval', 'all_cls_summary.csv')
-        if os.path.exists(val_file):
+        val_file = None
+        for eval_sub in ('eval_00', 'eval', 'eval_01'):
+            candidate = os.path.join(val_path, data_split, eval_sub, 'all_cls_summary.csv')
+            if os.path.exists(candidate):
+                val_file = candidate
+                break
+        if val_file is not None:
             val_matrix.append(pd.read_csv(val_file))
         else:
-            print(f"Warning: {val_file} not found, skipping...")
+            print(
+                f"Warning: no eval summary under {val_path}/{data_split}/"
+                f"(eval_00|eval|eval_01), skipping..."
+            )
     
     if len(val_matrix) == 0:
         print("Error: No validation data found!")

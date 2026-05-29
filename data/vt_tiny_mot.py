@@ -179,6 +179,8 @@ class VTTinyMOT(MOTDataset):
 
         vid_white_list_cfg = config.get("VID_WHITE_LIST")
         vid_white_list = set(vid_white_list_cfg) if vid_white_list_cfg is not None else None
+        vid_black_list_cfg = config.get("VID_BLACK_LIST")
+        vid_black_list = set(vid_black_list_cfg) if vid_black_list_cfg else set()
 
         self.train_half = bool(config.get("TRAIN_HALF", False)) and split == "train"
         self.train_half_list = None
@@ -204,12 +206,16 @@ class VTTinyMOT(MOTDataset):
 
         kept_vids = 0
         skipped_by_whitelist = 0
+        skipped_by_blacklist = 0
         skipped_by_train_half = 0
         skipped_by_missing_dir = 0
 
         for scene in sorted(self.labels_full.keys()):
             if vid_white_list is not None and scene not in vid_white_list:
                 skipped_by_whitelist += 1
+                continue
+            if scene in vid_black_list:
+                skipped_by_blacklist += 1
                 continue
             if self.train_half and self.train_half_list is not None and scene not in self.train_half_list:
                 skipped_by_train_half += 1
@@ -223,10 +229,12 @@ class VTTinyMOT(MOTDataset):
             self.idx_vid[self.vid_idx[scene]] = scene
             kept_vids += 1
 
+        if vid_black_list:
+            _log(f"VT-Tiny-MOT VID_BLACK_LIST: {sorted(vid_black_list)}")
         _log(
             f"VT-Tiny-MOT video filtering: kept={kept_vids}, "
-            f"skip_whitelist={skipped_by_whitelist}, skip_train_half={skipped_by_train_half}, "
-            f"skip_missing_dir={skipped_by_missing_dir}"
+            f"skip_whitelist={skipped_by_whitelist}, skip_blacklist={skipped_by_blacklist}, "
+            f"skip_train_half={skipped_by_train_half}, skip_missing_dir={skipped_by_missing_dir}"
         )
         assert kept_vids > 0, "No valid videos found for VTTinyMOT."
 

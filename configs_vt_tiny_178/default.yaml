@@ -182,7 +182,9 @@ ROPE_WEIGHTS: [0.75, 1.0, 0.5]
 
 # train half
 TRAIN_HALF: False
-VID_WHITE_LIST: 
+VID_WHITE_LIST:
+# 训练时排除的 scene（零标注或 RGB/Plain 标注异常）
+VID_BLACK_LIST: [DJI_0061_2, DJI_0323_2]
 
 SCEM:
   ENABLE: False
