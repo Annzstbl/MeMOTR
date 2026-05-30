@@ -1,0 +1,145 @@
+PROJECT: "20260511-3，VT-Tiny-MOT 正框版，基于20260511_rect，IoU=0.2，两段2+18epoch"
+
+AVAILABLE_GPUS: "0"
+
+PARENT_CONFIG: ./default.yaml
+OUTPUTS_DIR: /data1/users/litianhao01/experiment/memotr/vt_tiny_20260511-3-178
+SUBMIT_DIR: /data1/users/litianhao01/experiment/memotr/vt_tiny_20260511-3-178
+
+
+#新增
+TRACK_IOU_ADAPTIVE: False
+TRACK_IOU_THRESH: 0.1
+
+
+##不变
+
+# checkpoint
+USE_CHECKPOINT: True
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 5
+CHECKPOINT_LEVEL: 1         # 1： encoder  2: encoder+decoder  3: encoder+decoder+backbone
+
+# 最佳transform（原图 512x640；crop/resize 在 W/H 范围内独立随机采样，比例不固定）
+TRANSFORMS_CONFIG:
+  CROP_SIZE:
+    W: [416, 640]
+    H: [448, 512]
+  FLIP_RATIO: 0.5
+  RESIZE:
+    W: [480, 640]
+    H: [384, 512]
+
+# === Stage 1 (DETR pretrain) ===
+# 当 STAGE1.ENABLE=True 时启用两段训练：
+#  - 阶段 1 用此块字段覆盖 yaml 顶层，输出到 OUTPUTS_DIR/stage1_detr/
+#  - 阶段 2 用 yaml 顶层字段，自动 PRETRAINED_MODEL=阶段1/last.pth, RESUME=null
+#    输出到 OUTPUTS_DIR/stage2_mot/
+STAGE1:
+  ENABLE: True
+  EPOCHS: 5
+  ONLY_TRAIN_DETR: True
+  BATCH_SIZE: 16
+  SAMPLE_STEPS: []
+  SAMPLE_LENGTHS: [1]
+  SAMPLE_INTERVALS: [1]
+  LR_DROP_MILESTONES: [4]
+  LR_DROP_RATE: 0.1
+  # 阶段 1 仅 2 epoch：每轮评估 + 末 2 epoch 全评估
+  EVALUATE_EVERY_N_EPOCHS: 0
+  EVALUATE_TAIL_EPOCHS: 0
+  CHECKPOINT_EVERY_N_EPOCHS: 1
+  CHECKPOINT_TAIL_EPOCHS: 2
+
+# === Stage 2 (MOT finetune) === 直接复用以下 yaml 顶层字段
+EPOCHS: 18
+SAMPLE_STEPS: [4, 8, 12]
+SAMPLE_LENGTHS: [2, 3, 4, 5]
+SAMPLE_MODES: [random_interval]
+SAMPLE_INTERVALS: [3]
+# 与 SAMPLE_LENGTHS 对齐：T 越长可加大 stride 减冗余/加速
+CLIP_BEGIN_STRIDE: [2, 2, 3, 4]
+# 标量=固定 BS；列表=与 SAMPLE_LENGTHS 各 stage 对齐（epoch 达到 SAMPLE_STEPS 后切换）
+# 例：clip 变长时减小 BS 以控制显存 —— T=[2,3,4,5] 对应 BS=[3,3,2,2]
+BATCH_SIZE: [8, 4, 4, 4]
+
+LR_SCHEDULER: MultiStep
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [16]
+
+# -------------训练配置-------------
+TRAIN_HALF: False
+ONLY_TRAIN_DETR: False
+# DATASET_VERSION: OneSeq_DJI_0022_1
+NUM_WORKERS: 8
+INPUT_CHANNELS: 4
+ANN_MODE: "00"
+
+# 训练 debug：保存 transform 后图像+标注到 OUTPUTS_DIR/debug/
+DEBUG_SAVE_TRANSFORMS: False
+DEBUG_SAVE_TRANSFORMS_MAX: 4
+
+USE_AMP: True
+AMP_DTYPE: bf16   # bf16 | fp16
+
+
+# -------------模型配置-------------
+ENCODER_SPECTRAL: True
+EDGE_SWAP: False
+STEM: conv3d_se_v4
+MEMOTR_VERSION: '20260511_rect'
+USE_Q_SPEC: True
+Q_SPEC_LAMBDA: 0.1
+TIMING_SYNC_CUDA: False
+TIMING_LOG_INTERVAL: 10
+
+# -------------SCEM配置-------------
+SCEM:
+  ENABLE: True
+  USE_GT: False
+  PRIOR_MODE: gate
+  USE_SPECTRAL_PI: True
+  SPECTRAL_DATABASE_NUM: 32
+  SPECTRAL_TYPE: "pi"
+  # 梯度路由：conservative | grad_scaled（见 model_20260511/SCEM.py）
+  GRAD_MODE: conservative
+
+# -------------LOSS配置-------------
+LOSS_SCEM_NLL: 1
+LOSS_SCEM_BCE: 1
+LOSS_SCEM_DICE: 0
+LOSS_NLL_CONFIG:
+  TYPE: focal # focal or mean
+  ALPHA_POS: 1.0
+  ALPHA_NEG: 0.1
+  GAMMA_POS: 2.0
+  GAMMA_NEG: 0.0
+LOSS_SCEM_POOL_DIV: 1
+LOSS_SCEM_GAMMA_COVER: 1
+LOSS_LABEL_TYPE: sigmoid_focal_loss
+LOSS_WEIGHT_FOCAL: 5
+LOSS_WEIGHT_GIOU: 2
+LOSS_WEIGHT_L1: 5
+
+RECT_BOX_SIMILARITY: nwd
+MATCH_COST_CLASS: 5
+MATCH_COST_BBOX: 5
+MATCH_COST_GIOU: 2
+
+# -------------CHECKPOINT配置（Stage 2，共 18 epoch）-------------
+CHECKPOINT_EVERY_N_EPOCHS: 4
+CHECKPOINT_TAIL_EPOCHS: 3
+
+# EVALUATE（Stage 2）
+# 每 3 个 epoch 评估一次；<=0 表示关闭间隔评估
+EVALUATE_EVERY_N_EPOCHS: 0
+# 最后 3 个 epoch 每个都评估（16–18）
+EVALUATE_TAIL_EPOCHS: 0
+EVALUATE_FORCE_EPOCHS: []
+
+
+
+
+
+# python main.py --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_vt_tiny_178/20260511-3.yaml
+# 多卡
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_vt_tiny_178/20260511-3.yaml
