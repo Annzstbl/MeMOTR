@@ -2,16 +2,20 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
+import os
 
 # =========================
 # 1. 路径与基本配置
 # =========================
-json_path = "/data1/users/litianhao01/hsmot/MeMOTR/debug/20260526/20260511-2/track/data31-1/id0/data31-1__trackId0__timeline_meta.json"
+# json_path = "/data1/users/litianhao01/hsmot/MeMOTR/debug/20260526/20260511-2/track/data31-1/id0/data31-1__trackId0__timeline_meta.json"
+json_path = "/data1/users/litianhao01/hsmot/MeMOTR/debug/20260526/20260511-2/track/data33-1/id4/data33-1__trackId4__timeline_meta.json"
 
-save_fig1 = "fig1_band_identity.png"
-save_fig2 = "fig2_mean_profile.png"
-save_fig3 = "fig3_temporal_spectral_map.png"
-save_fig4 = "fig4_band_variability.png"
+save_path = "/data1/users/litianhao01/hsmot/MeMOTR/debug/20260526/20260511-2/track/data33-1/id4_spectral"
+os.makedirs(save_path, exist_ok=True)
+save_fig1 = os.path.join(save_path, "fig1_band_identity.png")
+save_fig2 = os.path.join(save_path, "fig2_mean_profile.png")
+save_fig3 = os.path.join(save_path, "fig3_temporal_spectral_map.png")
+save_fig4 = os.path.join(save_path, "fig4_band_variability.png")
 
 # 8个谱段中心波长
 wavelengths = np.array([422.5, 487.5, 550.0, 602.5, 660.0, 725.0, 785.0, 887.2])
@@ -32,17 +36,19 @@ band_colors = [
 ]
 
 # 如果json中有多个目标，可以筛选；不筛选就设为None
-target_global_q_idx = 300
-target_track_local_idx = 0
+target_global_q_idx = None
+target_track_local_idx = 4
 
 # 归一化方式：
-# "row_minmax" -> 每一帧自身8维做min-max，突出谱形稳定性
-# "row_l1"     -> 每一帧做L1归一化
-# "none"       -> 不归一化
-norm_mode = "row_minmax"
+# "sigmoid" -> 逐元素 sigmoid，映射到 (0, 1)
+# "none"    -> 不归一化
+norm_mode = "sigmoid"
 
 # 阴影放大系数（用于 mean ± shade_scale * std）
 shade_scale = 1.8
+
+# sigmoid 响应显示范围
+response_ylim = (0.2, 0.8)
 
 
 # =========================
@@ -84,20 +90,20 @@ X_raw = np.stack([r[1] for r in records], axis=0)   # [T, 8]
 # =========================
 # 3. 归一化
 # =========================
-def normalize_rows(X, mode="row_minmax", eps=1e-8):
-    if mode == "none":
-        return X.copy()
-    elif mode == "row_minmax":
-        row_min = X.min(axis=1, keepdims=True)
-        row_max = X.max(axis=1, keepdims=True)
-        return (X - row_min) / (row_max - row_min + eps)
-    elif mode == "row_l1":
-        denom = np.sum(np.abs(X), axis=1, keepdims=True) + eps
-        return X / denom
-    else:
-        raise ValueError(f"Unsupported norm_mode: {mode}")
+def sigmoid(X):
+    X = np.asarray(X, dtype=float)
+    return np.where(
+        X >= 0,
+        1.0 / (1.0 + np.exp(-X)),
+        np.exp(X) / (1.0 + np.exp(X)),
+    )
 
-X = normalize_rows(X_raw, mode=norm_mode)  # [T, 8]
+if norm_mode == "none":
+    X = X_raw.copy()
+elif norm_mode == "sigmoid":
+    X = sigmoid(X_raw)
+else:
+    raise ValueError(f"Unsupported norm_mode: {norm_mode}")
 
 mean_spec = X.mean(axis=0)
 std_spec = X.std(axis=0)
@@ -167,9 +173,12 @@ for i in range(8):
 
 ax2.set_xticks(xpos)
 ax2.set_xticklabels([f"{w:.1f}" for w in wavelengths], fontsize=10)
-ax2.set_ylabel("Mean normalized response", fontsize=11)
+ylabel = "Mean response" if norm_mode == "none" else "Mean sigmoid response"
+ax2.set_ylabel(ylabel, fontsize=11)
 ax2.set_xlabel("Wavelength (nm)", fontsize=11)
 ax2.set_title(f"Average spectral profile over time (mean ± {shade_scale:.1f}×std)", fontsize=12)
+if norm_mode != "none":
+    ax2.set_ylim(*response_ylim)
 
 # 去掉底格
 ax2.grid(False)
@@ -194,13 +203,15 @@ fig3, ax3 = plt.subplots(figsize=(10, 4.8))
 # 变成 [8, T]，纵轴是band，横轴是frame
 heatmap_data = X.T
 
-im = ax3.imshow(
-    heatmap_data,
+imshow_kwargs = dict(
     aspect="auto",
     cmap="viridis",
     interpolation="nearest",
-    origin="upper"   # 确保最上面是band 0
+    origin="upper",  # 确保最上面是band 0
 )
+if norm_mode != "none":
+    imshow_kwargs["vmin"], imshow_kwargs["vmax"] = response_ylim
+im = ax3.imshow(heatmap_data, **imshow_kwargs)
 
 # x轴用frame
 num_xticks = min(10, len(frames))
@@ -220,7 +231,7 @@ cbar = fig3.colorbar(im, ax=ax3, fraction=0.035, pad=0.02)
 if norm_mode == "none":
     cbar.set_label("Raw pooled spectral value", fontsize=10)
 else:
-    cbar.set_label("Normalized response", fontsize=10)
+    cbar.set_label("Sigmoid response", fontsize=10)
 
 plt.tight_layout()
 plt.savefig(save_fig3, dpi=300, bbox_inches="tight")
