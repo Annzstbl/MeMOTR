@@ -634,13 +634,21 @@ def _parse_gpu_list(value) -> list[int]:
 
 
 def resolve_submit_gpus(config: dict) -> list[int]:
-    """Resolve GPU ids used by submit workers."""
-    for key in ("SUBMIT_GPUS", "SUBMIT_GPU", "AVAILABLE_GPUS"):
+    """Resolve logical cuda device indices for submit workers (0 .. device_count-1).
+
+    ``AVAILABLE_GPUS`` in main.py sets ``CUDA_VISIBLE_DEVICES`` (physical GPU ids),
+    not ``torch.cuda`` indices. After that env is applied, workers must use 0,1,...
+    """
+    for key in ("SUBMIT_GPUS", "SUBMIT_GPU"):
         gpu_ids = _parse_gpu_list(config.get(key))
         if gpu_ids:
             return gpu_ids
     if is_distributed():
         return [distributed_rank()]
+    if torch.cuda.is_available():
+        n = torch.cuda.device_count()
+        if n > 0:
+            return list(range(n))
     return [0]
 
 

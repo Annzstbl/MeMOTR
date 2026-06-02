@@ -1,0 +1,3 @@
+PARENT_CONFIG: ../configs_vt_tiny_178/default.yaml
+
+DATA_ROOT: /data/users/wangying01/lth/hsmot/data

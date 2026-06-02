@@ -1,21 +1,17 @@
-PROJECT: "20260511-nodecode,在decoder中不使用spec"
+PROJECT: "20260511-2,继承20260511-1,单阶段训练，从detr20epoch开始训练"
 
 AVAILABLE_GPUS: "0,1"
 
-#RESUME
-PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/spectralemb/20260511-nodecode-2-99/last.pth
-RESUME: /data4/litianhao/hsmot/memotr/spectralemb/20260511-nodecode-2-99/last.pth
-RESUME_SCHEDULER: True
-
-
 PARENT_CONFIG: ./default.yaml
-OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-nodecode-2-99
-SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-nodecode-2-99
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-3-99
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-3-99
+
+PRETRAINED_MODEL: /data4/litianhao/hsmot/memotr/20260511-only_detr.pth
 
 
 #新增
 TRACK_IOU_ADAPTIVE: False
-TRACK_IOU_THRESH: 0.5
+TRACK_IOU_THRESH: 0.2
 
 
 ##不变
@@ -43,14 +39,12 @@ TRANSFORMS_CONFIG:
 EPOCHS: 18
 SAMPLE_STEPS: [4, 8, 12]
 SAMPLE_LENGTHS: [2, 3, 4, 5]
-# SAMPLE_MODES: [random_interval]
-# SAMPLE_INTERVALS: [3]
+SAMPLE_MODES: [random_interval]
+SAMPLE_INTERVALS: [3]
 
 LR_SCHEDULER: MultiStep
 LR_DROP_RATE: 0.1
 LR_DROP_MILESTONES: [16]
-USE_AMP: True
-AMP_DTYPE: bf16
 
 # -------------训练配置-------------
 TRAIN_HALF: False
@@ -58,13 +52,16 @@ ONLY_TRAIN_DETR: False
 # DATASET_VERSION: OnePic
 NUM_WORKERS: 4
 DATASET_TYPE: 3JPG # NPY
-
+USE_AMP: True
+AMP_DTYPE: bf16
 
 # -------------模型配置-------------
 ENCODER_SPECTRAL: True
 EDGE_SWAP: True
 STEM: conv3d_se_v4
-MEMOTR_VERSION: '20260511_nodecode'
+MEMOTR_VERSION: '20260511'
+USE_Q_SPEC: True
+Q_SPEC_LAMBDA: 0.1
 TIMING_SYNC_CUDA: False
 TIMING_LOG_INTERVAL: 10
 
@@ -92,19 +89,19 @@ LOSS_NLL_CONFIG:
 LOSS_SCEM_POOL_DIV: 1
 LOSS_SCEM_GAMMA_COVER: 1
 LOSS_LABEL_TYPE: sigmoid_focal_loss
-LOSS_WEIGHT_FOCAL: 3
+LOSS_WEIGHT_FOCAL: 5
 LOSS_WEIGHT_GIOU: 2
-MATCH_COST_CLASS: 3
+MATCH_COST_CLASS: 5
 MATCH_COST_BBOX: 5
 MATCH_COST_GIOU: 2
 
 # -------------CHECKPOINT配置（共 20 epoch）-------------
-CHECKPOINT_EVERY_N_EPOCHS: 5
+CHECKPOINT_EVERY_N_EPOCHS: 4
 CHECKPOINT_TAIL_EPOCHS: 3
 
 # EVALUATE
 # 每 4 个 epoch 评估一次；<=0 表示关闭间隔评估
-EVALUATE_EVERY_N_EPOCHS: 5
+EVALUATE_EVERY_N_EPOCHS: 4
 # 最后 3 个 epoch 每个都评估（16–18）
 EVALUATE_TAIL_EPOCHS: 3
 EVALUATE_FORCE_EPOCHS: []
@@ -112,6 +109,6 @@ EVALUATE_FORCE_EPOCHS: []
 
 
 
-# python main.py --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260511-nodecode-2-resume.yaml
+# python main.py --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260511-3.yaml
 # 多卡
-# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29502 main.py --use-distributed --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260511-nodecode-2-resume.yaml
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260511-3.yaml

@@ -36,6 +36,8 @@ ANN_FILE_TEMPLATES = {
     "01": "instances_01_{split}2017.json",
     "plain": "instances_{split}2017.json",
 }
+# 训练/推理 submit 仍按 00/ 帧序；01 模式用 01 JSON 的帧映射，磁盘编号与 00 一致
+SUBMIT_FRAME_IMAGE_SUBDIR = "00"
 
 
 def xywh_to_xyxy(x: float, y: float, w: float, h: float) -> list[float]:
@@ -86,8 +88,14 @@ def load_coco_annotations(
     frame_file_ids: dict[str, dict[int, int]] = defaultdict(dict)
     skipped = 0
 
+    ann_mode = ann_mode.lower()
+    if ann_mode in ("00", "01"):
+        channel_marker = f"/{ann_mode}/"
+    else:
+        channel_marker = f"/{SUBMIT_FRAME_IMAGE_SUBDIR}/"
+
     for img in data["images"]:
-        if "/00/" not in img["file_name"]:
+        if channel_marker not in img["file_name"]:
             continue
         scene = parse_scene_from_file_name(img["file_name"])
         mot_frame_id = parse_frame_id(img)
@@ -101,6 +109,9 @@ def load_coco_annotations(
             if img is None:
                 skipped += 1
                 continue
+
+        if ann_mode in ("00", "01") and channel_marker not in img["file_name"]:
+            continue
 
         scene = parse_scene_from_file_name(img["file_name"])
         frame_id = parse_frame_id(img)
