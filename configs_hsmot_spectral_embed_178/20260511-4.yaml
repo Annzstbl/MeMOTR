@@ -1,0 +1,136 @@
+PROJECT: "20260511-4，基于20260511-1，IoU=0.2，两段5+20epoch，SCEM梯度路由=conservative"
+
+AVAILABLE_GPUS: "0,1"
+
+PARENT_CONFIG: ./default.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-4-178
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-4-178
+
+
+#新增
+TRACK_IOU_ADAPTIVE: False
+TRACK_IOU_THRESH: 0.2
+
+
+##不变
+
+# checkpoint
+USE_CHECKPOINT: True
+DYNAMIC_USE_CHECKPOINT_THRESHOLD: 5
+CHECKPOINT_LEVEL: 1         # 1： encoder  2: encoder+decoder  3: encoder+decoder+backbone
+
+# 最佳transform
+TRANSFORMS_CONFIG:
+  CROP_SIZE:
+    - 800
+    - 1200
+  FLIP_RATIO: 0.5
+  RESIZE:
+    - 880
+    - 960
+    - 1040
+    - 1120
+    - 1200
+    - 1280
+
+# === Stage 1 (DETR pretrain) ===
+# 当 STAGE1.ENABLE=True 时启用两段训练：
+#  - 阶段 1 用此块字段覆盖 yaml 顶层，输出到 OUTPUTS_DIR/stage1_detr/
+#  - 阶段 2 用 yaml 顶层字段，自动 PRETRAINED_MODEL=阶段1/last.pth, RESUME=null
+#    输出到 OUTPUTS_DIR/stage2_mot/
+STAGE1:
+  ENABLE: True
+  EPOCHS: 5
+  ONLY_TRAIN_DETR: True
+  BATCH_SIZE: 2
+  SAMPLE_STEPS: []
+  SAMPLE_LENGTHS: [1]
+  SAMPLE_INTERVALS: [1]
+  LR_DROP_MILESTONES: [4]
+  LR_DROP_RATE: 0.1
+  # 阶段 1 仅 2 epoch：每轮评估 + 末 2 epoch 全评估
+  EVALUATE_EVERY_N_EPOCHS: 2
+  EVALUATE_TAIL_EPOCHS: 2
+  CHECKPOINT_EVERY_N_EPOCHS: 2
+  CHECKPOINT_TAIL_EPOCHS: 2
+
+# === Stage 2 (MOT finetune) === 直接复用以下 yaml 顶层字段
+EPOCHS: 18
+SAMPLE_STEPS: [4, 8, 12]
+SAMPLE_LENGTHS: [2, 3, 4, 5]
+SAMPLE_MODES: [random_interval]
+SAMPLE_INTERVALS: [3]
+CLIP_BEGIN_STRIDE: [2, 2, 3, 4]
+
+LR_SCHEDULER: MultiStep
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [16]
+
+# -------------训练配置-------------
+TRAIN_HALF: False
+ONLY_TRAIN_DETR: False
+# DATASET_VERSION: OnePic
+NUM_WORKERS: 4
+DATASET_TYPE: 3JPG # NPY
+
+USE_AMP: True
+AMP_DTYPE: bf16   # bf16 | fp16
+
+# -------------模型配置-------------
+ENCODER_SPECTRAL: True
+EDGE_SWAP: True
+STEM: conv3d_se_v4
+MEMOTR_VERSION: '20260511'
+USE_Q_SPEC: True
+Q_SPEC_LAMBDA: 0.1
+TIMING_SYNC_CUDA: False
+TIMING_LOG_INTERVAL: 10
+
+# -------------SCEM配置-------------
+SCEM:
+  ENABLE: True
+  USE_GT: False
+  PRIOR_MODE: gate
+  USE_SPECTRAL_PI: True
+  SPECTRAL_DATABASE_NUM: 32
+  SPECTRAL_TYPE: "pi"
+  # 梯度路由：conservative | grad_scaled（见 model_20260511/SCEM.py）
+  GRAD_MODE: conservative
+
+# -------------LOSS配置-------------
+LOSS_SCEM_NLL: 1
+LOSS_SCEM_BCE: 1
+LOSS_SCEM_DICE: 0
+LOSS_NLL_CONFIG:
+  TYPE: focal # focal or mean
+  ALPHA_POS: 1.0
+  ALPHA_NEG: 0.1
+  GAMMA_POS: 2.0
+  GAMMA_NEG: 0.0
+LOSS_SCEM_POOL_DIV: 1
+LOSS_SCEM_GAMMA_COVER: 1
+LOSS_LABEL_TYPE: sigmoid_focal_loss
+LOSS_WEIGHT_FOCAL: 5
+LOSS_WEIGHT_GIOU: 2
+LOSS_WEIGHT_L1: 5
+MATCH_COST_CLASS: 5
+MATCH_COST_BBOX: 5
+MATCH_COST_GIOU: 2
+
+# -------------CHECKPOINT配置（Stage 2，共 18 epoch）-------------
+CHECKPOINT_EVERY_N_EPOCHS: 4
+CHECKPOINT_TAIL_EPOCHS: 3
+
+# EVALUATE（Stage 2）
+# 每 3 个 epoch 评估一次；<=0 表示关闭间隔评估
+EVALUATE_EVERY_N_EPOCHS: 4
+# 最后 3 个 epoch 每个都评估（16–18）
+EVALUATE_TAIL_EPOCHS: 3
+EVALUATE_FORCE_EPOCHS: []
+
+ACCUMULATION_STEPS: 2
+
+
+# python main.py --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_hsmot_spectral_embed_178/20260511-4.yaml
+# 多卡
+# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data1/users/litianhao01/hsmot/MeMOTR/configs_hsmot_spectral_embed_178/20260511-4.yaml

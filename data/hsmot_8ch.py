@@ -8,6 +8,7 @@ import data.transforms as T
 # from typing import List
 # from torch.utils.data import Dataset
 from .mot import MOTDataset
+from .utils import resolve_stage_scalar
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
@@ -43,11 +44,13 @@ class hsmot_8ch(MOTDataset):
         self.sample_intervals: list = config["SAMPLE_INTERVALS"]
         self.sample_modes: list = config["SAMPLE_MODES"]
         self.sample_lengths: list = config["SAMPLE_LENGTHS"]
+        self.clip_begin_strides = config.get("CLIP_BEGIN_STRIDE", 1)
         self.sample_stage = None
         self.sample_begin_frames = None
         self.sample_length = None
         self.sample_mode = None
         self.sample_interval = None
+        self.clip_begin_stride = 1
         self.sample_vid_tmax = None
 
         self.npy2rgb = config["NPY2RGB"]
@@ -188,11 +191,14 @@ class hsmot_8ch(MOTDataset):
         self.sample_length = self.sample_lengths[min(len(self.sample_lengths) - 1, self.sample_stage)]
         self.sample_mode = self.sample_modes[min(len(self.sample_modes) - 1, self.sample_stage)]
         self.sample_interval = self.sample_intervals[min(len(self.sample_intervals) - 1, self.sample_stage)]
+        self.clip_begin_stride = max(
+            1, resolve_stage_scalar(self.clip_begin_strides, self.sample_stage, key="CLIP_BEGIN_STRIDE")
+        )
         for vid in self.vid_idx.keys():
             t_min = min(self.labels_full[vid].keys())
             t_max = self.get_vid_tmax(vid)
             self.sample_vid_tmax[vid] = t_max
-            for t in range(t_min, t_max - (self.sample_length - 1) + 1):
+            for t in range(t_min, t_max - (self.sample_length - 1) + 1, self.clip_begin_stride):
                 self.sample_begin_frames.append((vid, t))
 
         return
