@@ -29,6 +29,19 @@ python debug/20260526/test2.py \
   --vis-cross-attn \
   --save-maps none
 
+CUDA_VISIBLE_DEVICES=0 \
+python debug/20260526/test3.py \
+  --train-config 20260511-2.yaml \
+  --checkpoint last.pth \
+  --seq data36-4 \
+  --end-frames 30 \
+  --save-last-n-frames 0 \
+  --vis-track-id 3 \
+  --vis-cross-attn \
+  --vis-track-spectral \
+  --save-maps none
+
+
 SE 逐像素统计示例（跨 n 条序列、所有帧，统计 stem SE 8 通道 mean/var）：
 conda activate hsmot
 cd /data1/users/litianhao01/hsmot/MeMOTR
@@ -50,6 +63,17 @@ python debug/20260526/test3.py \
   - se_all_mean_std_grid.png         8 通道可视化（可选 --se-save-vis）
   加 --se-per-seq 可额外保存每条序列单独的统计
   加 --se-apply-sigmoid 可对 sig_raw 做 sigmoid 后再统计
+
+Track ID 预览（先确认要画哪个 id）：
+CUDA_VISIBLE_DEVICES=0 \
+python debug/20260526/test3.py \
+  --train-config 20260511-2.yaml \
+  --checkpoint last.pth \
+  --seq data36-4 \
+  --end-frames 5 \
+  --save-maps none \
+  --vis-track-preview \
+  --vis-track-preview-n 5
 """
 
 import os
@@ -58,6 +82,7 @@ import argparse
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -82,6 +107,10 @@ from utils.nested_tensor import tensor_list_to_nested_tensor
 from utils.GMC import compute_gmc_sequence
 from structures.track_instances import TrackInstances
 from data.seq_dataset import SeqDataset
+from hsmot.datasets.pipelines.channel import rotate_norm_boxes_to_boxes
+from hsmot.mmlab.hs_mmrotate import obb2poly
+from hsmot.mmlab.hs_rectmot import denormalize_cxcywh
+from utils.box_ops import box_cxcywh_to_xyxy
 
 SPECTRAL_BAND_CENTERS_NM = [422.5, 487.5, 550.0, 602.5, 660.0, 725.0, 785.0, 887.2]
 
@@ -365,6 +394,98 @@ def _resolve_track_vis_out_dir(config_root: str, seq: str, track_id: int) -> str
     return os.path.join(config_root, "track", seq, f"id{track_id}")
 
 
+def _resolve_track_preview_out_dir(config_root: str, seq: str) -> str:
+    return os.path.join(config_root, "track_preview", seq)
+
+
+def _color_by_track_id(track_id: int) -> Tuple[int, int, int]:
+    hue = int(180 * (track_id % 100) / 100)
+    hsv = np.uint8([[[hue, 220, 220]]])
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0][0]
+    return tuple(int(x) for x in bgr)
+
+
+def _ori_to_vis_rgb(ori_image: np.ndarray) -> np.ndarray:
+    vis = ori_image.copy()
+    if vis.dtype != np.uint8:
+        vis = np.clip(vis, 0, 255).astype(np.uint8)
+    c = vis.shape[2]
+    if c == 8:
+        vis = vis[:, :, [4, 2, 1]]
+    elif c >= 3:
+        vis = vis[:, :, :3]
+    else:
+        vis = cv2.cvtColor(vis, cv2.COLOR_GRAY2BGR)
+    return vis
+
+
+def _draw_track_id_label(
+    img: np.ndarray,
+    text: str,
+    anchor: Tuple[int, int],
+    color: Tuple[int, int, int],
+    font_scale: float = 0.55,
+    thickness: int = 1,
+) -> None:
+    x, y = anchor
+    y = max(16, y)
+    cv2.putText(
+        img, text, (x, y - 2), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness, cv2.LINE_AA
+    )
+
+
+def _save_track_preview_frame(
+    ori_image: np.ndarray,
+    tracks: TrackInstances,
+    frame_num: int,
+    seq: str,
+    out_dir: str,
+    rect_bbox: bool,
+    track_score_thresh: float,
+) -> str:
+    eff_h, eff_w = int(ori_image.shape[0]), int(ori_image.shape[1])
+    vis = np.ascontiguousarray(_ori_to_vis_rgb(ori_image))
+
+    active = 0
+    for i in range(len(tracks)):
+        obj_id = int(tracks.ids[i].item())
+        if obj_id < 0:
+            continue
+        score = float(torch.max(tracks.scores[i]).item())
+        if score < track_score_thresh:
+            continue
+
+        color = _color_by_track_id(obj_id)
+        label = str(obj_id)
+
+        if rect_bbox:
+            box = denormalize_cxcywh(tracks.boxes[i : i + 1].cpu(), (eff_h, eff_w))
+            x1, y1, x2, y2 = box_cxcywh_to_xyxy(box)[0].tolist()
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            cv2.rectangle(vis, (x1, y1), (x2, y2), color, 1)
+            _draw_track_id_label(vis, label, (x1, y1), color)
+        else:
+            box_xywha = rotate_norm_boxes_to_boxes(
+                tracks.boxes[i : i + 1].cpu(), (eff_h, eff_w), version="le135"
+            )
+            poly = obb2poly(box_xywha)[0].detach().cpu().numpy().reshape(-1, 2).astype(np.int32)
+            cv2.polylines(vis, [poly.reshape(-1, 1, 2)], isClosed=True, color=color, thickness=1)
+            anchor = (int(poly[0, 0]), int(poly[0, 1]))
+            _draw_track_id_label(vis, label, anchor, color)
+        active += 1
+
+    frame_tag = f"frame{frame_num:04d}"
+    header = f"{seq} {frame_tag}  active_tracks={active}"
+    cv2.putText(
+        vis, header, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA
+    )
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{seq}__{frame_tag}__all_track_ids.jpg")
+    cv2.imwrite(out_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+    return out_path
+
+
 def _init_track_instances_static(train_config: dict, model: nn.Module) -> None:
     rect_bbox = is_rect_memotr_version(train_config.get("MEMOTR_VERSION", ""))
     TrackInstances.set_static_properties(
@@ -513,6 +634,10 @@ def run_forward_sequential(
     vis_track_spectral: bool = False,
     vis_cross_attn: bool = False,
     track_vis_out_dir: Optional[str] = None,
+    vis_track_preview: bool = False,
+    vis_track_preview_n: int = 5,
+    track_preview_out_dir: Optional[str] = None,
+    rect_bbox: bool = False,
     se_hook: Optional[SECaptureHook] = None,
     se_accumulators: Optional[List[SEStatsAccumulator]] = None,
     se_apply_sigmoid: bool = False,
@@ -586,7 +711,21 @@ def run_forward_sequential(
     saved_meta: List[Dict[str, Any]] = []
     prev_frame = None
     track_vis_enabled = vis_track_id is not None and (vis_track_spectral or vis_cross_attn)
+    preview_end_frame = min(actual_end_frame, start_frame + max(vis_track_preview_n, 0) - 1)
+    preview_frames = (
+        set(range(start_frame, preview_end_frame + 1))
+        if vis_track_preview and vis_track_preview_n > 0
+        else set()
+    )
     spectral_timeline: List[Dict[str, Any]] = []
+    if vis_track_preview:
+        if not track_preview_out_dir:
+            raise ValueError("track_preview_out_dir is required when --vis-track-preview is set.")
+        os.makedirs(track_preview_out_dir, exist_ok=True)
+        print(
+            f"[Info] Track ID preview: frames {start_frame}-{preview_end_frame} "
+            f"({len(preview_frames)} frames), out={track_preview_out_dir}"
+        )
     if track_vis_enabled:
         if not track_vis_out_dir:
             raise ValueError("track_vis_out_dir is required when track visualization is enabled.")
@@ -620,7 +759,7 @@ def run_forward_sequential(
                 else:
                     print(f"[Warn] frame {frame_num}: track id {vis_track_id} not in input tracks, skip track vis")
 
-            image, _ = dataset[dataset_idx][0]
+            image, ori_image = dataset[dataset_idx][0]
             frame = tensor_list_to_nested_tensor([image]).to(device)
 
             gmc = None
@@ -675,6 +814,18 @@ def run_forward_sequential(
 
             previous_tracks, new_tracks = tracker.update(model_outputs=res, tracks=tracks)
             tracks = inner_model.postprocess_single_frame(previous_tracks, new_tracks, None)
+
+            if frame_num in preview_frames:
+                out_path = _save_track_preview_frame(
+                    ori_image=ori_image,
+                    tracks=tracks[0],
+                    frame_num=frame_num,
+                    seq=seq,
+                    out_dir=track_preview_out_dir,
+                    rect_bbox=rect_bbox,
+                    track_score_thresh=tracker.track_score_thresh,
+                )
+                print(f"[Info] Saved track ID preview: {out_path}")
 
             if should_save and isinstance(res, dict):
                 saved_meta.append(_build_frame_meta(frame_num, res))
@@ -750,6 +901,17 @@ def main():
         "--vis-cross-attn",
         action="store_true",
         help="保存 decoder 各层 cross-attention 空间 attn 图（由 model_20260511_figure 内部捕获）。",
+    )
+    parser.add_argument(
+        "--vis-track-preview",
+        action="store_true",
+        help="保存前 N 帧原图叠加全部 active track id，用于挑选 --vis-track-id。",
+    )
+    parser.add_argument(
+        "--vis-track-preview-n",
+        type=int,
+        default=5,
+        help="与 --vis-track-preview 联用，保存前 N 帧（默认 5）。",
     )
     parser.add_argument(
         "--analyze-se",
@@ -867,6 +1029,12 @@ def main():
         if args.vis_track_id is not None:
             track_vis_out_dir = _resolve_track_vis_out_dir(config_root, seq, args.vis_track_id)
 
+        track_preview_out_dir = None
+        if args.vis_track_preview:
+            track_preview_out_dir = _resolve_track_preview_out_dir(config_root, seq)
+
+        rect_bbox = is_rect_memotr_version(train_config.get("MEMOTR_VERSION", ""))
+
         seq_se_acc = SEStatsAccumulator() if args.analyze_se and args.se_per_seq else None
         se_accumulators: List[SEStatsAccumulator] = []
         if global_se_acc is not None:
@@ -892,6 +1060,10 @@ def main():
             vis_track_spectral=args.vis_track_spectral,
             vis_cross_attn=args.vis_cross_attn,
             track_vis_out_dir=track_vis_out_dir,
+            vis_track_preview=args.vis_track_preview,
+            vis_track_preview_n=args.vis_track_preview_n,
+            track_preview_out_dir=track_preview_out_dir,
+            rect_bbox=rect_bbox,
             se_hook=se_hook,
             se_accumulators=se_accumulators or None,
             se_apply_sigmoid=args.se_apply_sigmoid,
