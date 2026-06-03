@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import pandas as pd
 import glob 
 import matplotlib.pyplot as plt
@@ -7,7 +8,20 @@ from collections import defaultdict
 import numpy as np
 
 
-def visualize_validation_metrics(val_root_path, fig_path=None, data_split: str = "test"):
+def _epoch_index_from_val_dir(val_path: str) -> int:
+    name = os.path.basename(val_path.rstrip("/"))
+    m = re.match(r"epoch_(\d+)(?:_gmc)?$", name)
+    if not m:
+        raise ValueError(f"Unrecognized validation dir name: {name}")
+    return int(m.group(1))
+
+
+def visualize_validation_metrics(
+    val_root_path,
+    fig_path=None,
+    data_split: str = "test",
+    epoch_suffix: str | None = None,
+):
     """
     可视化验证指标并找到最佳组合分数
     
@@ -15,6 +29,7 @@ def visualize_validation_metrics(val_root_path, fig_path=None, data_split: str =
         val_root_path: 包含epoch文件夹的根路径
         fig_path: 保存图片的路径，如果为None则使用val_root_path/fig
         data_split: 与 SUBMIT_DATA_SPLIT 一致，例如 test（默认），对应 epoch_*/<split>/eval/
+        epoch_suffix: 仅统计带此后缀的目录，例如 ``"_gmc"`` 对应 ``epoch_17_gmc``
     
     Returns:
         dict: 包含最佳epoch信息的字典，如果未找到则返回None
@@ -24,9 +39,14 @@ def visualize_validation_metrics(val_root_path, fig_path=None, data_split: str =
     
     # 1. 加载验证数据
     val_folder_list = glob.glob(os.path.join(val_root_path, "epoch*"))
-    val_folder_list.sort(key=lambda x: int(x.split("/")[-1].split("_")[-1]))
+    if epoch_suffix:
+        val_folder_list = [
+            p for p in val_folder_list
+            if os.path.basename(p.rstrip("/")).endswith(epoch_suffix)
+        ]
+    val_folder_list.sort(key=_epoch_index_from_val_dir)
     
-    epoch_list = [int(val_path.split("/")[-1].split("_")[-1]) for val_path in val_folder_list]
+    epoch_list = [_epoch_index_from_val_dir(val_path) for val_path in val_folder_list]
     val_matrix = []
     
     for val_path in val_folder_list:

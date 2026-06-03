@@ -1,0 +1,29 @@
+# 20260511-1 权重（99 训练目录）+ model_20260511_gmc 推理；评测产物写到独立目录（不写入 20260511-1-99）
+PARENT_CONFIG: ../configs_hsmot_spectral_embed_99/20260511-1.yaml
+
+PROJECT: "20260511-1 GMC 重新评测 @252（MEMOTR_VERSION=20260511_gmc）"
+
+MODE: submit
+MEMOTR_VERSION: '20260511_gmc'
+
+# 252 数据路径（覆盖 99 配置里的 wangying01 路径）
+DATA_ROOT: /data/users/litianhao01/hsmot/data
+
+# 只读：训练 checkpoint 与 train/config.yaml
+SUBMIT_CHECKPOINT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-1-99/stage2_mot
+# 评测输出根目录（tracker / eval / fig 均在此树下）
+SUBMIT_OUTPUT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-1-gmc-252
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-1-gmc-252
+
+SUBMIT_MODEL: last.pth
+SUBMIT_DATA_SPLIT: test
+SUBMIT_THREADS: 4
+AVAILABLE_GPUS: "0,1"
+
+# 单 checkpoint：
+# python main.py --config-path configs_hsmot_spectral_embed_252/20260511-1-gmc-submit.yaml
+#
+# 批量 submit + TrackEval（产物：SUBMIT_OUTPUT_DIR/epoch_<N>/test/）：
+# python scripts/batch_submit_eval_hsmot_gmc_ckpts.py \
+#   --config-path configs_hsmot_spectral_embed_252/20260511-1-gmc-submit.yaml \
+#   --available-gpus 0,1 --submit-threads 4 --last-epoch 18

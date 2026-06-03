@@ -1039,30 +1039,62 @@ def _run_submit_pipeline(
     )
 
 
+_SUBMIT_TRAIN_CONFIG_OVERLAY_KEYS = ("MEMOTR_VERSION",)
+
+
+def resolve_submit_checkpoint_and_output(config: dict) -> tuple[str, str]:
+    """
+    Resolve checkpoint root (weights + train/config.yaml) and output root (tracker/eval).
+
+    When SUBMIT_CHECKPOINT_DIR is set, checkpoints are read there and results are written
+    under SUBMIT_OUTPUT_DIR (or SUBMIT_DIR if output dir is omitted).
+    """
+    prefer_stage = str(config.get("SUBMIT_STAGE_PREFER", "stage2")).lower()
+    checkpoint_base = config.get("SUBMIT_CHECKPOINT_DIR") or config["SUBMIT_DIR"]
+    checkpoint_root = resolve_two_stage_dir(checkpoint_base, prefer=prefer_stage)
+
+    output_base = config.get("SUBMIT_OUTPUT_DIR") or config["SUBMIT_DIR"]
+    if output_base is None:
+        output_root = checkpoint_root
+    else:
+        output_root = path.abspath(output_base)
+        os.makedirs(output_root, exist_ok=True)
+    return checkpoint_root, output_root
+
+
+def _overlay_submit_train_config(train_config: dict, config: dict) -> None:
+    """Allow standalone submit yaml to override model fields saved in train/config.yaml."""
+    for key in _SUBMIT_TRAIN_CONFIG_OVERLAY_KEYS:
+        if key in config and config[key] is not None:
+            train_config[key] = config[key]
+
+
 def submit(config: dict):
     assert config["SUBMIT_DIR"] is not None, f"'--submit-dir' must not be None for submit process."
     assert config["SUBMIT_MODEL"] is not None, f"'--submit-model' must not be None for submit process."
     assert config["SUBMIT_DATA_SPLIT"] is not None, f"'--submit-data-split' must not be None for submit process."
     # 两阶段训练 fallback：若顶层 SUBMIT_DIR 无 train/config.yaml，则自动指向 stage2_mot/stage1_detr。
     # 用 yaml 顶层可选字段 SUBMIT_STAGE_PREFER 控制（默认 "stage2"），命令行也可直接 --submit-dir 指明。
-    prefer_stage = str(config.get("SUBMIT_STAGE_PREFER", "stage2")).lower()
-    config["SUBMIT_DIR"] = resolve_two_stage_dir(config["SUBMIT_DIR"], prefer=prefer_stage)
+    checkpoint_root, output_root = resolve_submit_checkpoint_and_output(config)
+    config["SUBMIT_CHECKPOINT_DIR"] = checkpoint_root
+    config["SUBMIT_OUTPUT_DIR"] = output_root
 
-    submit_logger = Logger(logdir=os.path.join(config["SUBMIT_DIR"], config["SUBMIT_DATA_SPLIT"]), only_main=True)
+    submit_logger = Logger(logdir=os.path.join(output_root, config["SUBMIT_DATA_SPLIT"]), only_main=True)
     submit_logger.show(head="Configs:", log=config)
     submit_logger.write(log=config, filename="config.yaml", mode="w")
 
-    train_config = load_train_config(path=path.join(config["SUBMIT_DIR"], "train/config.yaml"))
+    train_config = load_train_config(path=path.join(checkpoint_root, "train/config.yaml"))
+    _overlay_submit_train_config(train_config=train_config, config=config)
 
     dataset_name = train_config["DATASET"]
     config["DATASET"] = dataset_name
     dataset_split = config["SUBMIT_DATA_SPLIT"]
-    outputs_dir = path.join(config["SUBMIT_DIR"], dataset_split)
+    outputs_dir = path.join(output_root, dataset_split)
     dataset_type = config.get("DATASET_TYPE", train_config.get("DATASET_TYPE", None))
     use_scem_gt = config.get("SCEM", {}).get("USE_GT", False)
     dataset_dir = train_config.get("DATASET_DIR", "VT-Tiny-MOT")
     dataset_version = config.get("DATASET_VERSION", train_config.get("DATASET_VERSION"))
-    checkpoint_path = path.join(config["SUBMIT_DIR"], config["SUBMIT_MODEL"])
+    checkpoint_path = path.join(checkpoint_root, config["SUBMIT_MODEL"])
 
     data_split_dir = resolve_submit_split_dir(
         data_root=config["DATA_ROOT"],

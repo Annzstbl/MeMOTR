@@ -26,6 +26,11 @@ def parse_option():
 
     # Only For **Result Submit Process**:
     parser.add_argument("--submit-dir", type=str)
+    parser.add_argument(
+        "--submit-output-dir",
+        type=str,
+        help="Override SUBMIT_OUTPUT_DIR (tracker/eval output root; batch script uses this).",
+    )
     parser.add_argument("--submit-model", type=str)
     parser.add_argument("--submit-data-split", type=str)
     parser.add_argument("--submit-threads", type=int)

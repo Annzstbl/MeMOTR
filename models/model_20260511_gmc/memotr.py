@@ -1,0 +1,508 @@
+import math
+from typing import List, Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+
+from hsmot.datasets.pipelines.channel import HeatmapFromRotateGt
+from hsmot.datasets.pipelines.channel import rotate_boxes_to_norm_boxes, rotate_norm_boxes_to_boxes
+from structures.track_instances import TrackInstances
+from utils.GMC import compensate_rotated_boxes
+from utils.nested_tensor import NestedTensor, effective_hw_from_nested_tensor
+from utils.utils import inverse_sigmoid
+
+from ..backbone import BackboneWithPE
+from ..backbone import build as build_backbone_with_pe
+from ..backbone import build_woPe as build_backbone_woPe
+from .deformable_transformer import DeformableTransformer
+from .deformable_transformer import build as build_deformable_transformer
+from ..mlp import MLP
+from ..position_embedding_rope_nd import build as build_rope_pos
+from .query_updater import build as build_query_updater # 本级文件夹
+from .SCEM import build as build_scem
+from ..utils import get_clones, logits_to_scores
+
+
+class MeMOTR(nn.Module):
+    def __init__(self, backbone: BackboneWithPE, transformer: DeformableTransformer,
+                 query_updater: nn.Module,
+                 num_classes: int, n_det_queries: int, n_feature_levels: int,
+                 hidden_dim: int, ffn_dim: int, dropout: float,
+                 scem_module: nn.Module,
+                 aux_loss: bool = True, with_box_refine: bool = True,
+                 use_checkpoint: bool = False, checkpoint_level: int = 2,
+                 use_dab: bool = False, visualize: bool = False):
+        super().__init__()
+
+        self.num_classes = num_classes
+        self.n_det_queries = n_det_queries
+        self.n_feature_levels = n_feature_levels
+        self.hidden_dim = hidden_dim
+        self.ffn_dim = ffn_dim
+        self.dropout = dropout
+        self.aux_loss = aux_loss
+        self.with_box_refine = with_box_refine
+        self.use_checkpoint = use_checkpoint
+        # 三级策略：1=encoder, 2=encoder+decoder, 3=encoder+decoder+backbone
+        self.checkpoint_level = max(1, min(3, int(checkpoint_level)))
+        self.use_dab = use_dab
+        self.visualize = visualize
+        self.use_q_spec = bool(getattr(transformer, "use_q_spec", False))
+
+        self.backbone = backbone
+        self.transformer = transformer
+        self.query_updater = query_updater
+        self.class_embed = nn.Linear(in_features=self.hidden_dim, out_features=num_classes)
+        self.bbox_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=4, num_layers=3)
+        self.angle_embed = MLP(input_dim=self.hidden_dim, hidden_dim=self.hidden_dim, output_dim=1, num_layers=3)
+
+        if self.use_dab:
+            self.det_anchor = nn.Parameter(torch.randn(self.n_det_queries, 5))
+            self.det_query_embed = nn.Parameter(torch.randn(self.n_det_queries, self.hidden_dim))
+        else:
+            self.det_query_embed = nn.Parameter(torch.randn(self.n_det_queries, self.hidden_dim * 2))
+
+        self.scem_module = scem_module
+
+        assert self.n_feature_levels > 1
+        n_backbone_inter_layers = backbone.n_inter_layers()
+        n_backbone_inter_channels = backbone.n_inter_channels()
+        feature_proj_list = []
+        for i in range(n_backbone_inter_layers):
+            feature_proj_list.append(nn.Sequential(
+                nn.Conv2d(in_channels=n_backbone_inter_channels[i], out_channels=self.hidden_dim, kernel_size=1),
+                nn.GroupNorm(num_groups=32, num_channels=self.hidden_dim)
+            ))
+        for _ in range(self.n_feature_levels - n_backbone_inter_layers):
+            feature_proj_list.append(nn.Sequential(
+                nn.Conv2d(in_channels=n_backbone_inter_channels[-1], out_channels=self.hidden_dim,
+                          kernel_size=3, stride=2, padding=1),
+                nn.GroupNorm(num_groups=32, num_channels=self.hidden_dim)
+            ))
+        self.feature_projs = nn.ModuleList(feature_proj_list)
+        for proj in self.feature_projs:
+            nn.init.xavier_uniform_(proj[0].weight, gain=1)
+            nn.init.constant_(proj[0].bias, 0)
+
+        prior_prob = 0.01
+        bias_value = -math.log((1 - prior_prob) / prior_prob)
+        self.class_embed.bias.data = torch.ones(num_classes) * bias_value
+
+        nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
+        nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
+        nn.init.constant_(self.angle_embed.layers[-1].weight.data, 0)
+        nn.init.constant_(self.angle_embed.layers[-1].bias.data, 0)
+
+        if self.with_box_refine:
+            self.class_embed = get_clones(self.class_embed, self.transformer.get_n_dec_layers())
+            self.bbox_embed = get_clones(self.bbox_embed, self.transformer.get_n_dec_layers())
+            self.angle_embed = get_clones(self.angle_embed, self.transformer.get_n_dec_layers())
+            nn.init.constant_(self.bbox_embed[0].layers[-1].bias.data[2:], -2.0)
+            nn.init.constant_(self.angle_embed[0].layers[-1].bias.data, -math.log(3))
+            self.transformer.set_refine_bbox_embed(self.bbox_embed)
+            self.transformer.set_refine_angle_embed(self.angle_embed)
+        else:
+            raise NotImplementedError("Box refine is not implemented yet.")
+
+        self.num_evidence_tokens = [8, 4, 2, 2]
+        self.evidence_token_pos_embed = [nn.Parameter(torch.randn(self.hidden_dim, num + 1)) for num in self.num_evidence_tokens]
+
+    def forward(self, frame: NestedTensor, tracks: List[TrackInstances],
+                debug: bool = False, heatmap: Optional[torch.Tensor] = None,
+                gmc: Optional[torch.Tensor] = None):
+        if self.use_checkpoint and self.checkpoint_level >= 3:
+            feature_tuple = checkpoint(self.backbone, frame, use_reentrant=False)
+        else:
+            feature_tuple = self.backbone(frame)
+
+        pos = None
+        spectral_weights = None
+        features, pos, spectral_weights = feature_tuple
+
+        srcs, masks = [], []
+        for layer, feat in enumerate(features):
+            src, mask = feat.decompose()
+            srcs.append(self.feature_projs[layer](src))
+            masks.append(mask)
+
+        if self.n_feature_levels > len(srcs):
+            srcs_len = len(srcs)
+            for layer in range(srcs_len, self.n_feature_levels):
+                if layer == srcs_len:
+                    src = self.feature_projs[layer](features[-1].tensors)
+                else:
+                    src = self.feature_projs[layer](srcs[-1])
+                mask = frame.masks
+                mask = F.interpolate(mask[None, ...].float(), size=src.shape[-2:])[0].to(torch.bool)
+                if pos is not None:
+                    pos.append(self.backbone.position_embedding(NestedTensor(src, mask)).to(src.device))
+                if spectral_weights is not None:
+                    if self.backbone.weights_version == "v4":
+                        spectral_weights.append(
+                            self.backbone.spectral_embedding(spectral_weights[-1], NestedTensor(src, mask)).to(src.device)
+                        )
+                    else:
+                        spectral_weights.append(
+                            self.backbone.spectral_embedding(spectral_weights[0], NestedTensor(src, mask)).to(src.device)
+                        )
+                srcs.append(src)
+                masks.append(mask)
+
+        # prior_map = self.get_prior_map(tracks=tracks, gmcs=gmc, frame=frame)
+        # spectral_weights 作为第 3 个位置参数传入 specs：forward_hook 的 input 不含 keyword，
+        # 若写 specs=... 则 hook 里只有 (srcs, masks)，不会出现 scem_module.in.2.*。
+        scem_out = self.scem_module(
+            srcs,
+            masks,
+            spectral_weights,
+            # prior_map=prior_map,
+            return_debug=debug,
+        )
+        if len(scem_out) == 5:
+            (srcs, spectral_weights), (evidence_tokens, evidence_tokens_spectral_part), (global_token, global_token_spectral_part), tail, scem_token_debug = scem_out
+        else:
+            (srcs, spectral_weights), (evidence_tokens, evidence_tokens_spectral_part), (global_token, global_token_spectral_part), tail = scem_out
+            scem_token_debug = None
+
+        if len(tail) == 4:
+            gamma, log_mix, spectral_dict, scem_aux_losses = tail
+        else:
+            gamma, log_mix, spectral_dict = tail
+            scem_aux_losses = None
+
+
+        additional_pos_embeds = [p.unsqueeze(0).expand(srcs[0].shape[0], -1, -1).to(srcs[0].device) for p in self.evidence_token_pos_embed]
+        additional_tokens = [torch.cat((evi_token, global_tok.unsqueeze(1)), dim=1) for evi_token, global_tok in zip(evidence_tokens, global_token)]
+        additional_specs = [torch.cat((evi_spec, global_spec.unsqueeze(1)), dim=1) for evi_spec, global_spec in zip(evidence_tokens_spectral_part, global_token_spectral_part)]
+
+        self.apply_gmc_to_track_refs(tracks=tracks, gmc=gmc, frame=frame)
+        reference_points = self.get_reference_points(tracks=tracks).to(srcs[0].device)
+        query_embed = self.get_query_embed(tracks=tracks).to(srcs[0].device)
+        query_mask = self.get_query_mask(tracks=tracks).to(srcs[0].device)
+
+        track_q_spec = None
+        if self.use_q_spec:
+            track_q_spec = self.get_track_q_spec(tracks=tracks).to(srcs[0].device)
+        outputs, init_reference, inter_references, inter_queries, init_q_spec, obs_q_spec = self.transformer(
+            srcs=srcs,
+            masks=masks,
+            pos_embeds=pos,
+            spectral_weights=spectral_weights,
+            query_embed=query_embed,
+            ref_pts=reference_points,
+            query_mask=query_mask,
+            additional_tokens=additional_tokens,
+            additional_specs=additional_specs,
+            additional_pos_embeds=additional_pos_embeds,
+            track_q_spec=track_q_spec,
+        )
+
+        output_classes, output_bboxes = [], []
+        for level in range(outputs.shape[0]):
+            reference = init_reference if level == 0 else inter_references[level - 1]
+            reference = inverse_sigmoid(reference)
+            output_class = self.class_embed[level](outputs[level])
+            bbox_tmp = self.bbox_embed[level](outputs[level])
+            angle_tmp = self.angle_embed[level](outputs[level])
+            bbox_tmp = torch.cat((bbox_tmp, angle_tmp), dim=-1)
+            if reference.shape[-1] == 5:
+                bbox_tmp += reference
+            else:
+                bbox_tmp[..., :2] += reference
+            output_bbox = bbox_tmp.sigmoid()
+            output_classes.append(output_class)
+            output_bboxes.append(output_bbox)
+        output_classes = torch.stack(output_classes, dim=0)
+        output_bboxes = torch.stack(output_bboxes, dim=0)
+
+        decoder_states = self.build_decoder_states(
+            query_in=inter_queries,
+            query_out=outputs,
+            init_reference=init_reference,
+            ref_out=inter_references,
+        )
+
+        # forward 输出说明（便于排查/对齐 criterion 与 runtime_tracker）:
+        # - pred_logits: (B, Q, num_classes)
+        #   最后一层 decoder 分类 logits，Q = Nd + Ntrack_max。
+        # - pred_bboxes: (B, Q, 5)
+        #   最后一层 decoder 旋转框预测（sigmoid 后的归一化坐标）。
+        # - last_ref_pts: (B, Q, 2/5)
+        #   下一帧 track 的 reference points（最后一层 decoder 的输入 ref，inverse_sigmoid 空间）。
+        # - query_mask: (B, Q)
+        #   query 有效掩码：False=有效 query，True=padding query。
+        # - det_query_embed: (Nd, Cq)
+        #   检测 query 的初始 embedding（不含 track queries）。
+        # - init_ref_pts: (B, Q, 2/5)
+        #   decoder 初始 reference points（inverse_sigmoid 空间）。
+        # - decoder_states:
+        #   统一的 decoder 级联语义容器:
+        #   - query_in:  (L, B, Q, C) 每层输入 query
+        #   - query_out: (L, B, Q, C) 每层输出 query
+        #   - ref_in:    (L, B, Q, 2/5) 每层输入 ref（sigmoid 空间）
+        #   - ref_out:   (L, B, Q, 2/5) 每层输出 ref（sigmoid 空间）
+        #
+        # 条件项:
+        # - aux_outputs: List[Dict], len=n_dec_layers-1（self.aux_loss=True）
+        #   每层辅助监督输出（不含最后一层），含 pred_logits/pred_bboxes/query_mask/queries。
+        #   其中 queries 对应该层的输出 query（decoder_states["query_out"][:-1]）。
+        #
+        # - outputs: (B, Q, C)
+        #   最后一层 query 输出（decoder_states["query_out"][-1]，兼容旧接口）。
+        # - spectral_weights: List[(B, C_spec, H_l, W_l)], len=n_feature_levels
+        #   多尺度特征图的光谱权重（供损失/分析使用）。
+        # - scem_gamma: (B, T, K), scem_log_mix: (B, T, K)
+        #   SCEM 混合参数（用于光谱证据建模）。
+        # - scem_aux_losses: Dict[str, Tensor]（若 SCEM 返回）
+        #   SCEM 的辅助损失项。
+        #
+        # debug=True 额外项:
+        # - inter_references: (L, B, Q, 2/5)（兼容字段，等价 decoder_states["ref_out"]）
+        # - inter_queries: (L, B, Q, C)（兼容字段，等价 decoder_states["query_in"]）
+        # - init_reference: (B, Q, 2/5)（sigmoid 空间）
+        # - all_outputs: (L, B, Q, C)（兼容字段，等价 decoder_states["query_out"]）
+        # - scem_token_debug: SCEM 内部 token 调试信息（若存在）
+        res = {
+            "pred_logits": output_classes[-1],
+            "pred_bboxes": output_bboxes[-1],
+            "last_ref_pts": inverse_sigmoid(decoder_states["ref_in"][-1]),
+            "query_mask": query_mask,
+            "det_query_embed": query_embed[0][:self.n_det_queries],
+            "init_ref_pts": inverse_sigmoid(init_reference),
+            "decoder_states": decoder_states,
+        }
+
+        if self.aux_loss:
+            res["aux_outputs"] = self.set_aux_loss(
+                output_classes=output_classes,
+                output_bboxes=output_bboxes,
+                query_mask=query_mask,
+                decoder_states=decoder_states,
+            )
+
+        res["outputs"] = decoder_states["query_out"][-1]
+        res["spectral_weights"] = spectral_weights
+        if init_q_spec is not None:
+            res["init_q_spec"] = init_q_spec # = cat( new det spec, track_spec)
+        if obs_q_spec is not None:
+            res["obs_q_spec"] = obs_q_spec # = 根据这轮预测生成的q_spec
+        if debug:
+            res["inter_references"] = decoder_states["ref_out"]
+            res["inter_queries"] = decoder_states["query_in"]
+            res["init_reference"] = init_reference
+            res["all_outputs"] = decoder_states["query_out"]
+            if scem_token_debug is not None:
+                res["scem_token_debug"] = scem_token_debug
+        res["scem_gamma"] = gamma
+        res["scem_log_mix"] = log_mix
+        if scem_aux_losses is not None:
+            res["scem_aux_losses"] = scem_aux_losses
+        return res
+
+    def enable_checkpoint(self, enable: bool):
+        self.use_checkpoint = enable
+        self.transformer.enable_checkpoint(enable)
+
+    def set_checkpoint_level(self, checkpoint_level: int):
+        self.checkpoint_level = max(1, min(3, int(checkpoint_level)))
+        self.transformer.set_checkpoint_level(self.checkpoint_level)
+
+    @staticmethod
+    def build_decoder_states(query_in: torch.Tensor, query_out: torch.Tensor,
+                             init_reference: torch.Tensor, ref_out: torch.Tensor) -> dict:
+        if query_in.dim() != 4 or query_out.dim() != 4:
+            raise ValueError("query_in/query_out are expected to be 4D tensors: (L, B, Q, C).")
+        if ref_out.dim() != 4 or init_reference.dim() != 3:
+            raise ValueError("ref_out/init_reference shapes are expected as (L, B, Q, R) and (B, Q, R).")
+        if query_in.shape[0] != query_out.shape[0]:
+            raise ValueError(f"query_in/query_out layer count mismatch: {query_in.shape[0]} vs {query_out.shape[0]}.")
+        if ref_out.shape[0] != query_out.shape[0]:
+            raise ValueError(f"ref_out/query_out layer count mismatch: {ref_out.shape[0]} vs {query_out.shape[0]}.")
+        if ref_out.shape[0] < 1:
+            raise ValueError("ref_out must contain at least one decoder layer.")
+
+        # layer_input.ref[0] = init_reference; layer_input.ref[l] = layer_output.ref[l-1] (l>0).
+        ref_in = torch.cat((init_reference.unsqueeze(0), ref_out[:-1]), dim=0)
+        return {
+            "query_in": query_in,
+            "query_out": query_out,
+            "ref_in": ref_in,
+            "ref_out": ref_out,
+        }
+
+    @torch.jit.unused
+    def set_aux_loss(self, output_classes, output_bboxes, query_mask, decoder_states):
+        return [
+            {"pred_logits": a, "pred_bboxes": b, "query_mask": query_mask, "queries": c}
+            for a, b, c in zip(output_classes[:-1], output_bboxes[:-1], decoder_states["query_out"][:-1])
+        ]
+
+    def get_det_reference_points(self) -> torch.Tensor:
+        if self.use_dab:
+            return self.det_anchor
+        return self.transformer.reference_points(self.det_query_embed[:, :self.hidden_dim])
+
+    def apply_gmc_to_track_refs(self, tracks: List[TrackInstances],
+                                gmc: Optional[torch.Tensor], frame: NestedTensor) -> None:
+        """Warp existing track ref_pts with GMC before decoder (inference only)."""
+        if gmc is None or self.training:
+            return
+
+        for b, track in enumerate(tracks):
+            eff_h, eff_w = effective_hw_from_nested_tensor(frame, batch_idx=b)
+            img_shape = (eff_h, eff_w)
+            if len(track) == 0:
+                continue
+            if isinstance(gmc, (list, tuple)):
+                if len(gmc) <= b or gmc[b] is None:
+                    continue
+                gmc_matrix = gmc[b]
+            else:
+                if gmc.shape[0] <= b:
+                    continue
+                gmc_matrix = gmc[b]
+
+            ref_pts = track.ref_pts
+            if ref_pts.shape[-1] != 5:
+                raise ValueError(f"GMC ref update expects 5D ref_pts, got shape {ref_pts.shape}.")
+
+            norm_boxes = ref_pts.sigmoid().detach()
+            boxes = rotate_norm_boxes_to_boxes(norm_boxes, img_shape, version="le135")
+            boxes_np = boxes.cpu().numpy()
+            gmc_matrix_np = gmc_matrix.detach().cpu().numpy() if isinstance(gmc_matrix, torch.Tensor) else gmc_matrix
+            boxes_comp = torch.from_numpy(
+                compensate_rotated_boxes(boxes_np, gmc_matrix_np)
+            ).to(device=ref_pts.device, dtype=ref_pts.dtype)
+            norm_comp = rotate_boxes_to_norm_boxes(boxes_comp, img_shape, version="le135")
+            track.ref_pts = inverse_sigmoid(norm_comp.clamp(1e-4, 1 - 1e-4))
+
+    def get_track_reference_points(self, tracks: List[TrackInstances]) -> torch.Tensor:
+        max_len = max([len(t.ref_pts) for t in tracks])
+        references = torch.zeros((len(tracks), max_len, 5 if self.use_dab else 4))
+        for i in range(len(tracks)):
+            references[i, : len(tracks[i].ref_pts), :] = tracks[i].ref_pts
+        return references
+
+    def get_track_query_embed(self, tracks: List[TrackInstances]) -> torch.Tensor:
+        max_len = max([len(t.query_embed) for t in tracks])
+        query_embed = torch.zeros((len(tracks), max_len, self.hidden_dim if self.use_dab else self.hidden_dim * 2))
+        for i in range(len(tracks)):
+            query_embed[i, : len(tracks[i].query_embed), :] = tracks[i].query_embed
+        return query_embed
+
+    def get_track_q_spec(self, tracks: List[TrackInstances]) -> torch.Tensor:
+        max_len = max([len(t.query_embed) for t in tracks])
+        q_spec = torch.zeros((len(tracks), max_len, self.hidden_dim))
+        for i in range(len(tracks)):
+            if len(tracks[i].query_q_spec) > 0:
+                q_spec[i, : len(tracks[i].query_q_spec), :] = tracks[i].query_q_spec
+        return q_spec
+
+    def get_reference_points(self, tracks: List[TrackInstances]) -> torch.Tensor:
+        det_references = self.get_det_reference_points().repeat(len(tracks), 1, 1)
+        if det_references.shape[-1] == 2:
+            det_references = torch.cat((det_references, torch.zeros_like(det_references, device=det_references.device)), dim=-1)
+        track_references = self.get_track_reference_points(tracks=tracks).to(det_references.device)
+        return torch.cat((det_references, track_references), dim=1)
+
+    def get_prior_map(self, tracks: List[TrackInstances], gmcs: torch.Tensor, frame: NestedTensor) -> torch.Tensor:
+        pad_height, pad_width = frame.tensors.shape[-2:]
+        batch_size = len(tracks)
+        device = frame.tensors.device
+        prior_maps = []
+        for b in range(batch_size):
+            if len(tracks[b]) == 0:
+                prior_maps.append(torch.zeros((pad_height, pad_width), device=device))
+                continue
+            eff_h, eff_w = effective_hw_from_nested_tensor(frame, batch_idx=b)
+            ref_pts = tracks[b].ref_pts
+            logits = tracks[b].logits
+            if ref_pts.shape[-1] == 5:
+                norm_boxes = ref_pts.sigmoid()
+                boxes = norm_boxes.clone()
+                boxes[:, 0] = boxes[:, 0] * eff_w
+                boxes[:, 1] = boxes[:, 1] * eff_h
+                boxes[:, 2] = boxes[:, 2] * eff_w
+                boxes[:, 3] = boxes[:, 3] * eff_h
+                boxes[:, 4] = boxes[:, 4] * math.pi - math.pi / 4
+            else:
+                raise ValueError(f"Unsupported ref_pts shape: {ref_pts.shape}")
+
+            if gmcs is not None and len(gmcs) > b:
+                gmc_matrix = gmcs[b]
+                if gmc_matrix is not None:
+                    boxes_np = boxes.detach().cpu().numpy()
+                    gmc_matrix_np = gmc_matrix.detach().cpu().numpy() if isinstance(gmc_matrix, torch.Tensor) else gmc_matrix
+                    boxes = torch.from_numpy(compensate_rotated_boxes(boxes_np, gmc_matrix_np)).to(device)
+
+            scores = torch.max(logits_to_scores(logits=logits), dim=1).values
+            prior_map = HeatmapFromRotateGt.heatmap_from_rotate_gt_xywha(
+                gt_xywha=boxes, img_shape=(pad_height, pad_width), version="le135", scores=scores,
+                mode="fixed_peak", peak=1.0, reduce="sum", k=5.0
+            )
+            prior_maps.append(prior_map.clamp_(0, 1).detach())
+        return torch.stack(prior_maps, dim=0)
+
+    def get_query_embed(self, tracks: List[TrackInstances]) -> torch.Tensor:
+        det_query_embed = self.det_query_embed.repeat(len(tracks), 1, 1)
+        track_query_embed = self.get_track_query_embed(tracks).to(det_query_embed.device)
+        return torch.cat((det_query_embed, track_query_embed), dim=1)
+
+    def get_query_mask(self, tracks: List[TrackInstances]) -> torch.Tensor:
+        track_max_len = max([len(t.query_embed) for t in tracks])
+        det_query_mask = torch.zeros((len(tracks), self.n_det_queries)).to(torch.bool)
+        track_query_mask = torch.zeros((len(tracks), track_max_len))
+        for i in range(len(tracks)):
+            if len(tracks[i].query_embed) > 0:
+                track_query_mask[i, len(tracks[i].query_embed):] = 1
+        return torch.cat((det_query_mask, track_query_mask.to(torch.bool)), dim=1).to(self.det_query_embed.device)
+
+    def postprocess_single_frame(self, previous_tracks: List[TrackInstances], new_tracks: List[TrackInstances],
+                                 unmatched_dets: Optional[List[TrackInstances]], no_augment: bool = False,
+                                 img_metas=None) -> List[TrackInstances]:
+        return self.query_updater(previous_tracks, new_tracks, unmatched_dets, no_augment, img_metas=img_metas)
+
+
+def build(config: dict) -> MeMOTR:
+    dataset_num_classes = {
+        "DanceTrack": 1,
+        "SportsMOT": 1,
+        "MOT17": 1,
+        "MOT17_SPLIT": 1,
+        "BDD100K": 8,
+        "hsmot_8ch": 8,
+    }
+    assert config["DATASET"] in dataset_num_classes, f"Do not know the class num of {config['DATASET']} dataset."
+    num_classes = dataset_num_classes[config["DATASET"]]
+
+    if config["ROPE_POS"]:
+        backbone = build_backbone_woPe(config=config)
+        rope_pos_module = build_rope_pos(config=config)
+    else:
+        backbone = build_backbone_with_pe(config=config)
+        rope_pos_module = None
+
+    deformable_transformer: DeformableTransformer = build_deformable_transformer(config=config, rope_pos_module=rope_pos_module)
+    query_updater = build_query_updater(config=config)
+    scem = build_scem(config=config["SCEM"])
+
+    return MeMOTR(
+        backbone=backbone,
+        transformer=deformable_transformer,
+        query_updater=query_updater,
+        num_classes=num_classes,
+        n_det_queries=config["NUM_DET_QUERIES"],
+        n_feature_levels=config["NUM_FEATURE_LEVELS"],
+        hidden_dim=config["HIDDEN_DIM"],
+        ffn_dim=config["FFN_DIM"],
+        dropout=config["DROPOUT"],
+        aux_loss=True,
+        with_box_refine=True,
+        use_checkpoint=config["USE_CHECKPOINT"],
+        checkpoint_level=config["CHECKPOINT_LEVEL"],
+        use_dab=config["USE_DAB"],
+        visualize=config["VISUALIZE"],
+        scem_module=scem,
+    )

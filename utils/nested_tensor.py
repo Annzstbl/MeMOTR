@@ -188,3 +188,18 @@ def tensor_list_to_nested_tensor_already_padded_shape(
         effective_img_shape=effective_img_shape,
         padded_img_shape=padded_img_shape
     )
+
+
+def effective_hw_from_nested_tensor(frame: NestedTensor, batch_idx: int = 0) -> tuple[int, int]:
+    """
+    Valid (pre-pad) region size from NestedTensor mask.
+
+    Model box/ref normalization uses this (H, W), not padded tensor spatial size.
+    """
+    mask = frame.masks[batch_idx]
+    eff_h = int((~mask).any(dim=1).sum().item())
+    eff_w = int((~mask).any(dim=0).sum().item())
+    if eff_h <= 0 or eff_w <= 0:
+        eff_h = int(frame.tensors.shape[-2])
+        eff_w = int(frame.tensors.shape[-1])
+    return eff_h, eff_w

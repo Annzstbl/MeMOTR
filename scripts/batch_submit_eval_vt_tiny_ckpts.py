@@ -302,3 +302,6 @@ if __name__ == "__main__":
 #   --available-gpus 0,1 \
 #   --submit-threads 4 \
 #   --force
+
+# python scripts/batch_submit_eval_vt_tiny_ckpts.py --submit-dir /data4/litianhao/hsmot/memotr/vt_tiny/vt_tiny_20260511-3-178/stage2_mot --config-path /data/users/litianhao01/hsmot/MeMOTR/configs_vt_tiny_178/20260511-3.yaml --data-root /data/users/litianhao01/hsmot/data --available-gpus 0,1 --submit-threads 4
+# python scripts/batch_submit_eval_vt_tiny_ckpts.py --submit-dir /data4/litianhao/hsmot/memotr/vt_tiny/20260511-4-99/stage2_mot --config-path /data/users/litianhao01/hsmot/MeMOTR/configs_vt_tiny_99/20260511-4.yaml --data-root /data/users/litianhao01/hsmot/data --available-gpus 2,3 --submit-threads 4

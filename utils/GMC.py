@@ -3,6 +3,8 @@ import numpy as np
 import torch
 from typing import Iterable, List, Optional
 
+from hsmot.mmlab.hs_mmrotate import obb2poly_np, poly2obb_np
+
 
 def _build_detection_mask(height: int, width: int, detections, downscale: int) -> np.ndarray:
     """Create a mask that suppresses regions covered by detections."""
@@ -175,13 +177,23 @@ def compute_gmc_transform(frame_t0: np.ndarray,
     return gmcs[-1]
 
 
-def compensate_rotated_boxes(boxes: np.ndarray, gmc_matrix: np.ndarray) -> np.ndarray:
+def _warp_poly8(poly8: np.ndarray, gmc_matrix: np.ndarray) -> np.ndarray:
+    pts = np.asarray(poly8[:8], dtype=np.float32).reshape(4, 2)
+    pts_h = np.hstack([pts, np.ones((4, 1), dtype=np.float32)])
+    return (gmc_matrix @ pts_h.T).T.reshape(-1)
+
+
+def compensate_rotated_boxes(boxes: np.ndarray,
+                             gmc_matrix: np.ndarray,
+                             version: str = "le135") -> np.ndarray:
     """
     Apply GMC affine matrix to rotated bounding boxes.
 
     Args:
-        boxes: Array of shape (N, 5) formatted as [cx, cy, w, h, angle_deg].
-        gmc_matrix: 2x3 affine matrix.
+        boxes: (N, 5) as [cx, cy, w, h, angle] in pixel coords; angle is radians
+            for ``le135`` / ``le90`` (same convention as ``rotate_norm_boxes_to_boxes``).
+        gmc_matrix: 2x3 affine matrix (warps previous frame coords to current).
+        version: OBB angle convention, default ``le135``.
 
     Returns:
         Transformed boxes with the same format.
@@ -192,15 +204,21 @@ def compensate_rotated_boxes(boxes: np.ndarray, gmc_matrix: np.ndarray) -> np.nd
     if boxes.ndim == 1:
         boxes = boxes[None, :]
 
+    boxes_scored = np.concatenate(
+        [boxes, np.ones((boxes.shape[0], 1), dtype=np.float32)], axis=1
+    )
+    polys = obb2poly_np(boxes_scored, version=version)
+    if polys.ndim == 1:
+        polys = polys.reshape(1, -1)
+
     transformed = []
-    for box in boxes:
-        rect = ((float(box[0]), float(box[1])), (float(box[2]), float(box[3])), float(box[4]))
-        pts = cv2.boxPoints(rect)
-        pts_h = np.hstack([pts, np.ones((4, 1), dtype=np.float32)])
-        new_pts = (gmc_matrix @ pts_h.T).T
-        new_rect = cv2.minAreaRect(new_pts.astype(np.float32))
-        (cx, cy), (w, h), angle = new_rect
-        transformed.append([cx, cy, w, h, angle])
+    for i, box in enumerate(boxes):
+        warped_poly = _warp_poly8(polys[i], gmc_matrix)
+        obb = poly2obb_np(warped_poly, version=version)
+        if obb is None:
+            transformed.append(box.tolist())
+        else:
+            transformed.append(list(obb))
     return np.asarray(transformed, dtype=np.float32)
 
 

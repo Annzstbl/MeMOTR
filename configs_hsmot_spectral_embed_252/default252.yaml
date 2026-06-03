@@ -1,0 +1,8 @@
+PARENT_CONFIG: ../configs_hsmot_spectral_embed_197/default.yaml
+
+# 252 服务器默认路径（训练 / 评测输出）
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug252
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug252
+
+DATA_ROOT: /data/users/litianhao01/hsmot/data
+PRETRAINED_MODEL: /data/users/litianhao01/data/dab_deformable_detr_convhsi.pth
