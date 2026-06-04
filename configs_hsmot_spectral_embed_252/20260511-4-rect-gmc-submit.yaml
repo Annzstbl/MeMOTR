@@ -1,0 +1,24 @@
+# 20260511-4（vt_tiny_99）权重 + model_20260511_rect_gmc；评测产物独立目录 @252
+PARENT_CONFIG: ../configs_vt_tiny_99/20260511-4.yaml
+
+PROJECT: "20260511-4 VT-Tiny rect GMC 重新评测 @252（MEMOTR_VERSION=20260511_rect_gmc, MISS_TOLERANCE=5）"
+
+MODE: submit
+MEMOTR_VERSION: '20260511_rect_gmc'
+MISS_TOLERANCE: 5
+
+DATA_ROOT: /data/users/litianhao01/hsmot/data
+
+SUBMIT_CHECKPOINT_DIR: /data4/litianhao/hsmot/memotr/vt_tiny/20260511-4-99/stage2_mot
+SUBMIT_OUTPUT_DIR: /data4/litianhao/hsmot/memotr/vt_tiny/20260511-4-rect-gmc-mt5-252
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/vt_tiny/20260511-4-rect-gmc-mt5-252
+
+SUBMIT_MODEL: last.pth
+SUBMIT_DATA_SPLIT: test
+SUBMIT_THREADS: 4
+AVAILABLE_GPUS: "0,1"
+
+# python scripts/batch_submit_eval_hsmot_gmc_ckpts.py \
+#   --config-path configs_hsmot_spectral_embed_252/20260511-4-rect-gmc-submit.yaml \
+#   --ckpts last.pth --miss-tolerance 5 --force \
+#   --available-gpus 0,1 --submit-threads 4 --last-epoch 18

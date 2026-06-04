@@ -183,6 +183,38 @@ def _warp_poly8(poly8: np.ndarray, gmc_matrix: np.ndarray) -> np.ndarray:
     return (gmc_matrix @ pts_h.T).T.reshape(-1)
 
 
+def compensate_rect_boxes(boxes: np.ndarray, gmc_matrix: np.ndarray) -> np.ndarray:
+    """
+    Apply GMC affine matrix to axis-aligned boxes in pixel cxcywh.
+
+    Args:
+        boxes: (N, 4) as [cx, cy, w, h] in pixel coordinates.
+        gmc_matrix: 2x3 affine matrix (warps previous frame coords to current).
+
+    Returns:
+        Transformed boxes with the same format.
+    """
+    if boxes is None or len(boxes) == 0:
+        return boxes
+    boxes = np.asarray(boxes, dtype=np.float32)
+    if boxes.ndim == 1:
+        boxes = boxes[None, :]
+
+    out = []
+    for box in boxes:
+        cx, cy, w, h = box
+        x1, y1 = cx - 0.5 * w, cy - 0.5 * h
+        x2, y2 = cx + 0.5 * w, cy + 0.5 * h
+        corners = np.array(
+            [[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float32,
+        )
+        warped = _warp_poly8(corners.reshape(-1), gmc_matrix).reshape(4, 2)
+        wx1, wy1 = warped[:, 0].min(), warped[:, 1].min()
+        wx2, wy2 = warped[:, 0].max(), warped[:, 1].max()
+        out.append([(wx1 + wx2) * 0.5, (wy1 + wy2) * 0.5, wx2 - wx1, wy2 - wy1])
+    return np.asarray(out, dtype=np.float32)
+
+
 def compensate_rotated_boxes(boxes: np.ndarray,
                              gmc_matrix: np.ndarray,
                              version: str = "le135") -> np.ndarray:

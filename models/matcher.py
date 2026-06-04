@@ -28,7 +28,7 @@ import math
 import itertools
 from utils.edge_swap import EdgeSwap
 
-RECT_MEMOTR_VERSIONS = {"20260511_rect"}
+RECT_MEMOTR_VERSIONS = {"20260511_rect", "20260511_rect_gmc"}
 
 
 def is_rect_memotr_version(version: str) -> bool:

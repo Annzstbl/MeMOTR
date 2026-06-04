@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""对 stage2_mot checkpoint 用 model_20260511_gmc 重新 submit + hsmot TrackEval。
+"""对 stage2_mot checkpoint 用 GMC 模型重新 submit + TrackEval。
 
 支持 ``SUBMIT_CHECKPOINT_DIR``（权重）与 ``SUBMIT_OUTPUT_DIR``（评测产物）分离。
 默认产物：``<SUBMIT_OUTPUT_DIR>/epoch_<N>/test/``，不写入训练目录。
+
+- HSMOT：``eval/all_cls_summary.csv``
+- VT-Tiny：``eval_00``、``eval_01`` 各跑一次（与 ``batch_submit_eval_vt_tiny_ckpts.py`` 一致）
 """
 from __future__ import annotations
 
@@ -28,10 +31,20 @@ def _epoch_from_ckpt(name: str, default_last_epoch: int) -> int:
     return int(m.group(1))
 
 
-def _ckpt_done(epoch_dir: str, split: str) -> bool:
+def _ckpt_done(epoch_dir: str, split: str, dataset_name: str) -> bool:
+    if _is_vt_tiny_dataset(dataset_name):
+        split_dir = os.path.join(epoch_dir, split)
+        return (
+            os.path.isfile(os.path.join(split_dir, "eval_00", "all_cls_summary.csv"))
+            and os.path.isfile(os.path.join(split_dir, "eval_01", "all_cls_summary.csv"))
+        )
     return os.path.isfile(
         os.path.join(epoch_dir, split, "eval", "all_cls_summary.csv")
     )
+
+
+def _is_vt_tiny_dataset(dataset_name: str) -> bool:
+    return dataset_name in ("vt_tiny_mot", "VT-Tiny-MOT")
 
 
 def _has_tracker_outputs(split_dir: str) -> bool:
@@ -61,7 +74,7 @@ def _load_submit_dirs_from_config(config_path: str) -> tuple[str, str]:
     return resolve_submit_checkpoint_and_output(cfg)
 
 
-def _run_hsmot_eval_for_epoch(
+def _run_eval_for_epoch(
     *,
     memotr: str,
     checkpoint_dir: str,
@@ -69,12 +82,14 @@ def _run_hsmot_eval_for_epoch(
     split_dir: str,
     data_root: str,
     split: str,
+    submit_cfg: dict,
 ) -> None:
     if memotr not in sys.path:
         sys.path.insert(0, memotr)
     from log.logger import Logger
     from submit_engine import (
         _run_hsmot_trackeval,
+        _run_post_submit_eval,
         resolve_submit_dataset_root,
         resolve_submit_split_dir,
     )
@@ -84,6 +99,7 @@ def _run_hsmot_eval_for_epoch(
     dataset_name = train_config["DATASET"]
     dataset_version = train_config.get("DATASET_VERSION")
     dataset_type = train_config.get("DATASET_TYPE", None)
+    dataset_dir = train_config.get("DATASET_DIR", "VT-Tiny-MOT")
 
     data_split_dir = resolve_submit_split_dir(
         data_root=data_root,
@@ -91,7 +107,7 @@ def _run_hsmot_eval_for_epoch(
         dataset_split=split,
         dataset_version=dataset_version,
         dataset_type=dataset_type,
-        dataset_dir=train_config.get("DATASET_DIR", "VT-Tiny-MOT"),
+        dataset_dir=dataset_dir,
     )
     dataset_root = resolve_submit_dataset_root(
         data_root=data_root,
@@ -99,23 +115,47 @@ def _run_hsmot_eval_for_epoch(
         dataset_split=split,
         dataset_version=dataset_version,
         dataset_type=dataset_type,
-        dataset_dir=train_config.get("DATASET_DIR", "VT-Tiny-MOT"),
+        dataset_dir=dataset_dir,
     )
 
     submit_logger = Logger(logdir=split_dir, only_main=True)
     submit_logger.show(head="GMC re-eval TrackEval", log=f"epoch_dir={epoch_dir}")
-    _run_hsmot_trackeval(
-        dataset_root=dataset_root,
-        dataset_split=split,
-        dataset_type=dataset_type,
-        tracker_dir=epoch_dir,
-        trackers_name=split,
-        trackers_subfolder="tracker",
-    )
-    submit_logger.show(
-        head="GMC re-eval done",
-        log=os.path.join(split_dir, "eval", "all_cls_summary.csv"),
-    )
+
+    if _is_vt_tiny_dataset(dataset_name):
+        merged = dict(train_config)
+        merged.update(submit_cfg)
+        merged["DATA_ROOT"] = data_root
+        merged["SUBMIT_DATA_SPLIT"] = split
+        _run_post_submit_eval(
+            config=merged,
+            dataset_name=dataset_name,
+            dataset_split=split,
+            dataset_type=dataset_type,
+            dataset_root=dataset_root,
+            data_split_dir=data_split_dir,
+            tracker_dir=epoch_dir,
+            trackers_name=split,
+            trackers_subfolder="tracker",
+            only_train_detr=bool(train_config.get("ONLY_TRAIN_DETR", False)),
+            submit_logger=submit_logger,
+        )
+        submit_logger.show(
+            head="GMC re-eval done (VT-Tiny)",
+            log=f"{split_dir}/eval_00, {split_dir}/eval_01",
+        )
+    else:
+        _run_hsmot_trackeval(
+            dataset_root=dataset_root,
+            dataset_split=split,
+            dataset_type=dataset_type,
+            tracker_dir=epoch_dir,
+            trackers_name=split,
+            trackers_subfolder="tracker",
+        )
+        submit_logger.show(
+            head="GMC re-eval done",
+            log=os.path.join(split_dir, "eval", "all_cls_summary.csv"),
+        )
 
 
 def main() -> int:
@@ -183,9 +223,11 @@ def main() -> int:
         output_dir = os.path.abspath(args.output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
-    from utils.utils import load_yaml_with_inheritance
+    from utils.utils import load_train_config, load_yaml_with_inheritance
 
     submit_cfg = load_yaml_with_inheritance(config_path)
+    train_config_for_done = load_train_config(os.path.join(checkpoint_dir, "train/config.yaml"))
+    dataset_name_for_done = train_config_for_done["DATASET"]
     if args.data_root is None:
         data_root = submit_cfg.get("DATA_ROOT")
         if data_root is None:
@@ -229,7 +271,9 @@ def main() -> int:
         epoch_dir = os.path.join(output_dir, f"epoch_{epoch}{epoch_tag}")
         split_dir = os.path.join(epoch_dir, args.split)
 
-        if args.skip_existing and not args.force and _ckpt_done(epoch_dir, args.split):
+        if args.skip_existing and not args.force and _ckpt_done(
+            epoch_dir, args.split, dataset_name_for_done
+        ):
             print(f"[skip] epoch_{epoch}{epoch_tag} already evaluated")
             continue
 
@@ -287,15 +331,19 @@ def main() -> int:
         if args.dry_run:
             continue
 
-        _run_hsmot_eval_for_epoch(
+        _run_eval_for_epoch(
             memotr=memotr,
             checkpoint_dir=checkpoint_dir,
             epoch_dir=epoch_dir,
             split_dir=split_dir,
             data_root=data_root,
             split=args.split,
+            submit_cfg=submit_cfg,
         )
-        print(f"[done] epoch_{epoch}{epoch_tag} -> {split_dir}/eval/all_cls_summary.csv")
+        if _is_vt_tiny_dataset(dataset_name_for_done):
+            print(f"[done] epoch_{epoch}{epoch_tag} -> {split_dir}/eval_00, eval_01")
+        else:
+            print(f"[done] epoch_{epoch}{epoch_tag} -> {split_dir}/eval/all_cls_summary.csv")
 
     if not args.dry_run:
         try:

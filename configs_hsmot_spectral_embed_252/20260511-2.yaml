@@ -1,10 +1,10 @@
-PROJECT: "20260511-2,继承20260511-1,单阶段训练"
+PROJECT: "20260511-2 @252，继承99同名配置，SPECTRAL_DATABASE_NUM=8，AMP=BF16，单阶段训练"
 
-AVAILABLE_GPUS: "0,1"
+AVAILABLE_GPUS: "0,1,2,3"
 
-PARENT_CONFIG: /data/users/litianhao01/hsmot/MeMOTR/configs_hsmot_spectral_embed_252/default.yaml
-OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-2-99
-SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-2-99
+PARENT_CONFIG: ./default.yaml
+OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-2-252-prototype8
+SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/20260511-2-252-prototype8
 
 
 #新增
@@ -37,6 +37,7 @@ TRANSFORMS_CONFIG:
 # EPOCHS: 18
 # SAMPLE_STEPS: [4, 8, 12]
 SAMPLE_LENGTHS: [2, 3, 4, 5]
+CLIP_BEGIN_STRIDE: [2, 2, 3, 4]
 # SAMPLE_MODES: [random_interval]
 # SAMPLE_INTERVALS: [3]
 
@@ -50,6 +51,10 @@ ONLY_TRAIN_DETR: False
 # DATASET_VERSION: OnePic
 NUM_WORKERS: 4
 DATASET_TYPE: 3JPG # NPY
+
+# AMP: set USE_AMP True to enable (see PARENT_CONFIG default.yaml for AMP_DTYPE)
+USE_AMP: True
+AMP_DTYPE: bf16   # bf16 | fp16
 
 # -------------模型配置-------------
 ENCODER_SPECTRAL: True
@@ -67,7 +72,7 @@ SCEM:
   USE_GT: False
   PRIOR_MODE: gate
   USE_SPECTRAL_PI: True
-  SPECTRAL_DATABASE_NUM: 32
+  SPECTRAL_DATABASE_NUM: 8
   SPECTRAL_TYPE: "pi"
   # 梯度路由：conservative | grad_scaled（见 model_20260511/SCEM.py）
   GRAD_MODE: conservative
@@ -105,6 +110,6 @@ EVALUATE_FORCE_EPOCHS: []
 
 
 
-# python main.py --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260511-2.yaml
+# python main.py --config-path /data/users/litianhao01/hsmot/MeMOTR/configs_hsmot_spectral_embed_252/20260511-2.yaml
 # 多卡
-# python -m torch.distributed.run --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/wangying01/lth/hsmot/MeMOTR/configs_hsmot_spectral_embed_99/20260511-2.yaml
+# python -m torch.distributed.run --nproc_per_node=4 --rdzv_backend=c10d --rdzv_endpoint=127.0.0.1:29501 main.py --use-distributed --config-path /data/users/litianhao01/hsmot/MeMOTR/configs_hsmot_spectral_embed_252/20260511-2.yaml

@@ -4,27 +4,20 @@
 规则（K=32 时默认前 16 / 后 16）：
   - prototype 0..15-1：大目标区域保持；小目标区域按 --wrong-region-mode 处理
   - prototype 16..K-1：小目标区域保持；大目标区域按 --wrong-region-mode 处理
-  - wrong-region-mode：invert（错尺度 ×-1 反向）、attenuate（×coef 削弱）、invert_attenuate（×-coef）
+  - 系数≠1 的像素（错尺度抑制/反向、对应尺度增强等）：仅对正值 ×w，负值与零不变
+  - wrong-region-mode：invert / attenuate / invert_attenuate 决定错尺度 w 的符号与大小
   - 非 GT 覆盖区域系数为 1
 
 大小目标：按当前帧 GT 框面积中位数划分（≥ 中位数为大，< 为小）。
 抑制范围：GT 热力图默认 k=6.5，evidence 上模糊 σ=1.2 再膨胀 4px（`--mask-k` / `--mask-blur` / `--mask-dilate`）。
 
-输出（每帧）：
-  - `<stem>__L0_mod/`：调制后热力图（默认与 raw **共用色标**，避免 per-proto p99 把抑制“拉满”看不出来）
-  - `<stem>__L0_raw/`：调制前对照（可选，`--no-save-raw` 关闭）
-  - `proto{k:03d}__delta.jpg`：|raw-mod| 差分图（`--no-save-diff` 关闭）
-  - `proto{k:03d}__heatmap_cbar.png`：热力图 + colorbar + 数值直方图（`--no-save-colorbar` 关闭）
-  - `<stem>__gt_masks/`：大/小目标 mask
+输出（每帧、每层 lvl，`--levels 0,1`）：
+  - `<stem>__L{lvl}_mod/`、`<stem>__L{lvl}_raw/`（raw 可用 `--no-save-raw` 关闭）
+  - `<stem>__L{lvl}__gt_masks/`：该层 evidence 分辨率上的大/小 mask
+  - 每层独立按 (H,W) 生成 GT mask 并调制 spectral_evidence
 
 示例：
-conda activate hsmot
-cd /data1/users/litianhao01/hsmot/MeMOTR
-CUDA_VISIBLE_DEVICES=0 \
-python debug/20260526/scem_proto_vis_gt_size.py \
-  --seq data30-10 \
-  --end-frames 5 \
-  --levels 0
+python debug/20260526/scem_proto_vis_gt_size.py --seq data --end-frames 5 --levels 0,1
 """
 
 from __future__ import annotations
@@ -150,6 +143,15 @@ def _blur_soft_mask(mask: np.ndarray, sigma: float) -> np.ndarray:
     return cv2.GaussianBlur(mask.astype(np.float32), (ksize, ksize), sigma)
 
 
+def _normalize_mask_max_one(mask: np.ndarray) -> np.ndarray:
+    """非负 mask 按峰值缩放到 max=1；空图保持全 0。"""
+    out = np.clip(mask.astype(np.float32), 0.0, None)
+    peak = float(out.max())
+    if peak > 0.0:
+        out /= peak
+    return out
+
+
 def _heatmap_from_boxes(
     boxes_xyxyxyxy: np.ndarray,
     img_hw: Tuple[int, int],
@@ -193,8 +195,8 @@ def build_large_small_masks(
     m_small = _blur_soft_mask(m_small, mask_blur)
     m_large = _dilate_soft_mask(m_large, mask_dilate)
     m_small = _dilate_soft_mask(m_small, mask_dilate)
-    m_large = np.clip(m_large, 0.0, 1.0)
-    m_small = np.clip(m_small, 0.0, 1.0)
+    m_large = _normalize_mask_max_one(m_large)
+    m_small = _normalize_mask_max_one(m_small)
     return m_large, m_small
 
 
@@ -211,9 +213,8 @@ def prototype_size_modulation_map(
     返回 [H,W] 逐像素调制系数（与 evidence 相乘）。
 
     wrong_region_mode:
-      - invert: 错尺度区域 ×-1（符号反向），对应尺度 ×1
-      - attenuate: 错尺度 ×small_coef / large_coef（仅削弱）
-      - invert_attenuate: 错尺度 ×-small_coef / -large_coef（反向且削弱）
+      - invert / attenuate / invert_attenuate：错尺度 w 见下；evidence 侧统一为 w≠1 时仅正值 ×w
+      - 对应尺度可用 w>1 增强（如 m_small×3）；增强同样只作用于正值
     """
     mode = wrong_region_mode.strip().lower()
     bg = (1.0 - np.clip(m_large + m_small, 0.0, 1.0)).astype(np.float32)
@@ -229,12 +230,32 @@ def prototype_size_modulation_map(
             f"wrong_region_mode must be invert|attenuate|invert_attenuate, got {wrong_region_mode!r}"
         )
 
-    if k < k_split:
-        return (m_large * 1.0 + m_small * wrong_small + bg * 1.0).astype(np.float32)
-    return (m_small * 1.0 + m_large * wrong_large + bg * 1.0).astype(np.float32)
+
+    #临时修改
+    if k > k_split:
+        return (m_large * 2.0 + m_small * wrong_small + bg * 1.0).astype(np.float32)
+    return (m_small * 3.0 + m_large * wrong_large + bg * 1.0).astype(np.float32)
+    # if k < k_split:
+    #     return (m_large * 2.0 + m_small * wrong_small + bg * 1.0).astype(np.float32)
+    # return (m_small * 1.0 + m_large * wrong_large + bg * 1.0).astype(np.float32)
 
 
 prototype_size_weights = prototype_size_modulation_map
+
+
+def _apply_evidence_size_modulation(
+    evi: torch.Tensor,
+    w_map: torch.Tensor,
+    _wrong_region_mode: str,
+) -> torch.Tensor:
+    """w≠1 的像素仅调制正值（增强/削弱/反向）；w=1 与负值、零保持原 evidence。"""
+    non_unit = torch.abs(w_map - 1.0) > 1e-6
+    pos = evi > 0
+    return torch.where(
+        non_unit & pos,
+        evi * w_map,
+        torch.where(non_unit, evi, evi * w_map),
+    )
 
 
 def modulate_spectral_evidence(
@@ -254,7 +275,7 @@ def modulate_spectral_evidence(
             m_large, m_small, k, k_split, wrong_region_mode, small_coef, large_coef
         )
         w_t = torch.from_numpy(w_map).to(device=spectral_evi.device, dtype=spectral_evi.dtype)
-        out[k] = out[k] * w_t
+        out[k] = _apply_evidence_size_modulation(out[k], w_t, wrong_region_mode)
     return out
 
 
@@ -442,7 +463,8 @@ def _save_proto_level_maps(
             w_arr = weight_maps[k]
             w_norm = np.clip((w_arr + 1.0) * 0.5, 0.0, 1.0)
             w_gray = (w_norm * 255).astype(np.uint8)
-            w_color = cv2.applyColorMap(w_gray, cv2.COLORMAP_COOLWARM)
+            w_lut = spv._get_cmap_lut_bgr("coolwarm")
+            w_color = w_lut[w_gray]
             w_path = os.path.join(lvl_dir, f"proto{k:03d}__weight.jpg")
             cv2.imwrite(w_path, spv._resize_max_side(w_color, vis_max_size))
             lvl_files["weight"].append(w_path)
@@ -485,6 +507,7 @@ def save_gt_size_proto_maps(
     pad_w: int,
     m_large: np.ndarray,
     m_small: np.ndarray,
+    level: int,
     overlay_alpha: float,
     vis_max_size: int,
     grid_cols: int,
@@ -498,14 +521,16 @@ def save_gt_size_proto_maps(
     norm_mode: str = "shared_raw",
     save_diff: bool = True,
     save_colorbar: bool = True,
+    write_rgb: bool = False,
 ) -> Dict[str, Any]:
     rgb = spv._ori_to_vis_rgb(ori_image)
     eff_h, eff_w = rgb.shape[:2]
     os.makedirs(out_dir, exist_ok=True)
 
     rgb_path = os.path.join(out_dir, f"{frame_stem}__rgb.jpg")
-    rgb_out = spv._resize_max_side(rgb, vis_max_size)
-    cv2.imwrite(rgb_path, cv2.cvtColor(rgb_out, cv2.COLOR_RGB2BGR))
+    if write_rgb:
+        rgb_out = spv._resize_max_side(rgb, vis_max_size)
+        cv2.imwrite(rgb_path, cv2.cvtColor(rgb_out, cv2.COLOR_RGB2BGR))
 
     k_num = int(spectral_evi_mod.shape[0])
     _, _, raw_arrs, raw_valids, _, _ = _prepare_proto_effective_maps(
@@ -522,15 +547,16 @@ def save_gt_size_proto_maps(
         weight_maps.append(w_eff)
 
     meta: Dict[str, Any] = {
-        "rgb": rgb_path,
+        "level": level,
+        "rgb": rgb_path if write_rgb else None,
+        "spatial_hw": [int(spectral_evi_mod.shape[-2]), int(spectral_evi_mod.shape[-1])],
         "num_prototypes": k_num,
         "wrong_region_mode": wrong_region_mode,
         "norm_mode_mod": norm_mode,
-        "levels": {},
     }
 
     if save_raw:
-        raw_dir_name = f"{frame_stem}__L0_raw"
+        raw_dir_name = f"{frame_stem}__L{level}_raw"
         raw_level = _save_proto_level_maps(
             spectral_evi_raw,
             ori_image,
@@ -550,11 +576,10 @@ def save_gt_size_proto_maps(
             save_colorbar=save_colorbar,
         )
         meta["raw"] = raw_level
-        meta["levels"]["0_raw"] = raw_level
 
     mod_ranges = raw_ranges if norm_mode == "shared_raw" else None
     mod_norm_label = "shared_raw" if norm_mode == "shared_raw" else "per_prototype"
-    mod_dir_name = f"{frame_stem}__L0_mod"
+    mod_dir_name = f"{frame_stem}__L{level}_mod"
     mod_level = _save_proto_level_maps(
         spectral_evi_mod,
         ori_image,
@@ -576,12 +601,11 @@ def save_gt_size_proto_maps(
         save_colorbar=save_colorbar,
     )
     meta["modulated"] = mod_level
-    meta["levels"]["0_mod"] = mod_level
 
     m_large_eff = spv._align_map_to_effective(m_large, eff_h, eff_w, pad_h, pad_w)
     m_small_eff = spv._align_map_to_effective(m_small, eff_h, eff_w, pad_h, pad_w)
 
-    mask_dir = os.path.join(out_dir, f"{frame_stem}__gt_masks")
+    mask_dir = os.path.join(out_dir, f"{frame_stem}__L{level}__gt_masks")
     os.makedirs(mask_dir, exist_ok=True)
     for name, arr in (("large", m_large_eff), ("small", m_small_eff)):
         gray = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
@@ -624,10 +648,16 @@ def save_gt_size_proto_maps(
     meta["k_split"] = k_split
     n_cbar = len(mod_level["files"].get("heatmap_cbar", []))
     print(
-        f"[Info] modulated per-proto maps: {mod_lvl_dir} "
+        f"[Info] L{level} modulated: {mod_lvl_dir} "
         f"({len(mod_level['files']['heatmap'])} heatmaps, {n_cbar} colorbar panels)"
     )
     return meta
+
+
+def _parse_levels(raw: Optional[str]) -> List[int]:
+    if raw is None or not raw.strip():
+        return [0]
+    return [int(x.strip()) for x in raw.split(",") if x.strip()]
 
 
 def run_seq_gt_size_vis(
@@ -657,6 +687,7 @@ def run_seq_gt_size_vis(
     save_diff: bool = True,
     save_colorbar: bool = True,
     wrong_region_mode: str = "invert",
+    levels: Optional[List[int]] = None,
 ) -> List[Dict[str, Any]]:
     device = next(model.parameters()).device
     dataset = SeqDataset(seq_dir=seq_dir, npy2rgb=npy2rgb, dataset_type=dataset_type)
@@ -696,82 +727,106 @@ def run_seq_gt_size_vis(
             spec_levels = token_debug.get("spectral_evidence_multilevel", [])
             if not spec_levels:
                 raise RuntimeError("No spectral_evidence_multilevel in debug.")
-            spec_evi = spec_levels[0][0].detach()  # [K,H,W]
 
             pad_h, pad_w = int(frame.tensors.shape[-2]), int(frame.tensors.shape[-1])
-            h_se, w_se = int(spec_evi.shape[-2]), int(spec_evi.shape[-1])
-
             boxes = gt_by_frame.get(idx, np.zeros((0, 8), dtype=np.float32))
             large_boxes, small_boxes, area_thr = split_boxes_by_area(boxes, area_percentile)
-            m_large, m_small = build_large_small_masks(
-                pad_h,
-                pad_w,
-                large_boxes,
-                small_boxes,
-                (h_se, w_se),
-                device,
-                heatmap_k=heatmap_k,
-                mask_dilate=mask_dilate,
-                mask_blur=mask_blur,
-            )
 
-            k_num = int(spec_evi.shape[0])
-            k_split_eff = min(k_split, k_num)
-            spec_mod = modulate_spectral_evidence(
-                spec_evi,
-                m_large,
-                m_small,
-                k_split_eff,
-                wrong_region_mode,
-                small_coef,
-                large_coef,
-            )
-
+            level_indices = levels if levels is not None else [0]
             frame_stem = f"{seq}__frame{frame_num:06d}"
             frame_dir = os.path.join(out_dir, frame_stem)
             os.makedirs(frame_dir, exist_ok=True)
 
-            meta = save_gt_size_proto_maps(
-                spectral_evi_raw=spec_evi,
-                spectral_evi_mod=spec_mod,
-                ori_image=ori_image,
-                out_dir=frame_dir,
-                frame_stem=frame_stem,
-                frame_pad_mask=frame.masks[0],
-                pad_h=pad_h,
-                pad_w=pad_w,
-                m_large=m_large,
-                m_small=m_small,
-                overlay_alpha=overlay_alpha,
-                vis_max_size=vis_max_size,
-                grid_cols=grid_cols,
-                cmap_mode=cmap_mode,
-                percentile=percentile,
-                k_split=k_split_eff,
-                small_coef=small_coef,
-                large_coef=large_coef,
-                wrong_region_mode=wrong_region_mode,
-                save_raw=save_raw,
-                norm_mode=norm_mode,
-                save_diff=save_diff,
-                save_colorbar=save_colorbar,
-            )
-            meta.update(
-                {
-                    "frame": frame_num,
-                    "n_gt": int(len(boxes)),
-                    "n_large": int(len(large_boxes)),
-                    "n_small": int(len(small_boxes)),
-                    "area_threshold": area_thr,
-                    "wrong_region_mode": wrong_region_mode,
-                    "small_coef": small_coef,
-                    "large_coef": large_coef,
-                }
-            )
-            results.append(meta)
+            frame_meta: Dict[str, Any] = {
+                "frame": frame_num,
+                "n_gt": int(len(boxes)),
+                "n_large": int(len(large_boxes)),
+                "n_small": int(len(small_boxes)),
+                "area_threshold": area_thr,
+                "wrong_region_mode": wrong_region_mode,
+                "small_coef": small_coef,
+                "large_coef": large_coef,
+                "levels": {},
+            }
+            wrote_rgb = False
+
+            for lvl in level_indices:
+                if lvl < 0 or lvl >= len(spec_levels):
+                    print(f"[Warn] frame {frame_num}: skip level {lvl} (num_levels={len(spec_levels)})")
+                    continue
+                spec_lvl = spec_levels[lvl]
+                if not torch.is_tensor(spec_lvl) or spec_lvl.dim() != 4:
+                    print(f"[Warn] frame {frame_num}: skip level {lvl}: bad shape {type(spec_lvl)}")
+                    continue
+
+                spec_evi = spec_lvl[0].detach()  # [K,H,W]
+                h_se, w_se = int(spec_evi.shape[-2]), int(spec_evi.shape[-1])
+                m_large, m_small = build_large_small_masks(
+                    pad_h,
+                    pad_w,
+                    large_boxes,
+                    small_boxes,
+                    (h_se, w_se),
+                    device,
+                    heatmap_k=heatmap_k,
+                    mask_dilate=mask_dilate,
+                    mask_blur=mask_blur,
+                )
+
+                k_num = int(spec_evi.shape[0])
+                k_split_eff = min(k_split, k_num)
+                spec_mod = modulate_spectral_evidence(
+                    spec_evi,
+                    m_large,
+                    m_small,
+                    k_split_eff,
+                    wrong_region_mode,
+                    small_coef,
+                    large_coef,
+                )
+
+                lvl_meta = save_gt_size_proto_maps(
+                    spectral_evi_raw=spec_evi,
+                    spectral_evi_mod=spec_mod,
+                    ori_image=ori_image,
+                    out_dir=frame_dir,
+                    frame_stem=frame_stem,
+                    frame_pad_mask=frame.masks[0],
+                    pad_h=pad_h,
+                    pad_w=pad_w,
+                    m_large=m_large,
+                    m_small=m_small,
+                    level=lvl,
+                    overlay_alpha=overlay_alpha,
+                    vis_max_size=vis_max_size,
+                    grid_cols=grid_cols,
+                    cmap_mode=cmap_mode,
+                    percentile=percentile,
+                    k_split=k_split_eff,
+                    small_coef=small_coef,
+                    large_coef=large_coef,
+                    wrong_region_mode=wrong_region_mode,
+                    save_raw=save_raw,
+                    norm_mode=norm_mode,
+                    save_diff=save_diff,
+                    save_colorbar=save_colorbar,
+                    write_rgb=not wrote_rgb,
+                )
+                wrote_rgb = wrote_rgb or bool(lvl_meta.get("rgb"))
+                frame_meta["levels"][str(lvl)] = lvl_meta
+                print(
+                    f"[Info] frame {frame_num} L{lvl}: hw=({h_se},{w_se}), "
+                    f"gt L/S={len(large_boxes)}/{len(small_boxes)}, area_thr={area_thr:.1f}"
+                )
+
+            if not frame_meta["levels"]:
+                raise RuntimeError(
+                    f"frame {frame_num}: no valid levels in {level_indices} "
+                    f"(spectral_evidence_multilevel has {len(spec_levels)} levels)"
+                )
+            results.append(frame_meta)
             print(
-                f"[Info] frame {frame_num}: gt L/S={len(large_boxes)}/{len(small_boxes)}, "
-                f"area_thr={area_thr:.1f}"
+                f"[Info] frame {frame_num}: saved levels {sorted(frame_meta['levels'].keys())}"
             )
             del res, frame, image
 
@@ -802,7 +857,12 @@ def main() -> None:
     parser.add_argument("--npy2rgb", action="store_true")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--levels", type=str, default="0", help="目前仅使用 L0 evidence。")
+    parser.add_argument(
+        "--levels",
+        type=str,
+        default="0",
+        help="SCEM 层索引，逗号分隔，如 0,1；默认 0。每层独立 GT mask 与调制输出。",
+    )
     parser.add_argument("--k-split", type=int, default=16, help="前 k 个大目标组 prototype 数。")
     parser.add_argument(
         "--small-coef",
@@ -821,7 +881,7 @@ def main() -> None:
         type=str,
         default="invert",
         choices=["invert", "attenuate", "invert_attenuate"],
-        help="错尺度区域：invert=×-1 反向；attenuate=×coef 削弱；invert_attenuate=×-coef。",
+        help="错尺度 w：invert/attenuate/invert_attenuate；evidence 上 w≠1 时均仅正值×w。",
     )
     parser.add_argument(
         "--area-percentile",
@@ -837,7 +897,7 @@ def main() -> None:
     parser.add_argument(
         "--no-save-raw",
         action="store_true",
-        help="不保存调制前对照图（默认会写 __L0_raw/）。",
+        help="不保存调制前对照图（默认会写 __L{lvl}_raw/）。",
     )
     parser.add_argument(
         "--mask-k",
@@ -875,9 +935,7 @@ def main() -> None:
         help="不保存带 colorbar/直方图的热力图 proto*k*__heatmap_cbar.png。",
     )
     args = parser.parse_args()
-
-    if args.levels.strip() != "0":
-        print("[Warn] 当前实现仅调制/visualize L0 spectral_evidence；--levels 忽略非 0。")
+    level_indices = _parse_levels(args.levels)
 
     train_cfg_path = _resolve_train_config_path(args.train_config)
     train_config = load_yaml_with_inheritance(path=train_cfg_path)
@@ -908,7 +966,8 @@ def main() -> None:
     k_total = int(getattr(inner.scem_module, "spectral_database_num", 32))
     k_split = min(args.k_split, k_total)
     print(
-        f"[Info] K={k_total}, k_split={k_split}, wrong_mode={args.wrong_region_mode}, "
+        f"[Info] levels={level_indices}, K={k_total}, k_split={k_split}, "
+        f"wrong_mode={args.wrong_region_mode}, "
         f"small_coef={args.small_coef}, large_coef={args.large_coef}, "
         f"area_p={args.area_percentile}, mask_k={args.mask_k}, "
         f"mask_blur={args.mask_blur}, mask_dilate={args.mask_dilate}"
@@ -916,6 +975,7 @@ def main() -> None:
 
     all_summary: Dict[str, Any] = {
         "modulation": "gt_size_split",
+        "levels": level_indices,
         "k_split": k_split,
         "wrong_region_mode": args.wrong_region_mode,
         "small_coef": args.small_coef,
@@ -964,6 +1024,7 @@ def main() -> None:
             norm_mode=args.norm_mode,
             save_diff=not args.no_save_diff,
             save_colorbar=not args.no_save_colorbar,
+            levels=level_indices,
         )
         all_summary["per_seq"].append({"seq": seq, "label": label_path, "frames": results})
 

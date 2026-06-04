@@ -5,4 +5,4 @@ OUTPUTS_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug252
 SUBMIT_DIR: /data4/litianhao/hsmot/memotr/spectralemb/debug252
 
 DATA_ROOT: /data/users/litianhao01/hsmot/data
-PRETRAINED_MODEL: /data/users/litianhao01/data/dab_deformable_detr_convhsi.pth
+PRETRAINED_MODEL: /data/users/litianhao01/hsmot/data/hsmot/dab_deformable_detr_convhsi.pth
